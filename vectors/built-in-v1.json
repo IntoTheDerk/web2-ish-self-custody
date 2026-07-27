@@ -1,0 +1,27 @@
+{
+  "warning": "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET.",
+  "passwordUtf8": "correct horse battery staple lantern orbit",
+  "democracyOsV2": {
+    "profile": "democracyos-scrypt-sha512-secp256k1-v2",
+    "username": "Jesse@example.com",
+    "normalizedUsername": "jesse@example.com",
+    "saltHex": "6f6c4bbbd5a979f8f8e2af96c6fef78d7705bd51d63251361077bb1a02e28d0d",
+    "challenge": "fixture-login-challenge-v1",
+    "challengeDigestHex": "49f8d505ec28030c0b9626c298ed48d585a1d852bede7cd94d488d115ecf8990",
+    "publicKeyHex": "021682f3a46159d2acba5c0e82b0df53c1d505ad93aaa0dd1c16e847751746353c",
+    "address": "zera:a07a45f0ebfd99031411d2df4cd4a351ced9373b",
+    "signatureHex": "1eaa50b10a3e67db08350c3923cd1cc836beb9cb6cad2175cb621ff2f625cd3f7711e93e5813abe2e1af39beccb36f706cbca68c1319da02e5b884b6ace090e8"
+  },
+  "zeraEd25519V1": {
+    "profile": "web2ish-zera-ed25519-v1",
+    "username": "JESSE@example.COM",
+    "normalizedUsername": "jesse@example.com",
+    "applicationId": "knight-armor",
+    "networkId": "zera-mainnet",
+    "messageUtf8": "fixture-governance-intent-v1",
+    "publicKeyHex": "be286995d02f50aa4e7563b21d1f402c9ba45aa6dbf8abaec772fd8855bc5724",
+    "publicKeyIdentifier": "A_DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX",
+    "address": "DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX",
+    "signatureHex": "6fd0c5a4dfbdf54f2d43714b0f7bbc329cc42052a05681511b4423c094265d674d1c25d370024e710919844e41157de1706e9d42b02489e05cd727a68efe2502"
+  }
+}

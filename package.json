@@ -1,0 +1,59 @@
+{
+  "name": "web2-ish-self-custody",
+  "version": "0.1.0",
+  "description": "Versioned, browser-first deterministic wallet derivation for Web2-style username and password experiences.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git"
+  },
+  "homepage": "https://github.com/IntoTheDerk/web2-ish-self-custody#readme",
+  "bugs": {
+    "url": "https://github.com/IntoTheDerk/web2-ish-self-custody/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "vectors",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepare": "npm run build",
+    "prepack": "npm run verify",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": [
+    "self-custody",
+    "wallet",
+    "deterministic",
+    "scrypt",
+    "ed25519",
+    "secp256k1",
+    "browser"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
+    "bs58": "6.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
