@@ -111,4 +111,11 @@ npm ci
 npm run verify
 ```
 
+`npm run verify` also executes independent Python reproductions of both
+committed profile vectors. Local development therefore requires Python 3.12 and
+`cryptography==46.0.3`; CI installs that verifier dependency and its transitive
+dependencies from exact, hash-pinned Linux wheels. See [the
+protocol](docs/PROTOCOL.md#independent-vector-verification) for the assurance
+boundary.
+
 The package is intentionally pre-1.0 and has not received an independent cryptographic audit.

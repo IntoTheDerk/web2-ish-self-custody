@@ -19,6 +19,7 @@
     "applicationId": "knight-armor",
     "networkId": "zera-mainnet",
     "messageUtf8": "fixture-governance-intent-v1",
+    "publicSaltHex": "bdd5abf02ffd09a5f88efd8e29a4c9b6706a4aba2a25799d622306568a2c495e",
     "publicKeyHex": "be286995d02f50aa4e7563b21d1f402c9ba45aa6dbf8abaec772fd8855bc5724",
     "publicKeyIdentifier": "A_DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX",
     "address": "DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX",
