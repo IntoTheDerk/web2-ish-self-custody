@@ -13,6 +13,7 @@ It exists to give products such as Knight Armor and DemocracyOS one versioned im
 - Clears SDK-owned password, entropy, salt, and seed buffers on completion.
 - Includes an exact DemocracyOS web-v2 compatibility profile.
 - Includes a stateless ZERA Ed25519 profile for new integrations.
+- Includes a context-bound ZERA Ed25519 profile for service-managed public salts.
 - Ships stable test vectors and immutable built-in KDF parameters.
 - Uses no network, filesystem, storage, telemetry, or Node-only runtime APIs.
 
@@ -69,6 +70,39 @@ try {
 
 The stateless profile derives its salt from the canonical username, application, and network. KA does not need to store any wallet secret or encrypted vault.
 
+## Database-held salt ZERA Ed25519 example
+
+Use the external-salt profile when each service stores its own stable public
+32-byte salt while retaining the same ZERA network identity format:
+
+```ts
+const proof = await withDerivedWallet(
+  {
+    profile: "web2ish-zera-ed25519-external-salt-v1",
+    username,
+    password,
+    salt: publicSaltFromKnownService,
+    context: {
+      applicationId: "knight-armor",
+      networkId: "zera-mainnet",
+    },
+  },
+  (wallet) => {
+    if (!("signExactMessageUnsafe" in wallet)) throw new Error("Unexpected wallet profile");
+    return {
+      identity: wallet.identity,
+      signature: wallet.signExactMessageUnsafe(exactTypedMessageBytes),
+    };
+  },
+);
+```
+
+The salt is public derivation metadata, not a password or custody secret. It
+must remain byte-for-byte stable for the lifetime of the wallet. Losing,
+rotating, or returning the wrong service salt derives a different wallet.
+Applications must pin the profile and validate the salt source rather than
+accepting arbitrary KDF parameters from a server.
+
 ## DemocracyOS web-v2 compatibility
 
 ```ts
@@ -101,6 +135,7 @@ Current profiles:
 
 - `democracyos-scrypt-sha512-secp256k1-v2`
 - `web2ish-zera-ed25519-v1`
+- `web2ish-zera-ed25519-external-salt-v1`
 
 See [the protocol](docs/PROTOCOL.md), [security model](docs/SECURITY_MODEL.md), and [integration guide](docs/INTEGRATION.md).
 
@@ -111,7 +146,7 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` also executes independent Python reproductions of both
+`npm run verify` also executes independent Python reproductions of all three
 committed profile vectors. Local development therefore requires Python 3.12 and
 `cryptography==46.0.3`; CI installs that verifier dependency and its transitive
 dependencies from exact, hash-pinned Linux wheels. See [the

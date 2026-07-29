@@ -18,4 +18,6 @@ export type {
   Secp256k1Identity,
   Secp256k1Wallet,
   ZeraEd25519Credentials,
+  ZeraEd25519ExternalSaltCredentials,
+  ZeraEd25519ProfileId,
 } from "./types.js";

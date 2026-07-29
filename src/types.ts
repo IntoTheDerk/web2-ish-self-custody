@@ -1,6 +1,10 @@
 export type BuiltInProfileId =
   | "democracyos-scrypt-sha512-secp256k1-v2"
-  | "web2ish-zera-ed25519-v1";
+  | ZeraEd25519ProfileId;
+
+export type ZeraEd25519ProfileId =
+  | "web2ish-zera-ed25519-v1"
+  | "web2ish-zera-ed25519-external-salt-v1";
 
 export type DerivationContext = Readonly<{
   applicationId: string;
@@ -28,12 +32,21 @@ export type ZeraEd25519Credentials = SharedDerivationCredentials &
     salt?: never;
   }>;
 
+export type ZeraEd25519ExternalSaltCredentials =
+  SharedDerivationCredentials &
+    Readonly<{
+      profile: "web2ish-zera-ed25519-external-salt-v1";
+      context: DerivationContext;
+      salt: Uint8Array;
+    }>;
+
 export type DerivationCredentials =
   | DemocracyOsCredentials
-  | ZeraEd25519Credentials;
+  | ZeraEd25519Credentials
+  | ZeraEd25519ExternalSaltCredentials;
 
 export type Ed25519Identity = Readonly<{
-  profileId: "web2ish-zera-ed25519-v1";
+  profileId: ZeraEd25519ProfileId;
   curve: "ed25519";
   normalizedUsername: string;
   address: string;

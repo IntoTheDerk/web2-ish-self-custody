@@ -18,12 +18,14 @@ The username is domain and identity context, not a secret. It must not be counte
 - Applications permit only one active derivation, terminate the worker for immediate cancellation, and do not await UI or network work inside the synchronous wallet callback.
 - The origin, browser, extensions, and operating system are trusted while the password is entered and the wallet is active.
 - Servers treat salts as public metadata.
+- Services store external salts as immutable public wallet metadata and return them only under the expected pinned profile and derivation context.
 
 ## Failure modes
 
 - Forgotten password or username: permanent wallet loss.
 - Password or username change: different wallet identity.
 - Profile/context change: different wallet identity.
+- External salt loss, rotation, or substitution: different wallet identity.
 - Weak password: feasible offline wallet recovery by an attacker.
 - Malicious same-origin JavaScript: password or signature theft before SDK cleanup.
 - Retained callback references: public data remains available; a malicious caller can copy data it is given.

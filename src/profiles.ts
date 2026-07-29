@@ -22,6 +22,16 @@ const profiles: Readonly<Record<BuiltInProfileId, ProfileDescription>> = Object.
     p: 1,
     dkLen: 32,
   }),
+  "web2ish-zera-ed25519-external-salt-v1": Object.freeze({
+    id: "web2ish-zera-ed25519-external-salt-v1",
+    curve: "ed25519",
+    algorithm: "scrypt-sha512-ed25519-external-32-v1",
+    saltPolicy: "external-32-v1",
+    N: 65_536,
+    r: 8,
+    p: 1,
+    dkLen: 32,
+  }),
 });
 
 export function getProfile(id: BuiltInProfileId): ProfileDescription {

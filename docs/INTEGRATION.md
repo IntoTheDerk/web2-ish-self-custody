@@ -13,6 +13,14 @@ Use `web2ish-zera-ed25519-v1` as an explicitly selected deterministic-custody mo
 
 Do not replace Knight Armor’s random-seed vault without an explicit product decision. The deterministic mode has different recovery and password-guessing properties.
 
+To give Knight Armor and DemocracyOS the same Ed25519/network behavior while
+keeping independently administered service salts, select
+`web2ish-zera-ed25519-external-salt-v1` in both services. Each service must
+persist its own exact 32-byte public salt in its Postgres-compatible database
+and provide the fixed service-specific `applicationId`. Use the same
+`networkId` for the same ZERA network. The differing salt and application ID
+intentionally produce different wallets even for identical credentials.
+
 ## DemocracyOS web
 
 Adopt `democracyos-scrypt-sha512-secp256k1-v2` first:
@@ -24,6 +32,11 @@ Adopt `democracyos-scrypt-sha512-secp256k1-v2` first:
 5. Delete the old implementation only after side-by-side compatibility passes.
 
 The DemocracyOS mobile prototype uses a different v1 protocol. Do not silently map it to the web-v2 profile.
+
+Moving DemocracyOS to `web2ish-zera-ed25519-external-salt-v1` is a wallet
+migration, not a compatible profile update. Existing web-v2 users retain their
+secp256k1 identities unless the product explicitly enrolls them in the new
+Ed25519 profile and records the resulting public identity.
 
 ## Updating the shared dependency
 

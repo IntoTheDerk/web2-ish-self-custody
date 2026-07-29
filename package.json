@@ -23,6 +23,7 @@
     "docs",
     "scripts/requirements-vector-verifier-ci.txt",
     "scripts/verify_zera_vector.py",
+    "scripts/verify_zera_external_salt_vector.py",
     "vectors",
     "README.md",
     "SECURITY.md",
@@ -32,7 +33,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "verify:vectors:python": "python3 scripts/verify_zera_vector.py",
+    "verify:vectors:python": "python3 scripts/verify_zera_vector.py && python3 scripts/verify_zera_external_salt_vector.py",
     "prepare": "npm run build",
     "prepack": "npm run verify",
     "verify": "npm run typecheck && npm test && npm run verify:vectors:python && npm run build"

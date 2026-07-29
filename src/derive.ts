@@ -20,6 +20,7 @@ import type {
   Ed25519Identity,
   Secp256k1Identity,
   ZeraEd25519Credentials,
+  ZeraEd25519ExternalSaltCredentials,
 } from "./types.js";
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -208,6 +209,65 @@ async function deriveWeb2ishEd25519(
   }
 }
 
+async function deriveWeb2ishExternalSaltEd25519(
+  credentials: ZeraEd25519ExternalSaltCredentials,
+): Promise<{ seed: Uint8Array; identity: Ed25519Identity }> {
+  assertWalletPassword(credentials.password, 24);
+  const normalizedUsername = normalizeWeb2ishUsername(credentials.username);
+  const context = canonicalizeContext(credentials.context);
+  const password = Uint8Array.from(credentials.password);
+  const salt = exactExternalSalt(credentials.salt);
+  let passwordEntropyHash: Uint8Array | undefined;
+  let walletEntropy: Uint8Array | undefined;
+  let seed: Uint8Array | undefined;
+
+  try {
+    passwordEntropyHash = sha512(
+      concatBytes(
+        utf8("web2-ish-self-custody password hash v1\n"),
+        password,
+      ),
+    );
+    walletEntropy = sha512(
+      utf8(
+        [
+          "web2-ish-self-custody ZERA Ed25519 external salt entropy v1",
+          context.applicationId,
+          context.networkId,
+          normalizedUsername,
+          bytesToHex(passwordEntropyHash),
+        ].join("\n"),
+      ),
+    );
+    seed = await runScrypt(walletEntropy, salt, credentials);
+    throwIfAborted(credentials.signal);
+    const publicKeyBytes = ed25519.getPublicKey(seed);
+    const address = bs58.encode(publicKeyBytes);
+    const publicKey = `A_${address}`;
+
+    return {
+      seed,
+      identity: Object.freeze({
+        profileId: "web2ish-zera-ed25519-external-salt-v1",
+        curve: "ed25519",
+        normalizedUsername,
+        address,
+        publicKey,
+        publicKeyBytes: Uint8Array.from(publicKeyBytes),
+        fingerprint: fingerprint(address),
+      }),
+    };
+  } catch (error) {
+    seed?.fill(0);
+    throw error;
+  } finally {
+    password.fill(0);
+    salt.fill(0);
+    passwordEntropyHash?.fill(0);
+    walletEntropy?.fill(0);
+  }
+}
+
 export async function withDerivedWallet<T>(
   credentials: DerivationCredentials,
   useWallet: (wallet: DerivedWallet) => T,
@@ -221,6 +281,8 @@ export async function withDerivedWallet<T>(
       ? await deriveDemocracyOs(credentials)
       : credentials.profile === "web2ish-zera-ed25519-v1"
         ? await deriveWeb2ishEd25519(credentials)
+        : credentials.profile === "web2ish-zera-ed25519-external-salt-v1"
+          ? await deriveWeb2ishExternalSaltEd25519(credentials)
         : (() => {
             throw new DerivationError("Unknown deterministic wallet profile.", "invalid-profile");
           })();
