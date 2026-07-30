@@ -11,6 +11,11 @@ export type ZeraEd25519DirectSeedIdentity = Readonly<{
   publicKey: string;
 }>;
 
+const typedArrayTagGetter = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  Symbol.toStringTag,
+)?.get;
+
 /**
  * Derives only the public ZERA identity for an existing 32-byte Ed25519 seed.
  *
@@ -23,7 +28,7 @@ export function deriveZeraEd25519IdentityFromSeed(
 ): ZeraEd25519DirectSeedIdentity {
   if (
     !ArrayBuffer.isView(seed) ||
-    Object.prototype.toString.call(seed) !== "[object Uint8Array]" ||
+    typedArrayTagGetter?.call(seed) !== "Uint8Array" ||
     seed.byteLength !== 32
   ) {
     throw new TypeError("A ZERA Ed25519 seed must contain exactly 32 bytes.");

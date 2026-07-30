@@ -70,5 +70,27 @@ describe("direct-seed ZERA Ed25519 identity", () => {
         [Symbol.toStringTag]: "Uint8Array",
       } as unknown as Uint8Array),
     ).toThrow(/exactly 32 bytes/u);
+    const spoofedView = new DataView(new ArrayBuffer(32)) as DataView & {
+      length: number;
+      [Symbol.toStringTag]: string;
+    };
+    Object.defineProperties(spoofedView, {
+      length: { value: 32 },
+      [Symbol.toStringTag]: { value: "Uint8Array" },
+    });
+    expect(() =>
+      deriveZeraEd25519IdentityFromSeed(
+        spoofedView as unknown as Uint8Array,
+      ),
+    ).toThrow(/exactly 32 bytes/u);
+    const spoofedClamped = new Uint8ClampedArray(32);
+    Object.defineProperty(spoofedClamped, Symbol.toStringTag, {
+      value: "Uint8Array",
+    });
+    expect(() =>
+      deriveZeraEd25519IdentityFromSeed(
+        spoofedClamped as unknown as Uint8Array,
+      ),
+    ).toThrow(/exactly 32 bytes/u);
   });
 });
