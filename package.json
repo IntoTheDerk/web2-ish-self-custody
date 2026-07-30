@@ -1,7 +1,7 @@
 {
   "name": "web2-ish-self-custody",
-  "version": "0.1.0",
-  "description": "Versioned, browser-first deterministic wallet derivation for Web2-style username and password experiences.",
+  "version": "0.2.0",
+  "description": "Versioned browser-first wallet derivation and scoped ZERA Ed25519 key utilities.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git"
@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./zera-ed25519": {
+      "types": "./dist/zera-ed25519.d.ts",
+      "import": "./dist/zera-ed25519.js"
     }
   },
   "files": [

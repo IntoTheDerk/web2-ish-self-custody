@@ -4,6 +4,18 @@
 
 This package is an unaudited pre-1.0 implementation. Do not represent it as audited or production-qualified.
 
+## Direct-seed ZERA identity helper
+
+`web2-ish-self-custody/zera-ed25519` accepts an existing 32-byte seed only long
+enough to derive its public Ed25519 identity. It copies and clears its
+SDK-owned seed buffer and does not mutate the caller's buffer. It intentionally
+does not generate, persist, encrypt, recover, or sign with private material.
+
+Using this helper does not make browser storage secure. The consuming
+application must keep random generation, authenticated encryption, KDF
+isolation, origin binding, recovery, persistence checks, and lifecycle
+invalidation inside its own reviewed custody boundary.
+
 ## Reporting
 
 Do not open a public issue for a suspected vulnerability. Contact the repository owner privately through their GitHub profile until a dedicated security contact is published.

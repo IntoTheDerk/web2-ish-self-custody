@@ -6,6 +6,12 @@ A small browser-first TypeScript SDK for recreating the same signing identity fr
 
 It exists to give products such as Knight Armor and DemocracyOS one versioned implementation instead of maintaining independent cryptographic copies.
 
+The additive `web2-ish-self-custody/zera-ed25519` entry point can also derive a
+public ZERA identity from an application-owned random 32-byte Ed25519 seed. It
+does not derive that seed from Web2 credentials and does not store, encrypt,
+recover, or sign with it. Applications remain responsible for generating the
+seed securely and keeping it inside a separately reviewed encrypted vault.
+
 ## What it does
 
 - Derives a wallet only inside a callback scope.
@@ -16,6 +22,8 @@ It exists to give products such as Knight Armor and DemocracyOS one versioned im
 - Includes a context-bound ZERA Ed25519 profile for service-managed public salts.
 - Ships stable test vectors and immutable built-in KDF parameters.
 - Uses no network, filesystem, storage, telemetry, or Node-only runtime APIs.
+- Derives the standard ZERA Ed25519 public identity from an existing random seed
+  through a separate, storage-agnostic entry point.
 
 ## What it does not do
 
@@ -25,6 +33,26 @@ It exists to give products such as Knight Armor and DemocracyOS one versioned im
 - Protect against malicious same-origin JavaScript, browser extensions, a compromised browser, or a compromised operating system.
 - Store sessions, challenges, wallets, or account records.
 - Build or submit transactions.
+- Generate, encrypt, persist, or recover random-seed vaults.
+
+## Random-seed ZERA public identity
+
+```ts
+import { deriveZeraEd25519IdentityFromSeed } from
+  "web2-ish-self-custody/zera-ed25519";
+
+const seed = crypto.getRandomValues(new Uint8Array(32));
+try {
+  const identity = deriveZeraEd25519IdentityFromSeed(seed);
+  console.log(identity.address);
+} finally {
+  seed.fill(0);
+}
+```
+
+This helper standardizes only Ed25519 public-key derivation, Base58 address
+encoding, and the `A_` public-key identifier. It intentionally leaves encrypted
+storage and recovery policy to the consuming application.
 
 ## Install
 

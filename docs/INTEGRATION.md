@@ -1,5 +1,17 @@
 # Integration
 
+## Random encrypted-vault integrations
+
+Applications that already create a random wallet seed should not replace it
+with a username/password-derived seed merely to use this package. The recovery
+and password-guessing properties are materially different.
+
+Use `web2-ish-self-custody/zera-ed25519` only to derive the public ZERA identity
+from an application-owned random seed. Keep encryption, storage, recovery,
+origin binding, and lifecycle controls in the application. This split lets
+multiple applications share the exact Ed25519/Base58/`A_` identity convention
+without turning this SDK into a browser storage or policy layer.
+
 ## Knight Armor
 
 Use `web2ish-zera-ed25519-v1` as an explicitly selected deterministic-custody mode:
