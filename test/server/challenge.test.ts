@@ -3,6 +3,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import bs58 from "bs58";
 import { describe, expect, it } from "vitest";
 import externalSaltVector from "../../vectors/zera-ed25519-external-salt-v1.json" with { type: "json" };
+import { zeraEd25519Codec, zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { withDerivedWallet } from "../../src/index.js";
 import {
   CHALLENGE_DOMAIN,
@@ -13,6 +14,7 @@ import {
   type ChallengeMessageInput,
 } from "../../src/server/challenge.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
+import { krypticHexCodec } from "../support/kryptic-chain.js";
 
 const encoder = new TextEncoder();
 
@@ -75,7 +77,7 @@ let ed25519FixturePromise: Promise<WalletFixture> | undefined;
 function ed25519Fixture(): Promise<WalletFixture> {
   return (ed25519FixturePromise ??= withDerivedWallet(
     {
-      profile: "web2ish-zera-ed25519-external-salt-v1",
+      profile: zeraEd25519ExternalSalt,
       username: externalSaltVector.username,
       password: encoder.encode(externalSaltVector.passwordUtf8),
       context: {
@@ -99,7 +101,7 @@ function ed25519Fixture(): Promise<WalletFixture> {
 function unrelatedIdentity(): CanonicalWalletIdentity {
   const publicKeyBytes = ed25519.getPublicKey(ed25519.utils.randomSecretKey());
   const address = bs58.encode(publicKeyBytes);
-  return canonicalWalletIdentity({ publicKey: `A_${address}`, address });
+  return canonicalWalletIdentity(zeraEd25519Codec, { publicKey: `A_${address}`, address });
 }
 
 describe("buildChallengeMessage", () => {
@@ -182,12 +184,14 @@ describe("canonicalWalletIdentity", () => {
       expect(fixture.address).toBe(externalSaltVector.address);
       expect(fixture.publicKey).toBe(externalSaltVector.publicKeyIdentifier);
 
-      const identity = canonicalWalletIdentity({
+      const identity = canonicalWalletIdentity(zeraEd25519Codec, {
         publicKey: fixture.publicKey,
         address: fixture.address,
       });
 
       expect(identity.curve).toBe("ed25519");
+      // Recorded so a stored wallet row says which encoding produced it.
+      expect(identity.codecId).toBe("zera-ed25519-base58-v1");
       expect(identity.address).toBe(fixture.address);
       expect(identity.addressNormalized).toBe(fixture.address.toLowerCase());
       expect(identity.publicKey).toBe(fixture.publicKey);
@@ -206,7 +210,7 @@ describe("canonicalWalletIdentity", () => {
 
       expectIdentityError(
         () =>
-          canonicalWalletIdentity({
+          canonicalWalletIdentity(zeraEd25519Codec, {
             publicKey: fixture.publicKey,
             address: foreign.address,
           }),
@@ -221,22 +225,58 @@ describe("canonicalWalletIdentity", () => {
 
     // Bare base58 without the A_ identifier prefix.
     expectIdentityError(
-      () => canonicalWalletIdentity({ publicKey: address, address }),
+      () => canonicalWalletIdentity(zeraEd25519Codec, { publicKey: address, address }),
       "invalid-public-key",
     );
 
     // Characters base58 does not define.
     expectIdentityError(
-      () => canonicalWalletIdentity({ publicKey: `A_${"0OIl".repeat(11)}`, address }),
+      () =>
+        canonicalWalletIdentity(zeraEd25519Codec, {
+          publicKey: `A_${"0OIl".repeat(11)}`,
+          address,
+        }),
       "invalid-public-key",
     );
 
     // Well-formed base58, wrong key length.
     expectIdentityError(
       () =>
-        canonicalWalletIdentity({
+        canonicalWalletIdentity(zeraEd25519Codec, {
           publicKey: `A_${bs58.encode(new Uint8Array(31))}`,
           address,
+        }),
+      "invalid-public-key",
+    );
+  });
+
+  it("is bound to the codec it was handed, not to a global convention", () => {
+    const publicKeyBytes = ed25519.getPublicKey(ed25519.utils.randomSecretKey());
+    const zeraAddress = zeraEd25519Codec.encodeAddress(publicKeyBytes);
+    const krypticAddress = krypticHexCodec.encodeAddress(publicKeyBytes);
+
+    // Same key, two deployments, two canonical spellings — and each codec
+    // refuses the other's identifier rather than coercing it.
+    expect(
+      canonicalWalletIdentity(krypticHexCodec, {
+        publicKey: krypticHexCodec.encodePublicKey(publicKeyBytes),
+        address: krypticAddress,
+      }).address,
+    ).toBe(krypticAddress);
+
+    expectIdentityError(
+      () =>
+        canonicalWalletIdentity(krypticHexCodec, {
+          publicKey: zeraEd25519Codec.encodePublicKey(publicKeyBytes),
+          address: krypticAddress,
+        }),
+      "invalid-public-key",
+    );
+    expectIdentityError(
+      () =>
+        canonicalWalletIdentity(zeraEd25519Codec, {
+          publicKey: krypticHexCodec.encodePublicKey(publicKeyBytes),
+          address: zeraAddress,
         }),
       "invalid-public-key",
     );
@@ -248,7 +288,7 @@ describe("verifyChallengeSignature", () => {
     "accepts an Ed25519 signature over the raw challenge bytes",
     async () => {
       const fixture = await ed25519Fixture();
-      const identity = canonicalWalletIdentity({
+      const identity = canonicalWalletIdentity(zeraEd25519Codec, {
         publicKey: fixture.publicKey,
         address: fixture.address,
       });
@@ -271,7 +311,7 @@ describe("verifyChallengeSignature", () => {
     "rejects Ed25519 signatures over a different message, truncated, or from another wallet",
     async () => {
       const fixture = await ed25519Fixture();
-      const identity = canonicalWalletIdentity({
+      const identity = canonicalWalletIdentity(zeraEd25519Codec, {
         publicKey: fixture.publicKey,
         address: fixture.address,
       });

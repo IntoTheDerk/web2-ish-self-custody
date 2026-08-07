@@ -1,5 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { afterAll, describe, expect, it } from "vitest";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { withDerivedWallet } from "../../src/index.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { runIdentityMigrations } from "../../src/server/migrations.js";
@@ -17,7 +18,7 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
  */
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
-const profileId = "web2ish-zera-ed25519-external-salt-v1";
+const profile = zeraEd25519ExternalSalt;
 const applicationId = "existing-service";
 const networkId = "zera-testnet";
 const derivationTimeoutMs = 120_000;
@@ -91,7 +92,7 @@ function configFor(
 ): IdentityServiceConfig {
   const base = {
     serviceProfileId: `w2sc-adopt-${prefix.slice(-8)}`,
-    profileId,
+    profile,
     applicationId,
     networkId,
     tablePrefix: prefix,
@@ -218,6 +219,54 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
     expect(minted).not.toBe(inheritedSalt);
   });
 
+  it("converges when several runners migrate the same namespace at once", async () => {
+    // Serverless deployments cold-start in parallel, so concurrent migration is
+    // the normal case, not an edge case. Every DDL step here has to tolerate a
+    // peer having just done it: `CREATE EXTENSION IF NOT EXISTS` is
+    // check-then-act and raises a unique violation on pg_extension, and
+    // `CREATE TRIGGER` has no IF NOT EXISTS at all.
+    const prefix = newPrefix();
+    const config = resolveIdentityServiceConfig(configFor(prefix, inheritedSalt));
+
+    // Separate connections: one client would serialize the statements and
+    // prove nothing.
+    const clients = await Promise.all(
+      Array.from({ length: 4 }, () => openClient(connectionString as string)),
+    );
+    const live = clients.filter((each): each is PgLikeClient => each !== null);
+    expect(live.length).toBe(4);
+
+    try {
+      const outcomes = await Promise.allSettled(
+        live.map((each) => runIdentityMigrations(pgDriver(each), config)),
+      );
+      const rejected = outcomes.filter((each) => each.status === "rejected");
+      expect(
+        rejected.map((each) => String((each as PromiseRejectedResult).reason)),
+      ).toEqual([]);
+
+      // Exactly one profile row, holding the adopted salt.
+      const rows = await sql.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM ${prefix}_service_profiles`,
+      );
+      expect(rows[0]?.count).toBe("1");
+      expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
+
+      // Every immutability trigger landed exactly once.
+      const triggers = await sql.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM pg_trigger
+          WHERE NOT tgisinternal
+            AND tgrelid IN (
+              ${`'${prefix}_service_profiles'::regclass`},
+              ${`'${prefix}_service_profile_bootstrap'::regclass`}
+            )`,
+      );
+      expect(triggers[0]?.count).toBe("4");
+    } finally {
+      await Promise.all(live.map((each) => each.end?.()));
+    }
+  });
+
   it(
     "reproduces the exact wallet an existing user already derived",
     async () => {
@@ -233,7 +282,7 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
       // salt the old deployment issued.
       const legacyAddress = await withDerivedWallet(
         {
-          profile: profileId,
+          profile,
           username,
           password: Uint8Array.from(password),
           context: { applicationId, networkId },
@@ -249,7 +298,7 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
       const challenge = await service.createChallenge(username, "registration");
       const proof = await withDerivedWallet(
         {
-          profile: profileId,
+          profile,
           username,
           password: Uint8Array.from(password),
           context: { applicationId, networkId },
@@ -275,9 +324,11 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
         signature: proof.signature,
       });
       expect(registered.wallet.address).toBe(legacyAddress);
+      expect(registered.wallet.codecId).toBe(profile.codec.id);
 
       const authenticated = await service.authenticate(registered.session.token);
       expect(authenticated.wallets[0]?.address).toBe(legacyAddress);
+      expect(authenticated.wallets[0]?.codecId).toBe(profile.codec.id);
     },
     derivationTimeoutMs,
   );

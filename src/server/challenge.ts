@@ -1,7 +1,8 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
-import bs58 from "bs58";
+import type { IdentityCodec } from "../codec.js";
 import { utf8 } from "../encoding.js";
+import { DerivationError } from "../errors.js";
 import { IdentityError } from "./errors.js";
 import type { ChallengePurpose } from "./types.js";
 
@@ -9,7 +10,7 @@ export const CHALLENGE_DOMAIN = "web2-ish-self-custody auth challenge v1";
 
 const hex64 = /^[0-9a-f]{64}$/u;
 const hex128 = /^[0-9a-f]{128}$/u;
-const base58Address = /^[1-9A-HJ-NP-Za-km-z]{32,64}$/u;
+const ED25519_PUBLIC_KEY_BYTES = 32;
 
 function assertNoLineBreak(value: string, field: string): string {
   if (/[\r\n]/u.test(value)) {
@@ -63,6 +64,7 @@ export type WalletIdentityInput = Readonly<{
 
 export type CanonicalWalletIdentity = Readonly<{
   curve: "ed25519";
+  codecId: string;
   address: string;
   addressNormalized: string;
   publicKey: string;
@@ -70,49 +72,55 @@ export type CanonicalWalletIdentity = Readonly<{
 }>;
 
 /**
- * Recomputes the address from the public key and rejects any mismatch, so a
- * caller cannot register a key under an address it does not control.
+ * Re-derives the address and identifier from the submitted public key using the
+ * deployment's codec, and rejects any disagreement — so a caller cannot enroll
+ * a key under an address it does not control, and cannot smuggle in a
+ * non-canonical encoding of one it does.
+ *
+ * The codec is a parameter rather than a hardcoded convention; that is what
+ * lets a non-ZERA deployment use this service unchanged.
  */
 export function canonicalWalletIdentity(
+  codec: IdentityCodec,
   input: WalletIdentityInput,
 ): CanonicalWalletIdentity {
-  const publicKey = input.publicKey.trim();
-  if (!publicKey.startsWith("A_")) {
+  let publicKeyBytes: Uint8Array;
+  try {
+    publicKeyBytes = codec.decodePublicKey(input.publicKey);
+  } catch (error) {
     throw new IdentityError(
-      "Ed25519 public keys must use the A_<base58> identifier form.",
+      error instanceof DerivationError
+        ? error.message
+        : "Public key is not valid for this deployment's identity codec.",
       "invalid-public-key",
     );
   }
 
-  let publicKeyBytes: Uint8Array;
-  try {
-    publicKeyBytes = bs58.decode(publicKey.slice(publicKey.lastIndexOf("_") + 1));
-  } catch {
-    throw new IdentityError("Ed25519 public key is not valid base58.", "invalid-public-key");
-  }
-  if (publicKeyBytes.length !== 32) {
+  if (publicKeyBytes.byteLength !== ED25519_PUBLIC_KEY_BYTES) {
     throw new IdentityError("Ed25519 public keys must be 32 bytes.", "invalid-public-key");
   }
 
-  const address = bs58.encode(publicKeyBytes);
-  if (!base58Address.test(address) || input.address.trim() !== address) {
+  const address = codec.encodeAddress(publicKeyBytes);
+  const publicKey = codec.encodePublicKey(publicKeyBytes);
+  if (input.address.trim() !== address) {
     throw new IdentityError(
-      "Wallet address does not match its Ed25519 public key.",
+      "Wallet address does not match its public key.",
       "invalid-address",
     );
   }
 
   return Object.freeze({
     curve: "ed25519" as const,
+    codecId: codec.id,
     address,
     addressNormalized: address.toLowerCase(),
-    publicKey: `A_${address}`,
+    publicKey,
     publicKeyBytes,
   });
 }
 
 /**
- * Verifies a challenge signature using the exact convention the derivation SDK
+ * Verifies a challenge signature using the exact convention the derivation core
  * produces: Ed25519 over the raw UTF-8 challenge bytes, as emitted by
  * `signExactMessageUnsafe`.
  */

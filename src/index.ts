@@ -1,3 +1,13 @@
+/**
+ * Generic deterministic-custody core.
+ *
+ * Nothing here knows about any particular chain. A chain supplies an
+ * `IdentityCodec` (how a public key becomes an address) and one or more
+ * `DerivationProfile`s (KDF parameters plus the domain-separation strings that
+ * define its transcript). Built-in chains live under `web2-ish-self-custody/chains/*`.
+ */
+export { assertCodecRoundTrip, defineIdentityCodec } from "./codec.js";
+export type { IdentityCodec } from "./codec.js";
 export { derivePublicIdentity, withDerivedWallet } from "./derive.js";
 export { DerivationError } from "./errors.js";
 export type { DerivationErrorCode } from "./errors.js";
@@ -6,17 +16,13 @@ export {
   MINIMUM_PASSWORD_BYTES,
   normalizeUsername,
 } from "./normalization.js";
-export { builtInProfiles, getProfile } from "./profiles.js";
+export { defineDerivationProfile } from "./profile.js";
+export type { DerivationProfile, ProfileDomains, SaltPolicy } from "./profile.js";
+export { ED25519_SEED_BYTES, deriveIdentityFromSeed } from "./seed.js";
+export type { SeedIdentity } from "./seed.js";
 export type {
-  BuiltInProfileId,
   DerivationContext,
   DerivationCredentials,
-  DerivedPublicIdentity,
+  DerivedIdentity,
   DerivedWallet,
-  Ed25519Identity,
-  Ed25519Wallet,
-  ProfileDescription,
-  ZeraEd25519Credentials,
-  ZeraEd25519ExternalSaltCredentials,
-  ZeraEd25519ProfileId,
 } from "./types.js";

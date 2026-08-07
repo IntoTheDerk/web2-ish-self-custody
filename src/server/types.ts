@@ -1,19 +1,4 @@
-import type { BuiltInProfileId } from "../types.js";
-
-/**
- * Only the external-salt profile is serviceable. The server's entire reason to
- * exist in this flow is to own and publish a per-service 32-byte public salt;
- * `web2ish-zera-ed25519-v1` derives its own salt from the username and so has
- * nothing for a server to hold.
- */
-export type ServerProfileId = Extract<
-  BuiltInProfileId,
-  "web2ish-zera-ed25519-external-salt-v1"
->;
-
-export const serverProfileIds: readonly ServerProfileId[] = Object.freeze([
-  "web2ish-zera-ed25519-external-salt-v1",
-]);
+import type { DerivationProfile } from "../profile.js";
 
 export type ChallengePurpose = "registration" | "login" | "rotation";
 
@@ -33,7 +18,12 @@ export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([
  */
 export type IdentityServiceConfig = Readonly<{
   serviceProfileId: string;
-  profileId: ServerProfileId;
+  /**
+   * The chain's profile object, which carries its KDF parameters, transcript
+   * domains, and identity codec. Must use the `external-32` salt policy — a
+   * service that does not own a salt has nothing to publish.
+   */
+  profile: DerivationProfile;
   applicationId: string;
   networkId: string;
   /** Table namespace. Lets one database host several services side by side. */
@@ -58,7 +48,7 @@ export type IdentityServiceConfig = Readonly<{
 
 export type ResolvedIdentityServiceConfig = Readonly<{
   serviceProfileId: string;
-  profileId: ServerProfileId;
+  profile: DerivationProfile;
   applicationId: string;
   networkId: string;
   tablePrefix: string;
@@ -77,7 +67,9 @@ export type ResolvedIdentityServiceConfig = Readonly<{
  */
 export type PublishedDerivationProfile = Readonly<{
   serviceProfileId: string;
-  profileId: ServerProfileId;
+  profileId: string;
+  /** Lets a client confirm it will encode addresses the way the server does. */
+  codecId: string;
   algorithm: string;
   curve: "ed25519";
   applicationId: string;
@@ -102,7 +94,8 @@ export type IdentityWallet = Readonly<{
   id: string;
   accountId: string;
   serviceProfileId: string;
-  profileId: ServerProfileId;
+  profileId: string;
+  codecId: string;
   curve: "ed25519";
   applicationId: string;
   networkId: string;

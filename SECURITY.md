@@ -4,12 +4,59 @@
 
 This package is an unaudited pre-1.0 implementation. Do not represent it as audited or production-qualified.
 
-## Direct-seed ZERA identity helper
+## The codec trust boundary
 
-`web2-ish-self-custody/zera-ed25519` accepts an existing 32-byte seed only long
+An `IdentityCodec` is supplied by a chain package, and the core and the identity
+service both take it on trust for one thing: that an address identifies exactly
+one public key, and that the identifier for a key decodes back to that key. Two
+codec defects break that, and both break custody rather than presentation.
+
+**A codec that does not round-trip.** If `decodePublicKey` does not invert
+`encodePublicKey` — it truncates, coerces, accepts a non-canonical form, or
+returns something for input it should have rejected — then the service can
+enroll a wallet under an identifier it can never resolve again, and that account
+becomes unauthenticatable. Worse, a decode that silently accepts a *different*
+key than the one encoded moves the address-to-key binding off the key the user
+actually controls. `decodePublicKey` must therefore throw on anything malformed;
+returning a partial or best-effort result is the defect.
+
+`assertCodecRoundTrip(codec, publicKeyBytes)` checks this property directly, and
+`resolveIdentityServiceConfig` runs it at service construction against a fixed
+32-byte key. A codec that fails it takes the deployment down at startup with
+`invalid-service-profile` rather than failing the thousandth login. Chain
+authors should also assert it in their own tests over a range of keys, including
+keys with leading zero bytes, which are exactly where length-sensitive encodings
+break.
+
+**A codec that maps two distinct keys to one address.** The server binds an
+account to an address, so an address collision is a custody failure: whoever
+enrolls first owns the address, and the second key's holder is locked out — or,
+depending on ordering, authenticates against a record that was not theirs.
+Address uniqueness within a service is enforced by a UNIQUE constraint on
+`(service_profile_id, address_normalized)`, where `address_normalized` is
+`lower(address)` and a CHECK constraint holds it to exactly that. That index is
+the last line of defense and it fails closed: a colliding enrollment is
+rejected with `wallet-registered` rather than silently overwriting.
+
+Note that the index is case-insensitive by construction. For a case-sensitive
+encoding such as base58 this is *stricter* than the chain's own rule — two
+addresses differing only in case would be rejected as duplicates. That is the
+correct direction of error: it refuses a legitimate enrollment rather than
+letting two keys share one identity.
+
+Neither check makes a codec correct. They convert two specific classes of
+codec bug into loud, early failures. Reviewing a new codec is reviewing custody
+code, and it deserves committed vectors before any wallet is derived under it.
+
+## Direct-seed identity helper
+
+`deriveIdentityFromSeed(seed, codec)` — and the ZERA-bound
+`deriveZeraEd25519IdentityFromSeed(seed)` from
+`web2-ish-self-custody/chains/zera` — accepts an existing 32-byte seed only long
 enough to derive its public Ed25519 identity. It copies and clears its
-SDK-owned seed buffer and does not mutate the caller's buffer. It intentionally
-does not generate, persist, encrypt, recover, or sign with private material.
+package-owned seed buffer and does not mutate the caller's buffer. It
+intentionally does not generate, persist, encrypt, recover, or sign with private
+material.
 
 Using this helper does not make browser storage secure. The consuming
 application must keep random generation, authenticated encryption, KDF
@@ -52,9 +99,9 @@ browser-facing deployment must set it. See
 [the server API reference](docs/SERVER_API.md#csrf-and-cors).
 
 What database access does yield: normalized usernames, display names, emails
-and their verification state, wallet addresses, public keys, fingerprints, the
-public salt, hashed session tokens, hashed IP and user-agent values supplied by
-the caller, and audit rows. An operator with write access can suspend accounts,
+and their verification state, wallet addresses, public keys, codec ids,
+fingerprints, the public salt, hashed session tokens, hashed IP and user-agent
+values supplied by the caller, and audit rows. An operator with write access can suspend accounts,
 delete sessions, and enroll an attacker-controlled public key against an
 existing account — so wallet enrollment records deserve the same monitoring as
 any other privileged write. What that operator cannot do is recover, derive, or
@@ -70,7 +117,7 @@ Do not open a public issue for a suspected vulnerability. Contact the repository
 
 Include:
 
-- affected profile and version
+- affected profile id, codec id, and package version
 - minimal reproduction
 - expected impact
 - whether any real wallet material was involved
@@ -82,8 +129,9 @@ Never send a real username/password pair, seed, private key, recovery secret, si
 These are intentional properties, not bugs:
 
 - public identities make offline password verification possible
-- forgotten credentials are not recoverable by this SDK
-- credential or profile changes derive a different wallet
+- forgotten credentials are not recoverable by this package
+- credential, profile, or codec changes derive a different wallet or a different
+  address for the same key
 - JavaScript strings cannot be reliably zeroized
 - callers can copy callback-scoped data before cleanup
 - exact-byte signing is unsafe unless the consumer locally reconstructs and confirms a typed operation
@@ -93,8 +141,10 @@ These are intentional properties, not bugs:
 
 Before funded use:
 
-1. independently review the exact source and locked dependency graph
-2. reproduce vectors in an independent implementation
+1. independently review the exact source and locked dependency graph, including
+   the codec and profile of every chain you configure
+2. reproduce vectors in an independent implementation, and round-trip the codec
+   over a range of keys including ones with leading zero bytes
 3. benchmark KDF denial-of-service and memory behavior on minimum supported devices
 4. run the SDK only inside a short-lived dedicated worker; SDK cancellation waits for the current KDF to cleanly finish, while immediate cancellation requires terminating that worker
 5. provide a trusted, typed signing confirmation surface

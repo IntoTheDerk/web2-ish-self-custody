@@ -2,32 +2,13 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { scryptAsync } from "@noble/hashes/scrypt.js";
 import { sha256, sha512 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes } from "@noble/hashes/utils.js";
-import bs58 from "bs58";
 import { canonicalizeContext, fingerprint, utf8 } from "./encoding.js";
 import { DerivationError } from "./errors.js";
 import { assertWalletPassword, normalizeUsername } from "./normalization.js";
-import { getProfile } from "./profiles.js";
-import type {
-  DerivationCredentials,
-  DerivedPublicIdentity,
-  DerivedWallet,
-  Ed25519Identity,
-  ZeraEd25519ProfileId,
-} from "./types.js";
+import type { DerivationProfile } from "./profile.js";
+import type { DerivationCredentials, DerivedIdentity, DerivedWallet } from "./types.js";
 
-/**
- * Fixed wire constants. Each one is part of the definition of a wallet: change
- * a byte and every key derived under that profile changes with it. The
- * committed vectors exist to make that impossible to do by accident.
- */
-const PASSWORD_HASH_DOMAIN = "web2-ish-self-custody password hash v1\n";
-const USERNAME_SALT_DOMAIN = "web2-ish-self-custody public username salt v1";
-const ENTROPY_DOMAIN: Readonly<Record<ZeraEd25519ProfileId, string>> = Object.freeze({
-  "web2ish-zera-ed25519-v1": "web2-ish-self-custody ZERA Ed25519 entropy v1",
-  "web2ish-zera-ed25519-external-salt-v1":
-    "web2-ish-self-custody ZERA Ed25519 external salt entropy v1",
-});
-
+const EXTERNAL_SALT_BYTES = 32;
 const MAXIMUM_MESSAGE_BYTES = 1_048_576;
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -36,14 +17,44 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-function exactExternalSalt(salt: Uint8Array | undefined): Uint8Array {
-  if (!(salt instanceof Uint8Array) || salt.byteLength !== 32) {
+/**
+ * Resolves the scrypt salt for a profile.
+ *
+ * The salt policy is checked before any KDF work so a caller who supplies the
+ * wrong shape finds out immediately rather than after a second of scrypt.
+ */
+function resolveSalt(
+  profile: DerivationProfile,
+  suppliedSalt: Uint8Array | undefined,
+  applicationId: string,
+  networkId: string,
+  normalizedUsername: string,
+): Uint8Array {
+  if (profile.saltPolicy === "external-32") {
+    if (!(suppliedSalt instanceof Uint8Array) || suppliedSalt.byteLength !== EXTERNAL_SALT_BYTES) {
+      throw new DerivationError(
+        "This profile requires an exact 32-byte public derivation salt.",
+        "invalid-salt",
+      );
+    }
+    return Uint8Array.from(suppliedSalt);
+  }
+
+  if (suppliedSalt !== undefined) {
     throw new DerivationError(
-      "This profile requires an exact 32-byte public derivation salt.",
+      "This profile derives its own salt and does not accept an external salt.",
       "invalid-salt",
     );
   }
-  return Uint8Array.from(salt);
+
+  const saltDomain = profile.domains.salt;
+  if (saltDomain === undefined) {
+    throw new DerivationError(
+      "Profile is missing the salt domain its policy requires.",
+      "invalid-profile",
+    );
+  }
+  return sha256(utf8([saltDomain, applicationId, networkId, normalizedUsername].join("\n")));
 }
 
 async function runScrypt(
@@ -51,14 +62,14 @@ async function runScrypt(
   salt: Uint8Array,
   credentials: DerivationCredentials,
 ): Promise<Uint8Array> {
-  const profile = getProfile(credentials.profile);
+  const { kdf } = credentials.profile;
   throwIfAborted(credentials.signal);
   let progressCallbackError: unknown;
   const output = await scryptAsync(entropy, salt, {
-    N: profile.N,
-    r: profile.r,
-    p: profile.p,
-    dkLen: profile.dkLen,
+    N: kdf.N,
+    r: kdf.r,
+    p: kdf.p,
+    dkLen: kdf.dkLen,
     onProgress(progress) {
       try {
         credentials.onProgress?.(progress);
@@ -77,17 +88,10 @@ async function runScrypt(
   }
 }
 
-async function deriveEd25519(
+async function derive(
   credentials: DerivationCredentials,
-): Promise<{ seed: Uint8Array; identity: Ed25519Identity }> {
-  // Rejected before any KDF work, so a caller passing a salt to the stateless
-  // profile finds out immediately rather than after ~200ms of scrypt.
-  if (credentials.profile === "web2ish-zera-ed25519-v1" && credentials.salt !== undefined) {
-    throw new DerivationError(
-      "The stateless ZERA profile derives its public salt and does not accept an external salt.",
-      "invalid-salt",
-    );
-  }
+): Promise<{ seed: Uint8Array; identity: DerivedIdentity }> {
+  const { profile } = credentials;
 
   assertWalletPassword(credentials.password);
   const normalizedUsername = normalizeUsername(credentials.username);
@@ -100,25 +104,19 @@ async function deriveEd25519(
   let seed: Uint8Array | undefined;
 
   try {
-    salt =
-      credentials.profile === "web2ish-zera-ed25519-external-salt-v1"
-        ? exactExternalSalt(credentials.salt)
-        : sha256(
-            utf8(
-              [
-                USERNAME_SALT_DOMAIN,
-                context.applicationId,
-                context.networkId,
-                normalizedUsername,
-              ].join("\n"),
-            ),
-          );
+    salt = resolveSalt(
+      profile,
+      credentials.salt,
+      context.applicationId,
+      context.networkId,
+      normalizedUsername,
+    );
 
-    passwordEntropyHash = sha512(concatBytes(utf8(PASSWORD_HASH_DOMAIN), password));
+    passwordEntropyHash = sha512(concatBytes(utf8(profile.domains.passwordHash), password));
     walletEntropy = sha512(
       utf8(
         [
-          ENTROPY_DOMAIN[credentials.profile],
+          profile.domains.entropy,
           context.applicationId,
           context.networkId,
           normalizedUsername,
@@ -131,16 +129,17 @@ async function deriveEd25519(
     throwIfAborted(credentials.signal);
 
     const publicKeyBytes = ed25519.getPublicKey(seed);
-    const address = bs58.encode(publicKeyBytes);
+    const address = profile.codec.encodeAddress(publicKeyBytes);
 
     return {
       seed,
       identity: Object.freeze({
-        profileId: credentials.profile,
+        profileId: profile.id,
+        codecId: profile.codec.id,
         curve: "ed25519",
         normalizedUsername,
         address,
-        publicKey: `A_${address}`,
+        publicKey: profile.codec.encodePublicKey(publicKeyBytes),
         publicKeyBytes: Uint8Array.from(publicKeyBytes),
         fingerprint: fingerprint(address),
       }),
@@ -169,11 +168,15 @@ export async function withDerivedWallet<T>(
   if (!(credentials.password instanceof Uint8Array)) {
     throw new DerivationError("Password input must be a Uint8Array.", "invalid-password");
   }
-  if (ENTROPY_DOMAIN[credentials.profile] === undefined) {
-    throw new DerivationError("Unknown deterministic wallet profile.", "invalid-profile");
+  const profile: unknown = credentials.profile;
+  if (typeof profile !== "object" || profile === null || typeof credentials.profile.id !== "string") {
+    throw new DerivationError(
+      "credentials.profile must be a derivation profile object.",
+      "invalid-profile",
+    );
   }
 
-  const derived = await deriveEd25519(credentials);
+  const derived = await derive(credentials);
 
   let active = true;
   const wallet: DerivedWallet = Object.freeze({
@@ -221,7 +224,7 @@ export async function withDerivedWallet<T>(
 
 export async function derivePublicIdentity(
   credentials: DerivationCredentials,
-): Promise<DerivedPublicIdentity> {
+): Promise<DerivedIdentity> {
   return withDerivedWallet(credentials, (wallet) =>
     Object.freeze({
       ...wallet.identity,

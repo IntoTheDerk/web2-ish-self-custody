@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtInProfiles, getProfile, normalizeUsername } from "../src/index.js";
-
-const ed25519ProfileIds = [
-  "web2ish-zera-ed25519-external-salt-v1",
-  "web2ish-zera-ed25519-v1",
-];
+import { MAXIMUM_PASSWORD_BYTES, MINIMUM_PASSWORD_BYTES, normalizeUsername } from "../src/index.js";
 
 describe("username normalization", () => {
   it("folds case and trims whitespace using ASCII rules only", () => {
@@ -33,27 +28,12 @@ describe("username normalization", () => {
   });
 });
 
-describe("built-in wallet profiles", () => {
-  it("exposes exactly the two Ed25519 profiles and no other curve", () => {
-    expect(Object.keys(builtInProfiles).sort()).toEqual(ed25519ProfileIds);
-
-    for (const [id, profile] of Object.entries(builtInProfiles)) {
-      expect(profile.id).toBe(id);
-      expect(profile.curve).toBe("ed25519");
-    }
-  });
-
-  it("exposes immutable, fixed-cost built-in profiles", () => {
-    const profile = getProfile("web2ish-zera-ed25519-v1");
-    expect(profile).toMatchObject({
-      curve: "ed25519",
-      saltPolicy: "public-username-sha256-v1",
-      N: 65_536,
-      r: 8,
-      p: 1,
-      dkLen: 32,
-    });
-    expect(Object.isFrozen(profile)).toBe(true);
-    expect(Object.isFrozen(builtInProfiles)).toBe(true);
+describe("password bounds", () => {
+  it("publishes the byte bounds every profile enforces", () => {
+    // These are part of the package's public contract: a UI that lets a user
+    // pick a password outside them would produce a wallet they cannot re-derive.
+    expect(MINIMUM_PASSWORD_BYTES).toBe(24);
+    expect(MAXIMUM_PASSWORD_BYTES).toBe(1_024);
+    expect(MINIMUM_PASSWORD_BYTES).toBeLessThan(MAXIMUM_PASSWORD_BYTES);
   });
 });

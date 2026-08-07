@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { zeraEd25519, zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import {
   identityServiceDefaults,
   resolveIdentityServiceConfig,
 } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
-import { serverProfileIds, type IdentityServiceConfig } from "../../src/server/types.js";
+import type { IdentityServiceConfig } from "../../src/server/types.js";
+import { krypticExternalSalt, truncatingProfile } from "../support/kryptic-chain.js";
 
 const minimal: IdentityServiceConfig = {
   serviceProfileId: "acme.identity",
-  profileId: "web2ish-zera-ed25519-external-salt-v1",
+  profile: zeraEd25519ExternalSalt,
   applicationId: "knight-armor",
   networkId: "zera-mainnet",
 };
@@ -34,7 +36,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
 
     expect(resolved).toEqual({
       serviceProfileId: "acme.identity",
-      profileId: "web2ish-zera-ed25519-external-salt-v1",
+      profile: zeraEd25519ExternalSalt,
       applicationId: "knight-armor",
       networkId: "zera-mainnet",
       tablePrefix: "w2sc",
@@ -45,6 +47,9 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
     });
+    // The very object, not a copy: the codec identity has to survive resolution
+    // or the service would encode addresses with something else.
+    expect(resolved.profile).toBe(zeraEd25519ExternalSalt);
     expect(Object.isFrozen(resolved)).toBe(true);
   });
 
@@ -100,37 +105,53 @@ describe("resolveIdentityServiceConfig defaults", () => {
   });
 });
 
-describe("resolveIdentityServiceConfig validation", () => {
-  it("accepts every serviceable profile id", () => {
-    for (const profileId of serverProfileIds) {
-      expect(resolveIdentityServiceConfig(withOverride({ profileId })).profileId).toBe(profileId);
+describe("resolveIdentityServiceConfig profile validation", () => {
+  it("accepts any external-salt profile, from any chain", () => {
+    for (const profile of [zeraEd25519ExternalSalt, krypticExternalSalt]) {
+      expect(resolveIdentityServiceConfig(withOverride({ profile })).profile).toBe(profile);
     }
   });
 
   it("rejects the stateless profile, which has no server-held salt", () => {
+    // A service exists to own and publish a salt. Configuring a profile that
+    // computes its own would publish a salt clients are required to ignore.
     expectIdentityError(
-      () =>
-        resolveIdentityServiceConfig({
-          ...minimal,
-          profileId: "web2ish-zera-ed25519-v1",
-        } as unknown as IdentityServiceConfig),
+      () => resolveIdentityServiceConfig(withOverride({ profile: zeraEd25519 })),
+      "invalid-service-profile",
+    );
+    expect(zeraEd25519.saltPolicy).toBe("derived-from-username");
+  });
+
+  it("rejects a codec that does not round-trip its own encoding", () => {
+    // Enrolling under such a codec would produce wallets the service could
+    // never authenticate again, so it must fail at startup rather than at login.
+    expectIdentityError(
+      () => resolveIdentityServiceConfig(withOverride({ profile: truncatingProfile })),
       "invalid-service-profile",
     );
   });
 
-  it("rejects unknown profile ids", () => {
-    for (const profileId of ["", "web2ish-zera-ed25519", "nope"]) {
+  it("rejects anything that is not a derivation profile object", () => {
+    // `profileId` strings were the old configuration surface; a deployment that
+    // still passes one must fail loudly rather than derive a default profile.
+    for (const profile of [
+      "web2ish-zera-ed25519-external-salt-v1",
+      "",
+      null,
+      undefined,
+      42,
+      {},
+      { id: 42 },
+    ]) {
       expectIdentityError(
-        () =>
-          resolveIdentityServiceConfig({
-            ...minimal,
-            profileId,
-          } as unknown as IdentityServiceConfig),
+        () => resolveIdentityServiceConfig(withOverride({ profile: profile as never })),
         "invalid-service-profile",
       );
     }
   });
+});
 
+describe("resolveIdentityServiceConfig range validation", () => {
   it("rejects out-of-range or non-integer TTLs and attempt limits", () => {
     const rejected: readonly Partial<IdentityServiceConfig>[] = [
       { sessionTtlSeconds: 0 },

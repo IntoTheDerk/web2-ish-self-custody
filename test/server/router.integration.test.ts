@@ -1,5 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { normalizeUsername, withDerivedWallet } from "../../src/index.js";
 import { CHALLENGE_DOMAIN } from "../../src/server/challenge.js";
 import { createIdentityRouter } from "../../src/server/router.js";
@@ -28,7 +29,9 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
 const encoder = new TextEncoder();
-const profileId = "web2ish-zera-ed25519-external-salt-v1";
+const derivationProfile = zeraEd25519ExternalSalt;
+const profileId = derivationProfile.id;
+const codecId = derivationProfile.codec.id;
 const applicationId = "knight-armor";
 const networkId = "zera-testnet";
 
@@ -285,7 +288,7 @@ const serviceProfileId = `w2sc-router-${suffix}`;
 
 const baseConfig: IdentityServiceConfig = {
   serviceProfileId,
-  profileId,
+  profile: derivationProfile,
   applicationId,
   networkId,
   tablePrefix,
@@ -343,7 +346,7 @@ describe.skipIf(driverHandle === null)("identity router over PostgreSQL", () => 
 
     const proof = await withDerivedWallet(
       {
-        profile: profileId,
+        profile: derivationProfile,
         username,
         password: encoder.encode(password),
         context: { applicationId, networkId },
@@ -438,6 +441,8 @@ describe.skipIf(driverHandle === null)("identity router over PostgreSQL", () => 
 
     expect(profile.body["serviceProfileId"]).toBe(serviceProfileId);
     expect(profile.body["profileId"]).toBe(profileId);
+    // A client has to know the address encoding before it enrolls a wallet.
+    expect(profile.body["codecId"]).toBe(codecId);
     expect(profile.body["applicationId"]).toBe(applicationId);
     expect(profile.body["networkId"]).toBe(networkId);
     expect(profile.body["curve"]).toBe("ed25519");
@@ -481,6 +486,7 @@ describe.skipIf(driverHandle === null)("identity router over PostgreSQL", () => 
     expect(requireObject(registration.body, "account")["displayName"]).toBe("Router Alice");
     expect(requireObject(registration.body, "wallet")["address"]).toBe(wallet.address);
     expect(requireObject(registration.body, "wallet")["publicKey"]).toBe(wallet.publicKey);
+    expect(requireObject(registration.body, "wallet")["codecId"]).toBe(codecId);
     expect(requireObject(registration.body, "wallet")["isPrimary"]).toBe(true);
     expect(requireObject(registration.body, "session")["id"]).toBeTypeOf("string");
 

@@ -33,7 +33,6 @@ import {
 } from "./tokens.js";
 import {
   challengePurposes,
-  serverProfileIds,
   type AuthenticatedIdentity,
   type ChallengePurpose,
   type EmailVerificationRequest,
@@ -49,7 +48,6 @@ import {
   type RegistrationInput,
   type RequestContext,
   type ResolvedIdentityServiceConfig,
-  type ServerProfileId,
 } from "./types.js";
 
 const tablePrefixPattern = /^[a-z][a-z0-9_]{0,31}$/u;
@@ -156,17 +154,6 @@ function walletCurve(value: string): "ed25519" {
   throw new IdentityError("Unknown wallet curve.", "invalid-service-profile");
 }
 
-function assertServerProfileId(value: string): ServerProfileId {
-  const match = serverProfileIds.find((id) => id === value);
-  if (match === undefined) {
-    throw new IdentityError(
-      "Stored profile id is not serviceable.",
-      "invalid-service-profile",
-    );
-  }
-  return match;
-}
-
 function assertChallengePurpose(value: string): ChallengePurpose {
   const match = challengePurposes.find((purpose) => purpose === value);
   if (match === undefined) {
@@ -251,7 +238,8 @@ function mapWallet(row: SqlRow, prefix: string): IdentityWallet {
     id: textColumn(row, `${prefix}id`),
     accountId: textColumn(row, `${prefix}account_id`),
     serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
-    profileId: assertServerProfileId(textColumn(row, `${prefix}profile_id`)),
+    profileId: textColumn(row, `${prefix}profile_id`),
+    codecId: textColumn(row, `${prefix}codec_id`),
     curve: walletCurve(textColumn(row, `${prefix}curve`)),
     applicationId: textColumn(row, `${prefix}application_id`),
     networkId: textColumn(row, `${prefix}network_id`),
@@ -526,9 +514,10 @@ export function createIdentityService(
   ): Promise<readonly IdentityWallet[]> => {
     const id = assertUuid(accountId, "account-not-found");
     const rows = await sql.query(
-      `SELECT w.id, w.account_id, w.service_profile_id, w.profile_id, w.curve,
-              w.application_id, w.network_id, w.address, w.address_normalized,
-              w.public_key, w.fingerprint, w.is_primary, w.created_at
+      `SELECT w.id, w.account_id, w.service_profile_id, w.profile_id, w.codec_id,
+              w.curve, w.application_id, w.network_id, w.address,
+              w.address_normalized, w.public_key, w.fingerprint, w.is_primary,
+              w.created_at
          FROM ${p}_accounts a
          LEFT JOIN ${p}_account_wallets w ON w.account_id = a.id
         WHERE a.id = $1::uuid AND a.service_profile_id = $2::text
@@ -640,7 +629,8 @@ export function createIdentityService(
       );
       const profile: PublishedDerivationProfile = Object.freeze({
         serviceProfileId: textColumn(row, "service_profile_id"),
-        profileId: assertServerProfileId(textColumn(row, "profile_id")),
+        profileId: textColumn(row, "profile_id"),
+        codecId: resolved.profile.codec.id,
         algorithm: textColumn(row, "algorithm"),
         curve: walletCurve(textColumn(row, "curve")),
         applicationId: textColumn(row, "application_id"),
@@ -654,7 +644,7 @@ export function createIdentityService(
         }),
       });
       if (
-        profile.profileId !== resolved.profileId ||
+        profile.profileId !== resolved.profile.id ||
         profile.applicationId !== resolved.applicationId ||
         profile.networkId !== resolved.networkId
       ) {
@@ -736,7 +726,7 @@ export function createIdentityService(
       session: IssuedSession;
     }> {
       const usernameNormalized = normalizeUsername(input.username);
-      const wallet = canonicalWalletIdentity({
+      const wallet = canonicalWalletIdentity(resolved.profile.codec, {
         publicKey: input.publicKey,
         address: input.address,
       });
@@ -795,7 +785,8 @@ export function createIdentityService(
         displayName,
         email,
         emailVerifiedAt,
-        resolved.profileId,
+        resolved.profile.id,
+        resolved.profile.codec.id,
         wallet.curve,
         resolved.applicationId,
         resolved.networkId,
@@ -808,7 +799,7 @@ export function createIdentityService(
         sanitizeContextHash(context?.ipHash),
         sanitizeContextHash(context?.userAgentHash),
         metadataJson({
-          profileId: resolved.profileId,
+          profileId: resolved.profile.id,
           curve: wallet.curve,
           walletFingerprint: fingerprint(wallet.address),
           emailProvided: email !== null,
@@ -836,32 +827,33 @@ export function createIdentityService(
                 ),
                 new_wallet AS (
                   INSERT INTO ${p}_account_wallets (
-                    account_id, service_profile_id, profile_id, curve, application_id,
-                    network_id, address, address_normalized, public_key, fingerprint,
-                    is_primary, created_at
+                    account_id, service_profile_id, profile_id, codec_id, curve,
+                    application_id, network_id, address, address_normalized,
+                    public_key, fingerprint, is_primary, created_at
                   )
                   SELECT new_account.id, $2::text, $7::text, $8::text, $9::text,
                          $10::text, $11::text, $12::text, $13::text, $14::text,
-                         true, clock.at
+                         $15::text, true, clock.at
                   FROM new_account, clock
-                  RETURNING id, account_id, service_profile_id, profile_id, curve,
-                            application_id, network_id, address, address_normalized,
-                            public_key, fingerprint, is_primary, created_at
+                  RETURNING id, account_id, service_profile_id, profile_id, codec_id,
+                            curve, application_id, network_id, address,
+                            address_normalized, public_key, fingerprint, is_primary,
+                            created_at
                 ),
                 new_session AS (
                   INSERT INTO ${p}_sessions (
                     account_id, token_hash, issued_at, expires_at, last_seen_at,
                     ip_hash, user_agent_hash
                   )
-                  SELECT new_account.id, $15::text, clock.at,
-                         date_trunc('milliseconds', clock.at + (interval '1 second' * $16::double precision)),
-                         clock.at, $17::text, $18::text
+                  SELECT new_account.id, $16::text, clock.at,
+                         date_trunc('milliseconds', clock.at + (interval '1 second' * $17::double precision)),
+                         clock.at, $18::text, $19::text
                   FROM new_account, clock
                   RETURNING id, account_id, issued_at, expires_at, last_seen_at
                 ),
                 logged AS (
                   INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                  SELECT new_account.id, 'account.register', $19::jsonb, clock.at
+                  SELECT new_account.id, 'account.register', $20::jsonb, clock.at
                   FROM new_account, clock
                   RETURNING 1
                 )
@@ -878,6 +870,7 @@ export function createIdentityService(
                   w.account_id AS wallet_account_id,
                   w.service_profile_id AS wallet_service_profile_id,
                   w.profile_id AS wallet_profile_id,
+                  w.codec_id AS wallet_codec_id,
                   w.curve AS wallet_curve,
                   w.application_id AS wallet_application_id,
                   w.network_id AS wallet_network_id,
@@ -983,7 +976,7 @@ export function createIdentityService(
           continue;
         }
         try {
-          const identity = canonicalWalletIdentity({
+          const identity = canonicalWalletIdentity(resolved.profile.codec, {
             publicKey,
             address,
           });
@@ -1004,7 +997,7 @@ export function createIdentityService(
       const session = await issueSession(
         account.id,
         "account.login",
-        { profileId: resolved.profileId, challengePurpose: challenge.purpose },
+        { profileId: resolved.profile.id, challengePurpose: challenge.purpose },
         context,
       );
       return Object.freeze({ account, session });

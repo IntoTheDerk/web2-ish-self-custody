@@ -55,7 +55,7 @@ export type {
   SqlRow,
 } from "./sql.js";
 
-export { challengePurposes, serverProfileIds } from "./types.js";
+export { challengePurposes } from "./types.js";
 export type {
   AuthenticatedIdentity,
   ChallengePurpose,
@@ -72,5 +72,4 @@ export type {
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
-  ServerProfileId,
 } from "./types.js";

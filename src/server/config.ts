@@ -1,9 +1,9 @@
+import { assertCodecRoundTrip } from "../codec.js";
+import type { DerivationProfile } from "../profile.js";
 import { IdentityError } from "./errors.js";
-import {
-  serverProfileIds,
-  type IdentityServiceConfig,
-  type ResolvedIdentityServiceConfig,
-  type ServerProfileId,
+import type {
+  IdentityServiceConfig,
+  ResolvedIdentityServiceConfig,
 } from "./types.js";
 
 const defaults = Object.freeze({
@@ -47,15 +47,38 @@ function assertAdoptedSalt(value: string | undefined): string | null {
   return normalized;
 }
 
-function assertServerProfileId(value: string): ServerProfileId {
-  const match = serverProfileIds.find((id) => id === value);
-  if (match === undefined) {
+/**
+ * A service exists to own and publish a salt, so only the `external-32` policy
+ * is serviceable. A profile that derives its own salt from the username has
+ * nothing for a server to hold, and configuring one here would publish a salt
+ * clients must ignore.
+ */
+function assertServiceableProfile(profile: DerivationProfile): DerivationProfile {
+  if (typeof profile !== "object" || profile === null || typeof profile.id !== "string") {
     throw new IdentityError(
-      `profileId must be one of: ${serverProfileIds.join(", ")}.`,
+      "config.profile must be a derivation profile object.",
       "invalid-service-profile",
     );
   }
-  return match;
+  if (profile.saltPolicy !== "external-32") {
+    throw new IdentityError(
+      `Profile "${profile.id}" uses the "${profile.saltPolicy}" salt policy; a service requires "external-32".`,
+      "invalid-service-profile",
+    );
+  }
+
+  // A codec that cannot decode what it encodes would let the service enroll
+  // wallets it can never authenticate again. Cheap to check once at startup.
+  try {
+    assertCodecRoundTrip(profile.codec, new Uint8Array(32).fill(7));
+  } catch {
+    throw new IdentityError(
+      `Identity codec "${profile.codec.id}" does not round-trip its own encoding.`,
+      "invalid-service-profile",
+    );
+  }
+
+  return profile;
 }
 
 export function resolveIdentityServiceConfig(
@@ -63,7 +86,7 @@ export function resolveIdentityServiceConfig(
 ): ResolvedIdentityServiceConfig {
   return Object.freeze({
     serviceProfileId: config.serviceProfileId,
-    profileId: assertServerProfileId(config.profileId),
+    profile: assertServiceableProfile(config.profile),
     applicationId: config.applicationId,
     networkId: config.networkId,
     tablePrefix: config.tablePrefix ?? defaults.tablePrefix,

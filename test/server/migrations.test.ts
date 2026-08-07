@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import type { DerivationProfile } from "../../src/profile.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
 import { identityMigrations } from "../../src/server/migrations.js";
@@ -6,7 +8,7 @@ import type { ResolvedIdentityServiceConfig } from "../../src/server/types.js";
 
 const config = resolveIdentityServiceConfig({
   serviceProfileId: "acme.identity",
-  profileId: "web2ish-zera-ed25519-external-salt-v1",
+  profile: zeraEd25519ExternalSalt,
   applicationId: "knight-armor",
   networkId: "zera-mainnet",
   tablePrefix: "acme_id",
@@ -31,6 +33,14 @@ function withConfig(
   overrides: Partial<ResolvedIdentityServiceConfig>,
 ): ResolvedIdentityServiceConfig {
   return { ...config, ...overrides };
+}
+
+/** A profile that never passed `defineDerivationProfile`, as a hostile caller's would not. */
+function forgedProfile(overrides: Record<string, unknown>): DerivationProfile {
+  return {
+    ...zeraEd25519ExternalSalt,
+    ...overrides,
+  } as unknown as DerivationProfile;
 }
 
 function statementContaining(...needles: readonly string[]): string {
@@ -78,6 +88,24 @@ describe("identityMigrations input validation", () => {
     for (const overrides of rejected) {
       expectIdentityError(
         () => identityMigrations(withConfig(overrides)),
+        "invalid-service-profile",
+      );
+    }
+  });
+
+  it("re-validates the profile's own literals rather than trusting the object", () => {
+    // A profile reaches DDL through `ResolvedIdentityServiceConfig`, which a
+    // caller can construct by hand; every value it contributes is interpolated.
+    const rejected: readonly Record<string, unknown>[] = [
+      { id: "x'; DROP TABLE acme_id_accounts; --" },
+      { algorithm: "x'; DROP TABLE acme_id_accounts; --" },
+      { codec: { ...zeraEd25519ExternalSalt.codec, id: "x'; DROP TABLE acme_id_accounts; --" } },
+      { id: "" },
+      { codec: { ...zeraEd25519ExternalSalt.codec, id: "Zera-Ed25519" } },
+    ];
+    for (const overrides of rejected) {
+      expectIdentityError(
+        () => identityMigrations(withConfig({ profile: forgedProfile(overrides) })),
         "invalid-service-profile",
       );
     }
@@ -148,9 +176,14 @@ describe("generated migration SQL", () => {
       "acme_id_bootstrap_immutable",
       "acme_id_bootstrap_no_truncate",
     ]) {
-      expect(sql).toContain(`DROP TRIGGER IF EXISTS ${trigger} ON `);
       expect(sql).toContain(`CREATE TRIGGER ${trigger}`);
     }
+
+    // Triggers are created inside an exception handler rather than by
+    // DROP-then-CREATE: the drop would leave a window in which the table is
+    // unprotected while a second migration runner is mid-flight.
+    expect(sql).not.toContain("DROP TRIGGER");
+    expect(sql).toContain("EXCEPTION WHEN duplicate_object THEN");
 
     expect(sql).toContain("BEFORE UPDATE OR DELETE ON acme_id_service_profiles");
     expect(sql).toContain("BEFORE TRUNCATE ON acme_id_service_profiles");
@@ -198,6 +231,20 @@ describe("generated migration SQL", () => {
     expect(table).toContain("kdf_dk_len = 32");
   });
 
+  it("records and pins each wallet's address encoding", () => {
+    const table = statementContaining("CREATE TABLE IF NOT EXISTS acme_id_account_wallets");
+
+    // Without the stored codec id, a deployment that ever changed encodings
+    // could not tell which convention produced an existing address.
+    expect(table).toContain("codec_id text NOT NULL");
+    expect(table).toContain("codec_id = 'zera-ed25519-base58-v1'");
+    expect(table).toContain("profile_id = 'web2ish-zera-ed25519-external-salt-v1'");
+    expect(table).toContain("curve = 'ed25519'");
+    expect(table).toContain("application_id = 'knight-armor'");
+    expect(table).toContain("network_id = 'zera-mainnet'");
+    expect(table).toContain("address_normalized = lower(address)");
+  });
+
   it("stores only hashed session and verification secrets", () => {
     const sessions = statementContaining("CREATE TABLE IF NOT EXISTS acme_id_sessions");
     expect(sessions).toContain("token_hash text NOT NULL UNIQUE");
@@ -231,7 +278,7 @@ describe("adopting an existing public salt", () => {
   const adoptedSql = identityMigrations(
     resolveIdentityServiceConfig({
       serviceProfileId: "acme.identity",
-      profileId: "web2ish-zera-ed25519-external-salt-v1",
+      profile: zeraEd25519ExternalSalt,
       applicationId: "knight-armor",
       networkId: "zera-mainnet",
       tablePrefix: "acme_id",

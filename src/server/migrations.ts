@@ -1,4 +1,3 @@
-import { getProfile } from "../profiles.js";
 import { IdentityError } from "./errors.js";
 import type { SqlDriver } from "./sql.js";
 import type { ResolvedIdentityServiceConfig } from "./types.js";
@@ -32,6 +31,21 @@ function assertLiteral(value: string, field: string): string {
   return value;
 }
 
+/**
+ * Emits a `CREATE TRIGGER` that tolerates another runner having already made
+ * it. The dollar-quote tag must not collide with the `$$` used inside trigger
+ * function bodies elsewhere in these migrations.
+ */
+function createTriggerOnce(name: string, definition: string): string {
+  return `DO $trg$
+          BEGIN
+            CREATE TRIGGER ${name} ${definition};
+          EXCEPTION WHEN duplicate_object THEN
+            NULL;
+          END;
+          $trg$`;
+}
+
 export type IdentityMigration = Readonly<{
   version: number;
   name: string;
@@ -45,8 +59,12 @@ export function identityMigrations(
   const serviceProfileId = assertLiteral(config.serviceProfileId, "serviceProfileId");
   const applicationId = assertLiteral(config.applicationId, "applicationId");
   const networkId = assertLiteral(config.networkId, "networkId");
-  const profileId = assertLiteral(config.profileId, "profileId");
-  const profile = getProfile(config.profileId);
+  const profile = config.profile;
+  const profileId = assertLiteral(profile.id, "profileId");
+  // Recorded per wallet: the address encoding is what makes a stored address
+  // resolvable, so a deployment that ever changed codecs must still be able to
+  // tell which one produced each row.
+  const codecId = assertLiteral(profile.codec.id, "codecId");
   const algorithm = assertLiteral(profile.algorithm, "algorithm");
   const curve = profile.curve;
 
@@ -87,7 +105,18 @@ export function identityMigrations(
       version: 1,
       name: "service-profile",
       statements: Object.freeze([
-        `CREATE EXTENSION IF NOT EXISTS pgcrypto`,
+        // `IF NOT EXISTS` is check-then-act, so two runners starting together
+        // against a fresh database both see it missing and both create it; the
+        // loser gets a unique-violation on pg_extension. That is not
+        // hypothetical — several serverless instances cold-starting at once do
+        // exactly this. Swallow only the concurrency outcome.
+        `DO $ext$
+         BEGIN
+           CREATE EXTENSION IF NOT EXISTS pgcrypto;
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN
+           NULL;
+         END;
+         $ext$`,
 
         `CREATE TABLE IF NOT EXISTS ${p}_service_profiles (
            service_profile_id text PRIMARY KEY,
@@ -111,10 +140,10 @@ export function identityMigrations(
              AND network_id = '${networkId}'
              AND octet_length(public_salt) = 32
              AND public_salt <> decode(repeat('00', 32), 'hex')
-             AND kdf_n = ${profile.N}
-             AND kdf_r = ${profile.r}
-             AND kdf_p = ${profile.p}
-             AND kdf_dk_len = ${profile.dkLen}
+             AND kdf_n = ${profile.kdf.N}
+             AND kdf_r = ${profile.kdf.r}
+             AND kdf_p = ${profile.kdf.p}
+             AND kdf_dk_len = ${profile.kdf.dkLen}
            )
          )`,
 
@@ -137,22 +166,30 @@ export function identityMigrations(
          END;
          $$`,
 
-        `DROP TRIGGER IF EXISTS ${p}_service_profiles_immutable ON ${p}_service_profiles`,
-        `CREATE TRIGGER ${p}_service_profiles_immutable
-           BEFORE UPDATE OR DELETE ON ${p}_service_profiles
+        // `CREATE TRIGGER` has no IF NOT EXISTS, and a DROP-then-CREATE pair
+        // would leave a window where the table is unprotected while another
+        // runner is mid-migration. Creating inside an exception handler is both
+        // idempotent and safe to run concurrently.
+        createTriggerOnce(
+          `${p}_service_profiles_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_service_profiles
            FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`,
-        `DROP TRIGGER IF EXISTS ${p}_service_profiles_no_truncate ON ${p}_service_profiles`,
-        `CREATE TRIGGER ${p}_service_profiles_no_truncate
-           BEFORE TRUNCATE ON ${p}_service_profiles
+        ),
+        createTriggerOnce(
+          `${p}_service_profiles_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_service_profiles
            FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`,
-        `DROP TRIGGER IF EXISTS ${p}_bootstrap_immutable ON ${p}_service_profile_bootstrap`,
-        `CREATE TRIGGER ${p}_bootstrap_immutable
-           BEFORE UPDATE OR DELETE ON ${p}_service_profile_bootstrap
+        ),
+        createTriggerOnce(
+          `${p}_bootstrap_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_service_profile_bootstrap
            FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`,
-        `DROP TRIGGER IF EXISTS ${p}_bootstrap_no_truncate ON ${p}_service_profile_bootstrap`,
-        `CREATE TRIGGER ${p}_bootstrap_no_truncate
-           BEFORE TRUNCATE ON ${p}_service_profile_bootstrap
+        ),
+        createTriggerOnce(
+          `${p}_bootstrap_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_service_profile_bootstrap
            FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`,
+        ),
 
         // Provision exactly once. If bootstrap says we already minted a salt
         // but the profile row is gone, fail closed and demand a restore
@@ -178,7 +215,7 @@ export function identityMigrations(
              ) VALUES (
                '${serviceProfileId}', '${profileId}', '${algorithm}', '${curve}',
                '${applicationId}', '${networkId}', ${saltExpression},
-               ${profile.N}, ${profile.r}, ${profile.p}, ${profile.dkLen}
+               ${profile.kdf.N}, ${profile.kdf.r}, ${profile.kdf.p}, ${profile.kdf.dkLen}
              ) ON CONFLICT (service_profile_id) DO NOTHING;
 
              INSERT INTO ${p}_service_profile_bootstrap (service_profile_id)
@@ -229,6 +266,7 @@ export function identityMigrations(
            account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
            service_profile_id text NOT NULL REFERENCES ${p}_service_profiles(service_profile_id),
            profile_id text NOT NULL,
+           codec_id text NOT NULL,
            curve text NOT NULL,
            application_id text NOT NULL,
            network_id text NOT NULL,
@@ -240,6 +278,7 @@ export function identityMigrations(
            created_at timestamptz NOT NULL DEFAULT now(),
            CONSTRAINT ${p}_account_wallets_binding CHECK (
              profile_id = '${profileId}'
+             AND codec_id = '${codecId}'
              AND curve = '${curve}'
              AND application_id = '${applicationId}'
              AND network_id = '${networkId}'
@@ -356,6 +395,72 @@ export function identityMigrations(
 }
 
 /**
+ * PostgreSQL error codes raised when two sessions create the same object at
+ * once. `CREATE ... IF NOT EXISTS` is check-then-act, so under concurrency the
+ * loser sees a unique violation on a system catalog rather than a quiet no-op.
+ */
+const concurrentCreationCodes: ReadonlySet<string> = new Set([
+  "23505", // unique_violation, e.g. pg_type_typname_nsp_index, pg_extension_name_index
+  "42P07", // duplicate_table
+  "42P06", // duplicate_schema
+  "42710", // duplicate_object
+  "42723", // duplicate_function
+]);
+
+function sqlStateOf(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) {
+    return null;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+/**
+ * Two sessions running `CREATE OR REPLACE FUNCTION` on the same function race
+ * on its catalog tuple. PostgreSQL reports that as a generic internal error, so
+ * it has to be matched on the message; tolerating every XX000 would swallow
+ * unrelated server faults.
+ */
+function isConcurrentCatalogUpdate(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const message = (error as { message?: unknown }).message;
+  return typeof message === "string" && message.includes("tuple concurrently updated");
+}
+
+function isConcurrentCreation(error: unknown): boolean {
+  const state = sqlStateOf(error);
+  return (state !== null && concurrentCreationCodes.has(state)) || isConcurrentCatalogUpdate(error);
+}
+
+/**
+ * Runs one migration statement, tolerating a peer runner having created the
+ * same object mid-flight.
+ *
+ * Serverless deployments cold-start in parallel, so several instances racing
+ * through these migrations is ordinary. A stateless HTTP transport has no
+ * session-scoped advisory lock to serialize them with, so the recovery is to
+ * retry: every statement here is written to be idempotent, and a retry after a
+ * peer has finished simply finds the object present and does nothing.
+ */
+async function applyStatement(sql: SqlDriver, statement: string): Promise<void> {
+  const maxAttempts = 5;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await sql.query(statement);
+      return;
+    } catch (error) {
+      if (attempt >= maxAttempts || !isConcurrentCreation(error)) {
+        throw error;
+      }
+      // Brief, growing pause so several racing runners do not retry in lockstep.
+      await new Promise<void>((resolve) => setTimeout(resolve, attempt * 25));
+    }
+  }
+}
+
+/**
  * Applies pending migrations in order, recording each in the prefix's own
  * migration table. Statements run individually so the runner behaves the same
  * on Neon's HTTP transport as on a pooled `pg` connection.
@@ -366,7 +471,8 @@ export async function runIdentityMigrations(
 ): Promise<readonly number[]> {
   const p = assertIdentifier(config.tablePrefix, "tablePrefix");
 
-  await sql.query(
+  await applyStatement(
+    sql,
     `CREATE TABLE IF NOT EXISTS ${p}_schema_migrations (
        version integer PRIMARY KEY,
        name text NOT NULL,
@@ -385,7 +491,7 @@ export async function runIdentityMigrations(
       continue;
     }
     for (const statement of migration.statements) {
-      await sql.query(statement);
+      await applyStatement(sql, statement);
     }
     await sql.query(
       `INSERT INTO ${p}_schema_migrations (version, name)

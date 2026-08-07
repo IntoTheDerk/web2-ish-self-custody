@@ -2,10 +2,16 @@
 
 Operator and integrator reference for `web2-ish-self-custody/server`.
 
-This module is the server half of the external-salt derivation profile. It owns
+This module is the server half of any service-salted derivation profile. It owns
 one immutable 32-byte public salt per service, publishes the pinned KDF
 parameters, verifies signatures over single-use challenges, and issues opaque
 sessions. It is the only stateful part of this package.
+
+It is chain-agnostic. The deployment hands it a `DerivationProfile` object, and
+every address and public-key operation runs through that profile's
+`IdentityCodec` — there is no encoding convention hardcoded anywhere in this
+module. The examples below use ZERA because that is the chain that ships in the
+box, not because the service knows what ZERA is.
 
 `src/server/contract.ts` is the authoritative TypeScript surface and
 `src/server/router.ts` the authoritative wire behavior. This document describes
@@ -17,7 +23,7 @@ both.
 
 - the per-service 32-byte public salt and the pinned scrypt parameters
 - normalized usernames, display names, optional emails and verification state
-- public wallet material: address, encoded public key, fingerprint
+- public wallet material: address, encoded public key, codec id, fingerprint
 - single-use challenge nonces with their expiry and consumption state
 - SHA-256 hashes of session tokens and of email verification codes
 - a SHA-256 hash of the user agent, and a caller-computed IP hash
@@ -53,27 +59,51 @@ to a random wallet seed. See [the security model](SECURITY_MODEL.md).
 
 ### Serviceable profiles
 
-Exactly one profile is serviceable, because only it has a salt for a server to
-own:
+Serviceability is a **policy**, not a list of blessed ids. A profile is
+serviceable when both of the following hold, and
+`resolveIdentityServiceConfig` checks both at construction:
 
-| `profileId` | curve | algorithm | scrypt |
-| --- | --- | --- | --- |
-| `web2ish-zera-ed25519-external-salt-v1` | ed25519 | `scrypt-sha512-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
+1. **`saltPolicy` is `external-32`.** A service exists to own and publish a
+   salt. A profile that derives its own salt from the username has nothing for a
+   server to hold, and configuring one here would publish a salt clients must
+   ignore. Anything else throws `invalid-service-profile` with a message naming
+   the offending policy.
+2. **Its codec round-trips.** `assertCodecRoundTrip(profile.codec, …)` runs once
+   at startup against a fixed 32-byte key. A codec whose `decodePublicKey` does
+   not invert its `encodePublicKey` would let the service enroll wallets it can
+   never authenticate again, so this fails the deployment rather than the
+   thousandth login.
 
-`web2ish-zera-ed25519-v1` derives its own salt from the username and has nothing
-for a server to hold, so it is not serviceable. `ServerProfileId` is narrowed to
-the single id above, so a deployment cannot be configured onto the stateless
-profile even by mistake.
+Nothing else is required. Any chain that satisfies those two conditions can be
+served by this module without a change to it.
+
+The profile the deployment supplies is the single source of the curve, the
+algorithm label, the KDF parameters, and the codec. Migration 1 bakes
+`profile.id`, `profile.algorithm`, `profile.curve`, and every KDF value into the
+CHECK constraint on `<p>_service_profiles`; migration 2 bakes `profile.id` and
+`profile.codec.id` into the binding CHECK on `<p>_account_wallets`. A deployment
+whose configuration has drifted from its database cannot write a row at all.
+
+The bundled ZERA profile that satisfies the policy:
+
+| `profileId` | codec | curve | algorithm | scrypt |
+| --- | --- | --- | --- | --- |
+| `web2ish-zera-ed25519-external-salt-v1` | `zera-ed25519-base58-v1` | ed25519 | `scrypt-sha512-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
+
+Its sibling `web2ish-zera-ed25519-v1` derives its own salt and is therefore not
+serviceable.
 
 ## Registration sequence
 
 The client derives. The server verifies. No step reverses that.
 
 1. **Client** `GET /profile`.
-2. **Client** asserts the response matches its pinned expectations: exact
-   `profileId`, exact `applicationId` and `networkId`, exact KDF parameters, and
-   a 64-character `publicSaltHex`. Reject anything else. A client that accepts
-   server-supplied KDF parameters has handed the server a downgrade lever.
+2. **Client** asserts the response matches the profile object it imported:
+   exact `profileId`, exact `codecId`, exact `algorithm`, exact `applicationId`
+   and `networkId`, exact KDF parameters, and a 64-character `publicSaltHex`.
+   Take the salt and nothing else. A client that accepts server-supplied KDF
+   parameters has handed the server a downgrade lever, and one that accepts a
+   server-supplied `codecId` has let it choose what an address means.
 3. **Client** (only when the deployment sets `requireVerifiedEmail`) completes
    `POST /email-verifications` and `POST /email-verifications/confirm` first.
 4. **Client** `POST /challenges` with `purpose: "registration"`.
@@ -179,6 +209,7 @@ Public. No request body.
 {
   "serviceProfileId": "knight-armor",
   "profileId": "web2ish-zera-ed25519-external-salt-v1",
+  "codecId": "zera-ed25519-base58-v1",
   "algorithm": "scrypt-sha512-ed25519-external-32-v1",
   "curve": "ed25519",
   "applicationId": "knight-armor",
@@ -187,6 +218,13 @@ Public. No request body.
   "kdf": { "N": 65536, "r": 8, "p": 1, "dkLen": 32 }
 }
 ```
+
+`codecId` names the address encoding this deployment uses, so a client can
+confirm it will encode addresses the way the server does before it enrolls one.
+Every other field is read from the immutable `<p>_service_profiles` row;
+`codecId` comes from the configured profile object, and the service cross-checks
+the stored `profileId`, `applicationId`, and `networkId` against its
+configuration on every fresh read, raising `invalid-service-profile` on drift.
 
 Errors: `service-profile-missing` (503) when the profile row is absent, which
 means migrations have not run or the row was deleted.
@@ -251,6 +289,7 @@ confirmed, when the deployment sets `requireVerifiedEmail`.
     "accountId": "8d2c…",
     "serviceProfileId": "knight-armor",
     "profileId": "web2ish-zera-ed25519-external-salt-v1",
+    "codecId": "zera-ed25519-base58-v1",
     "curve": "ed25519",
     "applicationId": "knight-armor",
     "networkId": "zera-mainnet",
@@ -538,13 +577,16 @@ First 48 bytes, hex:
 ```
 
 Signed with the synthetic Ed25519 seed of 32 `0x07` bytes — for reproduction
-only, never a real wallet:
+only, never a real wallet. The address and identifier rows are the
+`zera-ed25519-base58-v1` encoding of that public key; the raw key and the
+signature are codec-independent and are what a deployment on another chain would
+reproduce.
 
 | | |
 | --- | --- |
 | public key (raw hex) | `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c` |
-| address (Base58) | `GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
-| public key identifier | `A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
+| address (ZERA codec) | `GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
+| public key identifier (ZERA codec) | `A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
 | fingerprint | `GMAD RPPB C7P5 ARKV` |
 | signature | `b658e7299dd5b8733b3827becb870d815b2b9084d24e6f512ae4accb0d768ddaa1a51d97d91e49c3525573b5062b388341c51216a2a8bb2558c4e19980bbdd04` |
 
@@ -565,10 +607,27 @@ indistinguishable to the caller.
 
 The server recomputes the address from the submitted public key and rejects any
 mismatch, so a caller cannot register a key under an address it does not
-control. The public key must be `A_<base58>`; the base58 body must decode to
-exactly 32 bytes; the address is the Base58 encoding of those bytes and must
-equal the submitted `address` after trimming; `addressNormalized` is the
-lowercased address.
+control. `canonicalWalletIdentity(codec, { publicKey, address })` takes the
+deployment's codec as its first argument and applies the same four rules for
+every chain:
+
+1. `codec.decodePublicKey(publicKey)` must succeed — a throw becomes
+   `invalid-public-key` (400).
+2. The decoded key must be exactly 32 bytes.
+3. `codec.encodeAddress(decoded)` must equal the submitted `address` after
+   trimming, or the request is `invalid-address` (400).
+4. The stored `publicKey` is the **re-encoded** `codec.encodePublicKey(decoded)`,
+   not the caller's string, so a non-canonical encoding of a key the caller does
+   control cannot be smuggled in either.
+
+`addressNormalized` is the lowercased address; `codecId` is recorded from the
+codec that produced it.
+
+For the bundled ZERA codec those rules read as: the public key must be
+`A_<base58>`; the base58 body must decode to exactly 32 bytes; the address is
+the Base58 encoding of those bytes. A deployment on a different chain gets the
+same guarantees with its own encoding, because the rules above never mention
+one.
 
 The `fingerprint` is a display aid: alphanumerics of the address, uppercased,
 first 16 characters, in groups of four. It is not a security control and must
@@ -659,16 +718,31 @@ forcing emails to be unique or present.
 ### `<p>_account_wallets`
 
 `id uuid` (PK), `account_id` (FK, `ON DELETE CASCADE`), `service_profile_id`
-(FK), `profile_id`, `curve`, `application_id`, `network_id`, `address`,
-`address_normalized`, `public_key`, `fingerprint`, `is_primary`, `created_at`.
+(FK), `profile_id`, `codec_id`, `curve`, `application_id`, `network_id`,
+`address`, `address_normalized`, `public_key`, `fingerprint`, `is_primary`,
+`created_at`.
 
-Invariants: the `_binding` CHECK pins `profile_id`, `curve`, `application_id`,
-and `network_id` to the literals from migration time, so a wallet from a
-different derivation namespace cannot be stored here at all;
-`address_normalized = lower(address)`; `UNIQUE (service_profile_id,
+`codec_id` records which address encoding produced the stored address. It is
+written on every registration from `profile.codec.id` and surfaced on the
+`IdentityWallet` type. The address is only resolvable if you know how it was
+encoded, so a deployment that ever moved between codecs must still be able to
+tell, row by row, which one applies — a column, not an assumption.
+
+Invariants: the `<p>_account_wallets_binding` CHECK pins `profile_id`,
+`codec_id`, `curve`, `application_id`, and `network_id` to the literals baked in
+at migration time, so a wallet from a different derivation namespace *or a
+different address encoding* cannot be stored here at all;
+`char_length(address) BETWEEN 8 AND 128`; `address_normalized = lower(address)`;
+`char_length(public_key) BETWEEN 8 AND 160`; `UNIQUE (service_profile_id,
 address_normalized)` means one address enrolls once per service; a partial
 unique index on `(account_id) WHERE is_primary` allows exactly one primary
 wallet per account without needing a trigger.
+
+Because `codec_id` is inside the binding CHECK, changing a deployment's codec is
+not a configuration change: existing rows become unwritable under the new
+literal, and the migration's own CHECK rejects the mismatch. That is the
+intended outcome — a new codec is a new address convention, which is a new
+wallet namespace.
 
 ### `<p>_auth_challenges`
 
@@ -730,7 +804,7 @@ salt instead of generating one:
 ```ts
 const service = createIdentityService(sql, {
   serviceProfileId: "example-password-wallet-v1",
-  profileId: "web2ish-zera-ed25519-external-salt-v1",
+  profile: zeraEd25519ExternalSalt,
   applicationId: "example-app",
   networkId: "zera-mainnet",
   tablePrefix: "example_identity",
@@ -767,7 +841,30 @@ address.
 
 ### Configuration
 
-Pin `serviceProfileId`, `profileId`, `applicationId`, and `networkId` in source,
+The config surface is:
+
+```ts
+type IdentityServiceConfig = {
+  serviceProfileId: string;
+  profile: DerivationProfile;   // the object, imported from a chain package
+  applicationId: string;
+  networkId: string;
+  tablePrefix?: string;
+  adoptPublicSaltHex?: string;
+  sessionTtlSeconds?: number;
+  challengeTtlSeconds?: number;
+  emailVerificationTtlSeconds?: number;
+  emailVerificationMaxAttempts?: number;
+  requireVerifiedEmail?: boolean;
+};
+```
+
+`profile` is the profile **object**, not an id string. There is no registry to
+resolve an id against, which is deliberate: the profile's KDF parameters,
+algorithm label, domain strings, and codec all arrive as one reviewed unit that
+a config value cannot partially override.
+
+Pin `serviceProfileId`, `profile`, `applicationId`, and `networkId` in source,
 not in environment variables. Changing any of them is a wallet migration, not a
 config tweak, and a value that can be changed by editing a dashboard field will
 eventually be changed by editing a dashboard field. The database CHECK
@@ -795,6 +892,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 ```ts
 // app/api/identity/[...path]/route.ts
 import { neon } from "@neondatabase/serverless";
+import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
 import {
   createIdentityRouter,
   createNeonIdentityService,
@@ -805,7 +903,7 @@ const service = createNeonIdentityService({
   connectionString: process.env.DATABASE_URL!,
   config: {
     serviceProfileId: "knight-armor",
-    profileId: "web2ish-zera-ed25519-external-salt-v1",
+    profile: zeraEd25519ExternalSalt,
     applicationId: "knight-armor",
     networkId: "zera-mainnet",
   },
@@ -852,6 +950,7 @@ interactive transactions. Consequences an operator must respect:
 ```ts
 import { createServer } from "node:http";
 import { Pool } from "pg";
+import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
 import {
   createIdentityRouter,
   createPgIdentityService,
@@ -862,7 +961,7 @@ const service = createPgIdentityService({
   pool: new Pool({ connectionString: process.env.DATABASE_URL, max: 10 }),
   config: {
     serviceProfileId: "knight-armor",
-    profileId: "web2ish-zera-ed25519-external-salt-v1",
+    profile: zeraEd25519ExternalSalt,
     applicationId: "knight-armor",
     networkId: "zera-mainnet",
   },
@@ -971,7 +1070,7 @@ application logic:
    meaningless at another, even for the same wallet.
 5. **Protocol binding.** The fixed domain string prevents these signatures from
    being replayed against any other protocol the same key signs for — including
-   real ZERA transactions.
+   real transactions on whatever chain the deployment's codec belongs to.
 
 Point 5 has a mirror image that the client owns. `signExactMessageUnsafe` is
 named that way because it signs whatever bytes it is handed. A client that signs

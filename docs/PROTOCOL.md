@@ -1,34 +1,85 @@
 # Protocol
 
-The two built-in profiles are immutable derivation protocols. This document is
-the wire specification: it contains every constant, transcript, and encoding
-rule needed to reimplement derivation from scratch and reproduce the committed
-vectors. Where this document and the committed source disagree, the source and
-the vectors are the contract.
+This document is the wire specification. It has two layers:
 
-Both profiles produce an Ed25519 wallet. They differ in exactly one step — where
-the 32-byte scrypt salt comes from — and in the entropy domain string that keeps
-their transcripts apart.
+1. **The generic transcript** — the rule every profile follows, parameterized
+   over that profile's domain-separation strings, salt policy, and KDF
+   parameters. It contains no chain-specific value.
+2. **The ZERA instance** — the exact literal constants that turn the generic
+   rule into the two bundled ZERA profiles.
 
-| `profileId` | `algorithm` | salt policy | scrypt |
-| --- | --- | --- | --- |
-| `web2ish-zera-ed25519-v1` | `scrypt-sha512-ed25519-v1` | derived from the normalized username | N=65536, r=8, p=1, dkLen=32 |
-| `web2ish-zera-ed25519-external-salt-v1` | `scrypt-sha512-ed25519-external-32-v1` | exactly 32 bytes supplied by the service | N=65536, r=8, p=1, dkLen=32 |
+Someone should be able to reimplement either layer from this document alone:
+part 1 to support a new chain, part 2 to reproduce the committed ZERA vectors
+byte for byte. Where this document and the committed source disagree, the source
+and the vectors are the contract.
 
-## Constants
+---
 
-All domain strings are UTF-8. Only the password-hash domain carries a trailing
-newline; the others are joined into transcripts with explicit `\n` separators.
+# Part 1 — the generic transcript
 
-| constant | exact value |
+## The profile is the specification
+
+A `DerivationProfile` is the complete definition of one wallet family. Nothing
+outside it influences derivation.
+
+| field | type | role |
+| --- | --- | --- |
+| `id` | string | names this exact transcript; recorded with every derived identity |
+| `curve` | `"ed25519"` | the only supported curve |
+| `algorithm` | string | descriptive label a service records and publishes |
+| `saltPolicy` | `"external-32"` \| `"derived-from-username"` | where the scrypt salt comes from |
+| `kdf` | `{ N, r, p, dkLen }` | scrypt parameters; `dkLen` is always 32 |
+| `domains.passwordHash` | string | prefixed to the raw password bytes |
+| `domains.entropy` | string | first line of the entropy transcript |
+| `domains.salt` | string \| absent | first line of the salt transcript |
+| `codec` | `IdentityCodec` | how a public key becomes an address and an identifier |
+
+**Domain strings are part of the wallet definition, not formatting.** Change one
+byte of one of them and the same credentials derive a different key, which is
+indistinguishable from destroying every wallet in that family. A different
+transcript is therefore always a new profile id — never an edit to an existing
+one. The same rule applies to the KDF parameters, the salt policy, the
+normalization rules, and the codec.
+
+### Profile validation
+
+`defineDerivationProfile` rejects a profile rather than trusting it. An
+independent implementation should enforce the same floor:
+
+- `id` matches `^[a-z0-9][a-z0-9._-]{2,79}$`.
+- `curve` is exactly `ed25519`.
+- `kdf.N` is an integer power of two and at least 65536.
+- `kdf.r` is an integer at least 8.
+- `kdf.p` is an integer at least 1.
+- `kdf.dkLen` is exactly 32 — the output *is* the Ed25519 seed.
+- `domains.passwordHash` and `domains.entropy` are each 1–200 characters.
+- `saltPolicy: "derived-from-username"` requires `domains.salt`.
+- `saltPolicy: "external-32"` forbids `domains.salt`, because such a profile
+  never derives a salt and a stray domain would imply otherwise.
+
+The KDF floor is deliberate. This construction derives a wallet from a human
+password, so a profile that lowers the work factor is not a configuration
+choice; it is a downgrade.
+
+## The codec contract
+
+An `IdentityCodec` is the only place a chain's encoding lives.
+
+| member | contract |
 | --- | --- |
-| password-hash domain | `web2-ish-self-custody password hash v1\n` |
-| username-salt domain | `web2-ish-self-custody public username salt v1` |
-| entropy domain, `web2ish-zera-ed25519-v1` | `web2-ish-self-custody ZERA Ed25519 entropy v1` |
-| entropy domain, `web2ish-zera-ed25519-external-salt-v1` | `web2-ish-self-custody ZERA Ed25519 external salt entropy v1` |
+| `id` | matches `^[a-z0-9][a-z0-9._-]{2,63}$`; recorded alongside every enrolled wallet |
+| `encodeAddress(publicKeyBytes)` | the canonical public address for a raw 32-byte Ed25519 public key |
+| `encodePublicKey(publicKeyBytes)` | the canonical wire identifier; may differ from the address when a chain tags its keys |
+| `decodePublicKey(identifier)` | the inverse of `encodePublicKey`; **must throw** on anything malformed rather than coercing or truncating |
 
-The password-hash domain is 39 bytes including its trailing LF (U+000A). The
-username-salt domain is used only by `web2ish-zera-ed25519-v1`.
+Two properties are load-bearing and are checked rather than assumed:
+
+- **Round-trip.** `decodePublicKey(encodePublicKey(k))` must equal `k` for every
+  32-byte `k`. `assertCodecRoundTrip(codec, k)` performs exactly this check; the
+  identity service runs it at startup.
+- **Injectivity.** Two distinct public keys must not encode to the same address.
+  The address is what a server binds an account to; a collision there is a
+  custody failure, not a display bug.
 
 ## Inputs
 
@@ -52,13 +103,15 @@ is rejected rather than silently folded. It also guarantees the normalized
 username contains no line break, which the newline-delimited transcripts below
 depend on for unambiguity.
 
+These rules are core-wide. A profile does not get to vary them.
+
 ### Password
 
 The password is supplied as raw bytes, not as a string. It must be 24 to 1,024
-bytes inclusive. No normalization, trimming, case folding, or Unicode
-normalization is applied: the exact bytes are hashed. A UTF-8 encoding of the
-user's input is the expected form, and the byte count — not the character
-count — is what the bounds apply to.
+bytes inclusive — also core-wide. No normalization, trimming, case folding, or
+Unicode normalization is applied: the exact bytes are hashed. A UTF-8 encoding
+of the user's input is the expected form, and the byte count, not the character
+count, is what the bounds apply to.
 
 ### Derivation context
 
@@ -71,35 +124,43 @@ whitespace and lowercasing, then required to match:
 
 That is 1 to 80 characters, starting with an ASCII alphanumeric, from the
 alphabet `a-z0-9._:-`. Because the accepted output alphabet is ASCII, an
-implementation may equivalently require callers to supply the canonical form
-and reject anything else.
+implementation may equivalently require callers to supply the canonical form and
+reject anything else.
 
 ### Salt
 
-`web2ish-zera-ed25519-external-salt-v1` requires exactly 32 bytes from the
-caller — 31 or 33 is an error, not something to pad or truncate. The salt is
-public derivation metadata, not credential entropy and not a secret.
+Governed entirely by `saltPolicy`:
 
-`web2ish-zera-ed25519-v1` derives its salt (step 3 below) and rejects a
-caller-supplied salt outright rather than ignoring it.
+| policy | rule |
+| --- | --- |
+| `external-32` | the caller supplies **exactly** 32 bytes; 31 or 33 is an error, never something to pad or truncate. A caller-supplied salt is required. |
+| `derived-from-username` | the salt is computed in step 3 below. A caller-supplied salt is **rejected outright** rather than ignored. |
+
+An external salt is public derivation metadata — a namespace separator, not
+credential entropy and not a secret.
 
 ## Derivation
+
+Write `D_pw` for `profile.domains.passwordHash`, `D_ent` for
+`profile.domains.entropy`, and `D_salt` for `profile.domains.salt`. All strings
+are encoded as UTF-8.
 
 ### 1. Password hash
 
 ```
-passwordHash = SHA-512( utf8("web2-ish-self-custody password hash v1\n") ‖ passwordBytes )
+passwordHash = SHA-512( utf8(D_pw) ‖ passwordBytes )
 ```
 
-Byte concatenation, no separator beyond the domain's own trailing newline.
-Result: 64 bytes.
+Byte concatenation with **no separator**. Any separator a profile wants must be
+the trailing character of `D_pw` itself — which is why the bundled profiles end
+that domain with a newline. Result: 64 bytes.
 
 ### 2. Wallet entropy
 
 Join five lines with a single `\n` (U+000A), encode as UTF-8, and hash:
 
 ```
-line 1  <entropy domain for the selected profile>
+line 1  D_ent
 line 2  <canonical applicationId>
 line 3  <canonical networkId>
 line 4  <normalized username>
@@ -114,20 +175,19 @@ No trailing newline. Result: 64 bytes. Line 5 is lowercase hex of the raw
 `passwordHash` bytes, not the bytes themselves — an implementation that
 concatenates raw bytes here derives a different wallet.
 
-The application and network stay in this transcript for both profiles, even
-though an external salt should already be service-specific. That makes
-service/network separation explicit and keeps an accidental salt collision from
-collapsing two derivation domains into one.
+The application and network stay in this transcript under **every** salt policy,
+even though an external salt should already be service-specific. That makes
+service and network separation explicit and keeps an accidental salt collision
+from collapsing two derivation domains into one.
 
 ### 3. Salt
 
-For `web2ish-zera-ed25519-external-salt-v1`, the salt is the caller's 32 bytes,
-used verbatim.
+For `external-32`, the salt is the caller's 32 bytes, used verbatim.
 
-For `web2ish-zera-ed25519-v1`, join four lines with `\n` and hash:
+For `derived-from-username`, join four lines with `\n` and hash:
 
 ```
-line 1  web2-ish-self-custody public username salt v1
+line 1  D_salt
 line 2  <canonical applicationId>
 line 3  <canonical networkId>
 line 4  <normalized username>
@@ -143,54 +203,154 @@ namespaces; it adds no secrecy.
 ### 4. scrypt
 
 ```
-seed = scrypt(password = walletEntropy, salt = salt, N = 65536, r = 8, p = 1, dkLen = 32)
+seed = scrypt(password = walletEntropy, salt = salt,
+              N = kdf.N, r = kdf.r, p = kdf.p, dkLen = kdf.dkLen)
 ```
 
 The 64-byte `walletEntropy` is the scrypt password input and the 32-byte salt is
-the scrypt salt input. `N = 65536, r = 8` requires roughly 64 MiB of working
-memory; implementations that impose a `maxmem` limit must raise it accordingly.
-Result: a 32-byte Ed25519 seed.
+the scrypt salt input. Because `dkLen` is fixed at 32, the result **is** the
+Ed25519 seed; there is no truncation or expansion step. At `N = 65536, r = 8`
+scrypt requires roughly 64 MiB of working memory, so implementations that impose
+a `maxmem` limit must raise it accordingly.
 
 ### 5. Identity encoding
 
 The 32-byte seed is an Ed25519 private key per RFC 8032. Derive the 32-byte
-encoded public key from it in the standard way.
+encoded public key from it in the standard way, then hand that public key to the
+profile's codec.
 
 | field | rule |
 | --- | --- |
 | `publicKeyBytes` | the raw 32-byte Ed25519 public key |
-| `address` | Base58 of `publicKeyBytes`, Bitcoin alphabet `123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`, no checksum, no version byte |
-| `publicKey` | the string `A_` followed by `address` |
+| `address` | `codec.encodeAddress(publicKeyBytes)` |
+| `publicKey` | `codec.encodePublicKey(publicKeyBytes)` |
 | `curve` | the literal `ed25519` |
-| `profileId` | the selected profile id |
+| `profileId` | `profile.id` |
+| `codecId` | `profile.codec.id` |
 | `normalizedUsername` | the value from the username rules above |
 | `fingerprint` | display aid, see below |
 
-`fingerprint` is computed from `address`: drop every character that is not
-ASCII alphanumeric, uppercase the rest, take the first 16 characters, and insert
-a single space after each group of 4. It is a human-comparison aid only and must
-never be checked in place of the address.
+`fingerprint` is computed from `address` by the core, not by the codec: drop
+every character that is not ASCII alphanumeric, uppercase the rest, take the
+first 16 characters, and insert a single space after each group of 4. It is a
+human-comparison aid only and must never be checked in place of the address.
 
-Base58 has no fixed output length: a public key with leading zero bytes encodes
-shorter. Both committed vectors are 44 characters, and the server accepts 32 to
-64. Validators should accept a range rather than pin a single length.
+`codecId` travels with the identity so a deployment can always tell which
+encoding produced a stored address.
 
 ## Signing
 
 Signatures are Ed25519 as specified in RFC 8032 — PureEdDSA, deterministic, no
 prehash, no context string — over the exact message bytes, producing 64 bytes.
-On the wire the server encodes them as 128 lowercase hex characters.
+On the wire the identity service encodes them as 128 lowercase hex characters.
 
-The SDK accepts messages of 1 to 1,048,576 bytes. The signing method is named
+The core accepts messages of 1 to 1,048,576 bytes. The signing method is named
 `signExactMessageUnsafe` because it signs precisely what it is handed: it is the
-primitive needed to sign exact ZERA transaction bytes, not permission to sign
-bytes supplied by a server or an untrusted renderer. A consuming application
-must locally reconstruct the typed operation, display a trusted confirmation,
-and only then pass the verified bytes to the scoped signer.
+primitive needed to sign exact transaction bytes, not permission to sign bytes
+supplied by a server or an untrusted renderer. A consuming application must
+locally reconstruct the typed operation, display a trusted confirmation, and
+only then pass the verified bytes to the scoped signer.
 
-The authentication challenge format that `web2-ish-self-custody/server` issues
-is a separate, layered specification; see
+The authentication challenge format that `web2-ish-self-custody/server` issues is
+a separate, layered specification; see
 [the server API reference](SERVER_API.md#challenge-message-format).
+
+## Versioning
+
+Changing any byte of a domain string, transcript layout, normalization rule, KDF
+parameter, salt policy, curve rule, or codec requires a **new profile id**, and a
+change to an encoding requires a new codec id. Published behavior must never be
+upgraded in place — a wallet is defined by its profile, so a silent change
+destroys every wallet derived under it.
+
+Adding a profile or a chain is not a migration. Moving an existing user onto a
+different one is, and it needs an enrollment step.
+
+---
+
+# Part 2 — the ZERA instance
+
+Everything below is exported from `web2-ish-self-custody/chains/zera`. These are
+fixed wire surface, reproduced here exactly as specified.
+
+## The ZERA codec
+
+`zeraEd25519Codec`, id **`zera-ed25519-base58-v1`**.
+
+| member | rule |
+| --- | --- |
+| `encodeAddress(k)` | Base58 of the raw 32 bytes, Bitcoin alphabet `123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`, no checksum, no version byte |
+| `encodePublicKey(k)` | the literal `A_` followed by `encodeAddress(k)` |
+| `decodePublicKey(s)` | as below |
+
+`decodePublicKey` accepts only the canonical identifier form:
+
+1. Trim surrounding whitespace.
+2. Require the result to start with `A_`; otherwise throw `invalid-public-key`.
+3. Take everything after the **last** `_` as the encoded body.
+4. Require the body to match `^[1-9A-HJ-NP-Za-km-z]{32,64}$`.
+5. Base58-decode it; a decode failure throws `invalid-public-key`.
+6. Require exactly 32 decoded bytes.
+
+Base58 has no fixed output length: a public key with leading zero bytes encodes
+shorter. Both committed vectors are 44 characters and the accepted range is 32
+to 64, so validators should accept a range rather than pin a single length.
+
+## The two ZERA profiles
+
+Both use `zeraEd25519Codec`, the Ed25519 curve, and scrypt
+`N = 65536, r = 8, p = 1, dkLen = 32`. They differ in exactly two things: where
+the salt comes from, and the entropy domain that keeps their transcripts apart.
+
+| | `zeraEd25519` | `zeraEd25519ExternalSalt` |
+| --- | --- | --- |
+| `id` | `web2ish-zera-ed25519-v1` | `web2ish-zera-ed25519-external-salt-v1` |
+| `algorithm` | `scrypt-sha512-ed25519-v1` | `scrypt-sha512-ed25519-external-32-v1` |
+| `saltPolicy` | `derived-from-username` | `external-32` |
+| `domains.salt` | `web2-ish-self-custody public username salt v1` | *(absent)* |
+
+## Exact domain strings
+
+All UTF-8. Only the password-hash domain carries a trailing newline; the others
+are joined into transcripts with explicit `\n` separators.
+
+| constant | exact value |
+| --- | --- |
+| `D_pw`, both profiles | `web2-ish-self-custody password hash v1\n` |
+| `D_ent`, `web2ish-zera-ed25519-v1` | `web2-ish-self-custody ZERA Ed25519 entropy v1` |
+| `D_ent`, `web2ish-zera-ed25519-external-salt-v1` | `web2-ish-self-custody ZERA Ed25519 external salt entropy v1` |
+| `D_salt`, `web2ish-zera-ed25519-v1` only | `web2-ish-self-custody public username salt v1` |
+
+The password-hash domain is 39 bytes including its trailing LF (U+000A). The two
+profiles share it deliberately: the password hash is an input to the entropy
+transcript, and it is that transcript's own domain that separates them.
+
+## Fully instantiated derivation
+
+For `web2ish-zera-ed25519-external-salt-v1`:
+
+```
+passwordHash  = SHA-512( utf8("web2-ish-self-custody password hash v1\n") ‖ passwordBytes )
+walletEntropy = SHA-512( utf8(
+                  "web2-ish-self-custody ZERA Ed25519 external salt entropy v1" ‖ "\n" ‖
+                  applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖
+                  normalizedUsername ‖ "\n" ‖ hex(passwordHash) ) )
+salt          = the caller's exact 32 bytes
+seed          = scrypt(walletEntropy, salt, N=65536, r=8, p=1, dkLen=32)
+publicKey     = Ed25519 public key of seed
+address       = base58(publicKey)
+identifier    = "A_" ‖ address
+```
+
+For `web2ish-zera-ed25519-v1`, the entropy domain becomes
+`web2-ish-self-custody ZERA Ed25519 entropy v1` and the salt is derived instead
+of supplied:
+
+```
+salt = SHA-256( utf8(
+         "web2-ish-self-custody public username salt v1" ‖ "\n" ‖
+         applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖ normalizedUsername ) )
+```
 
 ## Test vectors
 
@@ -227,13 +387,8 @@ The two vectors share credentials, application, and network. Their addresses
 differ solely because the salt and the entropy domain differ, which is the
 profile separation this specification exists to guarantee.
 
-## Versioning
-
-Changing any byte of a domain string, transcript layout, normalization rule, KDF
-parameter, salt policy, curve rule, or identity encoding requires a new profile
-ID. Published profile behavior must never be upgraded in place — a wallet is
-defined by its profile, so a silent change destroys every wallet derived under
-it.
+A refactor that changes these values is wrong. The vectors are not updated to
+match an implementation; the implementation is corrected to match the vectors.
 
 ## Independent vector verification
 
@@ -241,11 +396,11 @@ it.
 `scripts/verify_zera_external_salt_vector.py` reconstruct the committed vectors
 from the fixtures using Python's standard-library `hashlib` and the separately
 maintained `cryptography` package. Neither imports or executes the TypeScript
-SDK. Between them they check username normalization, both domain-separated
-transcripts, the salt (derived and supplied), the scrypt result, the public key,
-the Base58 identity encoding, the deterministic signature, and signature
-verification. Both fail on missing, unexpected, duplicate, incorrectly typed, or
-incorrectly encoded fixture fields.
+implementation. Between them they check username normalization, both
+domain-separated transcripts, the salt (derived and supplied), the scrypt
+result, the public key, the Base58 identity encoding, the deterministic
+signature, and signature verification. Both fail on missing, unexpected,
+duplicate, incorrectly typed, or incorrectly encoded fixture fields.
 
 This is cross-implementation regression evidence for the committed vectors. It
 is not a cryptographic audit, does not prove browser or deployment safety, does

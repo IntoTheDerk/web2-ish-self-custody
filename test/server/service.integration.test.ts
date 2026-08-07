@@ -1,7 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { normalizeUsername, withDerivedWallet } from "../../src/index.js";
-import type { Ed25519Wallet } from "../../src/index.js";
+import type { DerivedWallet } from "../../src/index.js";
 import { CHALLENGE_DOMAIN } from "../../src/server/challenge.js";
 import type { IdentityService } from "../../src/server/contract.js";
 import { IdentityError, enumerationSensitiveCodes } from "../../src/server/errors.js";
@@ -23,7 +24,9 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
 const encoder = new TextEncoder();
-const profileId = "web2ish-zera-ed25519-external-salt-v1";
+const profile = zeraEd25519ExternalSalt;
+const profileId = profile.id;
+const codecId = profile.codec.id;
 const applicationId = "knight-armor";
 const networkId = "zera-testnet";
 
@@ -157,11 +160,11 @@ type WalletCredentials = Readonly<{ username: string; password: string }>;
 function useWallet<T>(
   credentials: WalletCredentials,
   publicSaltHex: string,
-  use: (wallet: Ed25519Wallet) => T,
+  use: (wallet: DerivedWallet) => T,
 ): Promise<T> {
   return withDerivedWallet(
     {
-      profile: profileId,
+      profile,
       username: credentials.username,
       password: encoder.encode(credentials.password),
       context: { applicationId, networkId },
@@ -215,7 +218,7 @@ const serviceProfileId = `w2sc-test-${suffix}`;
 
 const baseConfig: IdentityServiceConfig = {
   serviceProfileId,
-  profileId,
+  profile,
   applicationId,
   networkId,
   tablePrefix,
@@ -304,6 +307,9 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     expect(registered.wallet.isPrimary).toBe(true);
     expect(registered.wallet.curve).toBe("ed25519");
     expect(registered.wallet.profileId).toBe(profileId);
+    // The stored row records which encoding produced its address, so the
+    // deployment stays able to resolve it if it ever adds a second chain.
+    expect(registered.wallet.codecId).toBe(codecId);
     expect(registered.wallet.accountId).toBe(registered.account.id);
   }, derivationTimeoutMs);
 
@@ -347,6 +353,9 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
 
     expect(published.serviceProfileId).toBe(serviceProfileId);
     expect(published.profileId).toBe(profileId);
+    // Published so a client can confirm it will spell addresses the way the
+    // server does before it enrolls anything.
+    expect(published.codecId).toBe(codecId);
     expect(published.curve).toBe("ed25519");
     expect(published.algorithm).toBe("scrypt-sha512-ed25519-external-32-v1");
     expect(published.applicationId).toBe(applicationId);
@@ -413,6 +422,12 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     expect(authenticated.wallets.map((wallet) => wallet.address)).toContain(walletA.address);
     expect(authenticated.wallets.map((wallet) => wallet.id)).toContain(registration.walletId);
     expect(authenticated.wallets.filter((wallet) => wallet.isPrimary)).toHaveLength(1);
+    // Every wallet the service hands back carries its address encoding, so the
+    // `codec_id` column is read back and not merely written.
+    for (const wallet of authenticated.wallets) {
+      expect(wallet.codecId).toBe(codecId);
+      expect(wallet.profileId).toBe(profileId);
+    }
 
     const challenge = await service.createChallenge(credentialsA.username, "login");
     const signature = await signChallenge(credentialsA, publicSaltHex, challenge.message);
