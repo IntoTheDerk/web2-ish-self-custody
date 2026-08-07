@@ -1,0 +1,184 @@
+import type { BuiltInProfileId } from "../types.js";
+
+/**
+ * Only the external-salt profile is serviceable. The server's entire reason to
+ * exist in this flow is to own and publish a per-service 32-byte public salt;
+ * `web2ish-zera-ed25519-v1` derives its own salt from the username and so has
+ * nothing for a server to hold.
+ */
+export type ServerProfileId = Extract<
+  BuiltInProfileId,
+  "web2ish-zera-ed25519-external-salt-v1"
+>;
+
+export const serverProfileIds: readonly ServerProfileId[] = Object.freeze([
+  "web2ish-zera-ed25519-external-salt-v1",
+]);
+
+export type ChallengePurpose = "registration" | "login" | "rotation";
+
+export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([
+  "registration",
+  "login",
+  "rotation",
+]);
+
+/**
+ * Fixed, per-deployment identity of one service's wallet namespace.
+ *
+ * `serviceProfileId` + `applicationId` + the stored public salt jointly decide
+ * which wallet a given username/password produces. Changing any of them is a
+ * wallet migration, never a config tweak, which is why the schema makes the
+ * persisted row immutable.
+ */
+export type IdentityServiceConfig = Readonly<{
+  serviceProfileId: string;
+  profileId: ServerProfileId;
+  applicationId: string;
+  networkId: string;
+  /** Table namespace. Lets one database host several services side by side. */
+  tablePrefix?: string;
+  /**
+   * Adopts an existing service's public salt instead of minting a new one.
+   *
+   * Required when migrating a deployment that already has live wallets: the
+   * salt IS the wallet namespace, so a fresh one silently reassigns every
+   * existing user to an address they cannot reach. Only ever consulted during
+   * first provisioning — once the bootstrap row exists this is ignored, and
+   * the stored salt is immutable thereafter.
+   */
+  adoptPublicSaltHex?: string;
+  sessionTtlSeconds?: number;
+  challengeTtlSeconds?: number;
+  emailVerificationTtlSeconds?: number;
+  emailVerificationMaxAttempts?: number;
+  /** Requires a verified email before `POST /accounts` succeeds. */
+  requireVerifiedEmail?: boolean;
+}>;
+
+export type ResolvedIdentityServiceConfig = Readonly<{
+  serviceProfileId: string;
+  profileId: ServerProfileId;
+  applicationId: string;
+  networkId: string;
+  tablePrefix: string;
+  /** Validated lowercase hex, or null to mint a fresh salt on provisioning. */
+  adoptPublicSaltHex: string | null;
+  sessionTtlSeconds: number;
+  challengeTtlSeconds: number;
+  emailVerificationTtlSeconds: number;
+  emailVerificationMaxAttempts: number;
+  requireVerifiedEmail: boolean;
+}>;
+
+/**
+ * Everything a client needs to derive its wallet. All of it is public by
+ * design: the salt is not a secret, it is a namespace separator.
+ */
+export type PublishedDerivationProfile = Readonly<{
+  serviceProfileId: string;
+  profileId: ServerProfileId;
+  algorithm: string;
+  curve: "ed25519";
+  applicationId: string;
+  networkId: string;
+  publicSaltHex: string;
+  kdf: Readonly<{ N: number; r: number; p: number; dkLen: number }>;
+}>;
+
+export type IdentityAccount = Readonly<{
+  id: string;
+  serviceProfileId: string;
+  usernameNormalized: string;
+  displayName: string;
+  email: string | null;
+  emailVerifiedAt: Date | null;
+  status: "active" | "suspended";
+  createdAt: Date;
+  updatedAt: Date;
+}>;
+
+export type IdentityWallet = Readonly<{
+  id: string;
+  accountId: string;
+  serviceProfileId: string;
+  profileId: ServerProfileId;
+  curve: "ed25519";
+  applicationId: string;
+  networkId: string;
+  address: string;
+  addressNormalized: string;
+  publicKey: string;
+  fingerprint: string;
+  isPrimary: boolean;
+  createdAt: Date;
+}>;
+
+export type IdentityChallenge = Readonly<{
+  id: string;
+  purpose: ChallengePurpose;
+  usernameNormalized: string;
+  /** The exact bytes the client must sign, as UTF-8 text. */
+  message: string;
+  expiresAt: Date;
+}>;
+
+export type IdentitySession = Readonly<{
+  id: string;
+  accountId: string;
+  issuedAt: Date;
+  expiresAt: Date;
+  lastSeenAt: Date;
+}>;
+
+/** Returned once, at creation. Only the hash is ever persisted. */
+export type IssuedSession = Readonly<{
+  session: IdentitySession;
+  token: string;
+}>;
+
+export type AuthenticatedIdentity = Readonly<{
+  account: IdentityAccount;
+  wallets: readonly IdentityWallet[];
+  session: IdentitySession;
+}>;
+
+export type RegistrationInput = Readonly<{
+  username: string;
+  displayName?: string;
+  email?: string;
+  address: string;
+  publicKey: string;
+  challengeId: string;
+  signature: string;
+}>;
+
+export type LoginInput = Readonly<{
+  username: string;
+  challengeId: string;
+  signature: string;
+}>;
+
+export type RequestContext = Readonly<{
+  /** Pre-hashed by the caller; the service never stores a raw IP. */
+  ipHash?: string;
+  userAgentHash?: string;
+  now?: Date;
+}>;
+
+export type EmailVerificationRequest = Readonly<{
+  username: string;
+  email: string;
+}>;
+
+/**
+ * The service produces the code and hands it to the host application to
+ * deliver. Delivery is deliberately out of scope: transport, templating, and
+ * suppression lists belong to the application, not to a custody SDK.
+ */
+export type IssuedEmailVerification = Readonly<{
+  verificationId: string;
+  code: string;
+  email: string;
+  expiresAt: Date;
+}>;

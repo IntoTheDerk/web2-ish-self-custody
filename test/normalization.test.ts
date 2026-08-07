@@ -1,19 +1,46 @@
 import { describe, expect, it } from "vitest";
-import {
-  getProfile,
-  normalizeDemocracyOsUsername,
-  normalizeWeb2ishUsername,
-} from "../src/index.js";
+import { builtInProfiles, getProfile, normalizeUsername } from "../src/index.js";
 
-describe("versioned input contracts", () => {
-  it("retains DemocracyOS trim and lowercase compatibility", () => {
-    expect(normalizeDemocracyOsUsername("  Jesse@Example.COM ")).toBe("jesse@example.com");
+const ed25519ProfileIds = [
+  "web2ish-zera-ed25519-external-salt-v1",
+  "web2ish-zera-ed25519-v1",
+];
+
+describe("username normalization", () => {
+  it("folds case and trims whitespace using ASCII rules only", () => {
+    expect(normalizeUsername("  JESSE@example.COM ")).toBe("jesse@example.com");
+    expect(normalizeUsername("\tJesse@Example.COM\r\n")).toBe("jesse@example.com");
+    // `toLowerCase` is locale-sensitive — a Turkish locale folds "I" to "ı" —
+    // so ASCII-only folding is what lets the same credentials derive the same
+    // wallet on every device.
+    expect(normalizeUsername("ISTANBUL@example.com")).toBe("istanbul@example.com");
   });
 
-  it("keeps the new stateless profile ASCII-only", () => {
-    expect(normalizeWeb2ishUsername("  JESSE@example.COM ")).toBe("jesse@example.com");
-    expect(() => normalizeWeb2ishUsername("ｊｅｓｓｅ@example.com")).toThrow();
-    expect(() => normalizeWeb2ishUsername("bad\u0000name")).toThrow();
+  it("rejects anything outside 3–120 printable ASCII characters", () => {
+    for (const bad of [
+      "ｊｅｓｓｅ@example.com",
+      "İstanbul@example.com",
+      "bad name",
+      "bad\u0000name",
+      "ab",
+      "a".repeat(121),
+      "   ",
+    ]) {
+      expect(() => normalizeUsername(bad)).toThrowError(
+        expect.objectContaining({ code: "invalid-username" }),
+      );
+    }
+  });
+});
+
+describe("built-in wallet profiles", () => {
+  it("exposes exactly the two Ed25519 profiles and no other curve", () => {
+    expect(Object.keys(builtInProfiles).sort()).toEqual(ed25519ProfileIds);
+
+    for (const [id, profile] of Object.entries(builtInProfiles)) {
+      expect(profile.id).toBe(id);
+      expect(profile.curve).toBe("ed25519");
+    }
   });
 
   it("exposes immutable, fixed-cost built-in profiles", () => {
@@ -27,5 +54,6 @@ describe("versioned input contracts", () => {
       dkLen: 32,
     });
     expect(Object.isFrozen(profile)).toBe(true);
+    expect(Object.isFrozen(builtInProfiles)).toBe(true);
   });
 });

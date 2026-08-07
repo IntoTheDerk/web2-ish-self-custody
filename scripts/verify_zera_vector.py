@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independently reproduce both committed deterministic wallet test vectors."""
+"""Independently reproduce the committed built-in ZERA Ed25519 test vector."""
 
 from __future__ import annotations
 
@@ -11,30 +11,14 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "vectors" / "built-in-v1.json"
 
-EXPECTED_TOP_LEVEL_KEYS = frozenset(
-    {"warning", "passwordUtf8", "democracyOsV2", "zeraEd25519V1"}
-)
-EXPECTED_DEMOCRACY_OS_KEYS = frozenset(
-    {
-        "profile",
-        "username",
-        "normalizedUsername",
-        "saltHex",
-        "challenge",
-        "challengeDigestHex",
-        "publicKeyHex",
-        "address",
-        "signatureHex",
-    }
-)
+EXPECTED_TOP_LEVEL_KEYS = frozenset({"warning", "passwordUtf8", "zeraEd25519V1"})
 EXPECTED_ZERA_KEYS = frozenset(
     {
         "profile",
@@ -51,17 +35,10 @@ EXPECTED_ZERA_KEYS = frozenset(
     }
 )
 EXPECTED_WARNING = "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET."
-DEMOCRACY_OS_PROFILE = "democracyos-scrypt-sha512-secp256k1-v2"
 ZERA_PROFILE = "web2ish-zera-ed25519-v1"
 CONTEXT_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:-]{0,79}", re.ASCII)
 HEX_PATTERN = re.compile(r"[0-9a-f]+", re.ASCII)
 BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-JAVASCRIPT_TRIM_CHARACTERS = (
-    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002"
-    "\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f"
-    "\u205f\u3000\ufeff"
-)
 
 
 class VerificationError(Exception):
@@ -110,7 +87,7 @@ def require_hex(value: Any, byte_length: int, location: str) -> str:
     return text
 
 
-def load_fixture() -> tuple[str, dict[str, Any], dict[str, Any]]:
+def load_fixture() -> tuple[str, dict[str, Any]]:
     try:
         contents = FIXTURE_PATH.read_text(encoding="utf-8")
         decoded = json.loads(contents, object_pairs_hook=reject_duplicate_keys)
@@ -126,30 +103,6 @@ def load_fixture() -> tuple[str, dict[str, Any], dict[str, Any]]:
     if not 24 <= len(password_bytes) <= 1_024:
         fail("fixture.passwordUtf8 must encode to 24-1,024 UTF-8 bytes")
 
-    democracy_os = require_exact_object(
-        fixture["democracyOsV2"],
-        EXPECTED_DEMOCRACY_OS_KEYS,
-        "fixture.democracyOsV2",
-    )
-    for key in EXPECTED_DEMOCRACY_OS_KEYS:
-        require_string(democracy_os[key], f"fixture.democracyOsV2.{key}")
-    require_hex(democracy_os["saltHex"], 32, "fixture.democracyOsV2.saltHex")
-    require_hex(
-        democracy_os["challengeDigestHex"],
-        32,
-        "fixture.democracyOsV2.challengeDigestHex",
-    )
-    require_hex(
-        democracy_os["publicKeyHex"], 33, "fixture.democracyOsV2.publicKeyHex"
-    )
-    require_hex(
-        democracy_os["signatureHex"], 64, "fixture.democracyOsV2.signatureHex"
-    )
-    if democracy_os["profile"] != DEMOCRACY_OS_PROFILE:
-        fail(f"fixture.democracyOsV2.profile must be {DEMOCRACY_OS_PROFILE!r}")
-    if not democracy_os["challenge"]:
-        fail("fixture.democracyOsV2.challenge must not be empty")
-
     zera = require_exact_object(
         fixture["zeraEd25519V1"], EXPECTED_ZERA_KEYS, "fixture.zeraEd25519V1"
     )
@@ -161,24 +114,10 @@ def load_fixture() -> tuple[str, dict[str, Any], dict[str, Any]]:
     if zera["profile"] != ZERA_PROFILE:
         fail(f"fixture.zeraEd25519V1.profile must be {ZERA_PROFILE!r}")
 
-    return password, democracy_os, zera
+    return password, zera
 
 
-def normalize_democracy_os_username(username: str) -> str:
-    normalized = username.strip(JAVASCRIPT_TRIM_CHARACTERS).lower()
-    if (
-        not normalized
-        or len(normalized) > 320
-        or any(
-            ord(character) <= 0x1F or ord(character) == 0x7F
-            for character in normalized
-        )
-    ):
-        fail("normalized DemocracyOS username is invalid")
-    return normalized
-
-
-def normalize_zera_username(username: str) -> str:
+def normalize_username(username: str) -> str:
     normalized = username.strip("\t\n\f\r ")
     normalized = "".join(
         chr(ord(character) + 32) if "A" <= character <= "Z" else character
@@ -209,93 +148,8 @@ def base58_encode(value: bytes) -> str:
     return (BASE58_ALPHABET[:1] * leading_zeroes + encoded).decode("ascii")
 
 
-def verify_democracy_os_vector(
-    password: str, democracy_os: dict[str, Any]
-) -> None:
-    normalized_username = normalize_democracy_os_username(
-        democracy_os["username"]
-    )
-    if normalized_username != democracy_os["normalizedUsername"]:
-        fail(
-            "independent DemocracyOS username normalization does not match "
-            "normalizedUsername"
-        )
-
-    password_bytes = password.encode("utf-8")
-    if not 12 <= len(password_bytes) <= 1_024:
-        fail("DemocracyOS fixture password must encode to 12-1,024 UTF-8 bytes")
-    password_hash = hashlib.sha512(
-        b"DemocracyOS password wallet password hash v2\n" + password_bytes
-    ).digest()
-    wallet_entropy = hashlib.sha512(
-        (
-            "DemocracyOS password wallet entropy v2\n"
-            f"{normalized_username}\n"
-            f"{password_hash.hex()}"
-        ).encode("utf-8")
-    ).digest()
-    external_salt = bytes.fromhex(democracy_os["saltHex"])
-    seed = hashlib.scrypt(
-        wallet_entropy,
-        salt=external_salt,
-        n=32_768,
-        r=8,
-        p=1,
-        dklen=32,
-        maxmem=128 * 1_024 * 1_024,
-    )
-    secret_scalar = int.from_bytes(seed, "big")
-    if not 1 <= secret_scalar < SECP256K1_ORDER:
-        fail("independent DemocracyOS scrypt output is not a secp256k1 scalar")
-
-    private_key = ec.derive_private_key(secret_scalar, ec.SECP256K1())
-    public_key = private_key.public_key()
-    public_key_bytes = public_key.public_bytes(
-        encoding=serialization.Encoding.X962,
-        format=serialization.PublicFormat.CompressedPoint,
-    )
-    if public_key_bytes.hex() != democracy_os["publicKeyHex"]:
-        fail(
-            "independent DemocracyOS KDF/public-key derivation does not match "
-            "publicKeyHex"
-        )
-
-    address = f"zera:{hashlib.sha256(public_key_bytes).digest()[:20].hex()}"
-    if address != democracy_os["address"]:
-        fail("independent DemocracyOS address does not match address")
-
-    challenge_digest = hashlib.sha256(
-        democracy_os["challenge"].encode("utf-8")
-    ).digest()
-    if challenge_digest.hex() != democracy_os["challengeDigestHex"]:
-        fail("independent challenge digest does not match challengeDigestHex")
-
-    compact_signature = bytes.fromhex(democracy_os["signatureHex"])
-    r = int.from_bytes(compact_signature[:32], "big")
-    s = int.from_bytes(compact_signature[32:], "big")
-    if not (1 <= r < SECP256K1_ORDER and 1 <= s < SECP256K1_ORDER):
-        fail("committed compact secp256k1 signature has an out-of-range scalar")
-    der_signature = utils.encode_dss_signature(r, s)
-
-    # Noble's DemocracyOS compatibility call receives challenge_digest as its
-    # message and applies its default SHA-256 prehash before ECDSA. Compute that
-    # second digest explicitly, then tell cryptography not to hash it again.
-    noble_signing_digest = hashlib.sha256(challenge_digest).digest()
-    try:
-        public_key.verify(
-            der_signature,
-            noble_signing_digest,
-            ec.ECDSA(utils.Prehashed(hashes.SHA256())),
-        )
-    except InvalidSignature:
-        fail(
-            "committed compact secp256k1 signature does not verify with Noble's "
-            "default SHA-256 prehash semantics"
-        )
-
-
 def verify_zera_vector(password: str, zera: dict[str, Any]) -> None:
-    normalized_username = normalize_zera_username(zera["username"])
+    normalized_username = normalize_username(zera["username"])
     if normalized_username != zera["normalizedUsername"]:
         fail("independent username normalization does not match normalizedUsername")
 
@@ -371,8 +225,7 @@ def verify_zera_vector(password: str, zera: dict[str, Any]) -> None:
 
 def main() -> int:
     try:
-        password, democracy_os, zera = load_fixture()
-        verify_democracy_os_vector(password, democracy_os)
+        password, zera = load_fixture()
         verify_zera_vector(password, zera)
     except VerificationError as error:
         print(f"Built-in vector verification failed: {error}", file=sys.stderr)
@@ -382,11 +235,10 @@ def main() -> int:
         return 1
 
     print(
-        "Independent Python verification passed for both built-in profiles: "
-        "DemocracyOS normalization, transcripts, external salt, scrypt KDF, "
-        "secp256k1 identity/address and double-prehash signature verification; "
-        "ZERA normalization, transcripts, public salt, scrypt KDF, Ed25519 "
-        "identity, Base58 address, deterministic signature and verification."
+        "Independent Python verification passed for the built-in ZERA Ed25519 "
+        "profile: strict fixture shape, normalization, transcripts, public salt, "
+        "scrypt KDF, Ed25519 identity, Base58 address, deterministic signature "
+        "and verification."
     )
     return 0
 

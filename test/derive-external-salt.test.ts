@@ -41,13 +41,10 @@ describe("external-salt ZERA Ed25519 profile", () => {
         context,
         salt,
       },
-      (wallet) => {
-        if (!("signExactMessageUnsafe" in wallet)) throw new Error("wrong curve");
-        return {
-          identity: wallet.identity,
-          signatureHex: bytesToHex(wallet.signExactMessageUnsafe(message)),
-        };
-      },
+      (wallet) => ({
+        identity: wallet.identity,
+        signatureHex: bytesToHex(wallet.signExactMessageUnsafe(message)),
+      }),
     );
 
     expect(result.identity.profileId).toBe(vector.profile);
@@ -97,7 +94,7 @@ describe("external-salt ZERA Ed25519 profile", () => {
       derivePublicIdentity({ ...base, salt: new Uint8Array(32).fill(7) }),
       derivePublicIdentity({
         ...base,
-        context: { ...context, applicationId: "democracy-os" },
+        context: { ...context, applicationId: "other-app" },
       }),
       derivePublicIdentity({
         ...base,
