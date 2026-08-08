@@ -39,6 +39,12 @@ export { IdentityError, enumerationSensitiveCodes, identityErrorStatus } from ".
 export type { IdentityErrorCode } from "./errors.js";
 
 export { identityMigrations, runIdentityMigrations } from "./migrations.js";
+export {
+  platformSaltMigration,
+  provisionPlatformSalt,
+  readPlatformSalt,
+} from "./serviceProfile.js";
+export type { PlatformSaltConfig } from "./serviceProfile.js";
 export type { IdentityMigration } from "./migrations.js";
 
 export { createIdentityRouter, jsonResponse } from "./router.js";

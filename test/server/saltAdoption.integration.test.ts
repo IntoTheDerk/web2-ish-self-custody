@@ -4,6 +4,10 @@ import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { withDerivedWallet } from "../../src/index.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { runIdentityMigrations } from "../../src/server/migrations.js";
+import {
+  provisionPlatformSalt,
+  readPlatformSalt,
+} from "../../src/server/serviceProfile.js";
 import { createIdentityService } from "../../src/server/service.js";
 import { pgDriver, type SqlDriver } from "../../src/server/sql.js";
 import type { IdentityServiceConfig } from "../../src/server/types.js";
@@ -332,4 +336,63 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
     },
     derivationTimeoutMs,
   );
+});
+
+describe.skipIf(client === null)("platform salt provisioned on its own", () => {
+  const sql = pgDriver(client as PgLikeClient);
+
+  it("interoperates with the full identity schema", async () => {
+    const prefix = newPrefix();
+    const platform = {
+      serviceProfileId: `w2sc-plat-${prefix.slice(-8)}`,
+      profile,
+      applicationId,
+      networkId,
+      tablePrefix: prefix,
+    } as const;
+
+    // A host that owns its own accounts provisions only the salt.
+    const provisioned = await provisionPlatformSalt(sql, platform);
+    expect(provisioned.publicSaltHex).toMatch(/^[0-9a-f]{64}$/u);
+    expect(provisioned.publicSaltHex).not.toBe("0".repeat(64));
+    expect(provisioned.applicationId).toBe(applicationId);
+
+    // Re-provisioning is a no-op rather than a fresh namespace.
+    expect((await provisionPlatformSalt(sql, platform)).publicSaltHex).toBe(
+      provisioned.publicSaltHex,
+    );
+    expect((await readPlatformSalt(sql, platform)).publicSaltHex).toBe(provisioned.publicSaltHex);
+
+    // The identity service adopting the same database must treat version 1 as
+    // already applied and must not remint the salt.
+    const applied = await runIdentityMigrations(
+      sql,
+      resolveIdentityServiceConfig({ ...platform }),
+    );
+    expect(applied).not.toContain(1);
+    expect(await storedSaltHex(sql, prefix)).toBe(provisioned.publicSaltHex);
+
+    // And the salt is still immutable.
+    await expect(
+      sql.query(`UPDATE ${prefix}_service_profiles SET public_salt = gen_random_bytes(32)`),
+    ).rejects.toThrow(/immutable/u);
+  });
+
+  it("refuses to publish a salt that does not match the configuration", async () => {
+    const prefix = newPrefix();
+    const platform = {
+      serviceProfileId: `w2sc-plat-${prefix.slice(-8)}`,
+      profile,
+      applicationId,
+      networkId,
+      tablePrefix: prefix,
+    } as const;
+    await provisionPlatformSalt(sql, platform);
+
+    // Same database, different platform identity: publishing the stored salt
+    // would hand clients a namespace this build does not own.
+    await expect(
+      readPlatformSalt(sql, { ...platform, applicationId: "some-other-platform" }),
+    ).rejects.toThrowError(expect.objectContaining({ code: "invalid-service-profile" }));
+  });
 });

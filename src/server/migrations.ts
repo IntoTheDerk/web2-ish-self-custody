@@ -444,7 +444,13 @@ function isConcurrentCreation(error: unknown): boolean {
  * retry: every statement here is written to be idempotent, and a retry after a
  * peer has finished simply finds the object present and does nothing.
  */
-async function applyStatement(sql: SqlDriver, statement: string): Promise<void> {
+/**
+ * Exported for `serviceProfile.ts`, which provisions the platform salt on its
+ * own for hosts that do not want the rest of the identity schema. Both paths
+ * must share this retry, or one of them races on a cold start and the other
+ * does not.
+ */
+export async function applyMigrationStatement(sql: SqlDriver, statement: string): Promise<void> {
   const maxAttempts = 5;
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -471,7 +477,7 @@ export async function runIdentityMigrations(
 ): Promise<readonly number[]> {
   const p = assertIdentifier(config.tablePrefix, "tablePrefix");
 
-  await applyStatement(
+  await applyMigrationStatement(
     sql,
     `CREATE TABLE IF NOT EXISTS ${p}_schema_migrations (
        version integer PRIMARY KEY,
@@ -491,7 +497,7 @@ export async function runIdentityMigrations(
       continue;
     }
     for (const statement of migration.statements) {
-      await applyStatement(sql, statement);
+      await applyMigrationStatement(sql, statement);
     }
     await sql.query(
       `INSERT INTO ${p}_schema_migrations (version, name)
