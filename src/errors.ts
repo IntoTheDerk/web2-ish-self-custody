@@ -7,8 +7,13 @@ export type DerivationErrorCode =
   | "invalid-password"
   | "invalid-profile"
   | "invalid-public-key"
+  | "invalid-recovery-code"
   | "invalid-salt"
+  | "invalid-seed"
   | "invalid-username"
+  | "invalid-vault"
+  | "vault-authentication-failed"
+  | "vault-identity-mismatch"
   | "wallet-scope-closed";
 
 export class DerivationError extends Error {

@@ -26,3 +26,15 @@ export type {
   DerivedIdentity,
   DerivedWallet,
 } from "./types.js";
+export {
+  WALLET_VAULT_FORMAT,
+  createWalletVault,
+  createWalletVaultFromCredentials,
+  generateRecoveryCode,
+  normalizeRecoveryCode,
+  openWalletVaultWithPassword,
+  openWalletVaultWithRecoveryCode,
+  parseWalletVault,
+  rewrapWalletVaultPassword,
+} from "./vault.js";
+export type { CreateWalletVaultOptions, SealedBox, WalletVault } from "./vault.js";

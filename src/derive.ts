@@ -88,6 +88,21 @@ async function runScrypt(
   }
 }
 
+/**
+ * Package-internal seed access.
+ *
+ * Deliberately NOT re-exported from the barrel. `withDerivedWallet` is the
+ * public way to use a wallet precisely because it bounds the seed's lifetime;
+ * the only legitimate reason to hold raw seed bytes is to seal them into a
+ * vault, and `vault.ts` is the one caller. Anything else should use the scoped
+ * API. Callers of this MUST zero the seed they receive.
+ */
+export async function deriveWalletSeedUnsafe(
+  credentials: DerivationCredentials,
+): Promise<{ seed: Uint8Array; identity: DerivedIdentity }> {
+  return derive(credentials);
+}
+
 async function derive(
   credentials: DerivationCredentials,
 ): Promise<{ seed: Uint8Array; identity: DerivedIdentity }> {
