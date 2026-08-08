@@ -375,6 +375,20 @@ npm ci
 npm run verify
 ```
 
+To reproduce what `.github/workflows/ci.yml` checks without GitHub Actions:
+
+```bash
+npm run verify:ci
+```
+
+`scripts/verify-ci.sh` runs every CI gate that can run on a developer machine —
+the Node matrix membership check, the `npm ci` lockfile-sync check, typecheck,
+tests, the Python vectors, and the build — reporting PASS/FAIL per gate and
+exiting with the number of failures. Gates that cannot run locally (the second
+Node matrix arm, CI's linux-x86_64 hash-pinned `pip install`, the PostgreSQL
+suites) print SKIP with a reason; see the script header for the full list and
+for the `--pip` and `--pg` flags.
+
 `npm run verify` also executes independent Python reproductions of the committed
 profile vectors. Local development therefore requires Python 3.12 and
 `cryptography==46.0.3`; CI installs that verifier dependency and its transitive
