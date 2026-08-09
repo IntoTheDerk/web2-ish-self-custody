@@ -343,7 +343,7 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     const { service, appliedVersions, driver } = h();
     // The service must reach PostgreSQL only through the portability seam.
     expect(["pg", "neon-http"]).toContain(driver.kind);
-    expect([...appliedVersions]).toEqual([1, 2, 3]);
+    expect([...appliedVersions]).toEqual([1, 2, 3, 4]);
     expect(await service.migrate()).toEqual([]);
   }, 60_000);
 
@@ -573,4 +573,73 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     expect(unknownAccount.message).toBe(wrongSignature.message);
     expect(enumerationSensitiveCodes.has(wrongSignature.code)).toBe(true);
   }, derivationTimeoutMs);
+
+  describe("optional friendly name", () => {
+    it("leaves the friendly name unset when registration does not supply one", async () => {
+      const { service, publicSaltHex } = h();
+      const suffix = randomSuffix();
+      const credentials = {
+        username: `noname-${suffix}@example.com`,
+        password: `noname correct horse battery staple ${suffix}`,
+      };
+      const wallet = await deriveWallet(credentials, publicSaltHex);
+      const challenge = await service.createChallenge(credentials.username, "registration");
+      const signature = await signChallenge(credentials, publicSaltHex, challenge.message);
+
+      const registered = await service.register({
+        username: credentials.username,
+        address: wallet.address,
+        publicKey: wallet.publicKey,
+        challengeId: challenge.id,
+        signature,
+      });
+
+      // Not defaulted to the username: a client has to be able to tell that the
+      // user never chose a name, so it can fall back deliberately.
+      expect(registered.account.displayName).toBeNull();
+    }, 120_000);
+
+    it("sets, changes, and clears the friendly name without touching the username", async () => {
+      const { service, publicSaltHex } = h();
+      const suffix = randomSuffix();
+      const credentials = {
+        username: `named-${suffix}@example.com`,
+        password: `named correct horse battery staple ${suffix}`,
+      };
+      const wallet = await deriveWallet(credentials, publicSaltHex);
+      const challenge = await service.createChallenge(credentials.username, "registration");
+      const signature = await signChallenge(credentials, publicSaltHex, challenge.message);
+      const registered = await service.register({
+        username: credentials.username,
+        displayName: "  Ada Lovelace  ",
+        address: wallet.address,
+        publicKey: wallet.publicKey,
+        challengeId: challenge.id,
+        signature,
+      });
+      expect(registered.account.displayName).toBe("Ada Lovelace");
+
+      const renamed = await service.updateAccount(registered.account.id, {
+        displayName: "Ada L.",
+      });
+      expect(renamed.displayName).toBe("Ada L.");
+
+      // An explicit null clears it back to unset; `undefined` means "leave it
+      // alone", so a user removing their name needs that distinction.
+      const cleared = await service.updateAccount(registered.account.id, { displayName: null });
+      expect(cleared.displayName).toBeNull();
+
+      // The username is a derivation input and must survive all of it untouched.
+      expect(cleared.usernameNormalized).toBe(registered.account.usernameNormalized);
+      const wallets = await service.listWallets(registered.account.id);
+      expect(wallets[0]?.address).toBe(wallet.address);
+
+      // Rejected shapes, including a control character.
+      for (const bad of ["", "   ", "a".repeat(121), "bad\u0007name"]) {
+        await expect(
+          service.updateAccount(registered.account.id, { displayName: bad }),
+        ).rejects.toThrowError(expect.objectContaining({ code: "invalid-display-name" }));
+      }
+    }, 180_000);
+  });
 });

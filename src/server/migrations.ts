@@ -391,6 +391,27 @@ export function identityMigrations(
            ON ${p}_audit_events (created_at DESC)`,
       ]),
     }),
+
+    Object.freeze({
+      version: 4,
+      name: "optional-friendly-name",
+      statements: Object.freeze([
+        // The username is a derivation input and can never change without
+        // changing the wallet, so the friendly name is the only part of an
+        // identity a user may edit. Making it nullable is what lets "the user
+        // chose this" be distinguishable from "we defaulted it to their
+        // username" -- previously every account carried a name it never asked
+        // for, so a client could not tell whether to show it.
+        // One statement on purpose. Dropping and re-adding the length CHECK to
+        // spell out `display_name IS NULL OR ...` would be redundant -- a CHECK
+        // only fails on FALSE, and `char_length(NULL)` is NULL -- and an
+        // ALTER/ADD CONSTRAINT pair is not safe to run concurrently the way
+        // `CREATE ... IF NOT EXISTS` is: two migration runners race and the
+        // loser gets "constraint already exists". DROP NOT NULL serializes on
+        // the table lock and is a no-op the second time.
+        `ALTER TABLE ${p}_accounts ALTER COLUMN display_name DROP NOT NULL`,
+      ]),
+    }),
   ]);
 }
 

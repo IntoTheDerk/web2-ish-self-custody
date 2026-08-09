@@ -82,7 +82,13 @@ export type IdentityAccount = Readonly<{
   id: string;
   serviceProfileId: string;
   usernameNormalized: string;
-  displayName: string;
+  /**
+   * Optional, user-chosen label. `null` means the user never set one, which is
+   * why it is nullable rather than defaulted: the username is a derivation
+   * input and cannot change, so this is the only editable part of an identity
+   * and a client needs to know whether it was actually chosen.
+   */
+  displayName: string | null;
   email: string | null;
   emailVerifiedAt: Date | null;
   status: "active" | "suspended";

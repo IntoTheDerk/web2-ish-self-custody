@@ -64,7 +64,7 @@ export interface IdentityService {
 
   updateAccount(
     accountId: string,
-    changes: Readonly<{ displayName?: string; email?: string }>,
+    changes: Readonly<{ displayName?: string | null; email?: string }>,
     context?: RequestContext,
   ): Promise<IdentityAccount>;
 

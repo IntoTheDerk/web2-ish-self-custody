@@ -166,7 +166,7 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
     const first = await runIdentityMigrations(sql, config);
     const second = await runIdentityMigrations(sql, config);
 
-    expect(first).toEqual([1, 2, 3]);
+    expect(first).toEqual([1, 2, 3, 4]);
     expect(second).toEqual([]);
     expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
   });

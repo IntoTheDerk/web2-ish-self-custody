@@ -1,6 +1,6 @@
 {
   "name": "web2-ish-self-custody",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Generic deterministic Ed25519 wallet derivation and a portable identity service, with pluggable per-chain address codecs.",
   "repository": {
     "type": "git",

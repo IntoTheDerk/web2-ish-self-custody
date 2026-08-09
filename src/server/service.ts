@@ -224,7 +224,7 @@ function mapAccount(row: SqlRow, prefix: string): IdentityAccount {
     id: textColumn(row, `${prefix}id`),
     serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
     usernameNormalized: textColumn(row, `${prefix}username_normalized`),
-    displayName: textColumn(row, `${prefix}display_name`),
+    displayName: optionalTextColumn(row, `${prefix}display_name`),
     email: optionalTextColumn(row, `${prefix}email`),
     emailVerifiedAt: optionalInstantColumn(row, `${prefix}email_verified_at`),
     status: accountStatus(textColumn(row, `${prefix}status`)),
@@ -730,9 +730,10 @@ export function createIdentityService(
         publicKey: input.publicKey,
         address: input.address,
       });
-      const displayName = normalizeDisplayName(
-        input.displayName ?? usernameNormalized.slice(0, MAX_DISPLAY_NAME_LENGTH),
-      );
+      // Deliberately NOT defaulted to the username: an unset friendly name has
+      // to stay distinguishable from one the user actually chose.
+      const displayName =
+        input.displayName === undefined ? null : normalizeDisplayName(input.displayName);
       const email = input.email === undefined ? null : normalizeEmail(input.email);
       const nowParam = requestNow(context);
 
@@ -1153,17 +1154,20 @@ export function createIdentityService(
 
     async updateAccount(
       accountId: string,
-      changes: Readonly<{ displayName?: string; email?: string }>,
+      changes: Readonly<{ displayName?: string | null; email?: string }>,
       context?: RequestContext,
     ): Promise<IdentityAccount> {
       const id = assertUuid(accountId, "account-not-found");
+      // `undefined` leaves it alone; an explicit `null` clears it back to
+      // unset, which is the only way a user can remove a name they once chose.
+      const clearDisplayName = changes.displayName === null;
       const displayName =
-        changes.displayName === undefined
+        changes.displayName === undefined || changes.displayName === null
           ? null
           : normalizeDisplayName(changes.displayName);
       const email =
         changes.email === undefined ? null : normalizeEmail(changes.email);
-      if (displayName === null && email === null) {
+      if (displayName === null && email === null && !clearDisplayName) {
         return loadAccount(id);
       }
 
@@ -1171,7 +1175,10 @@ export function createIdentityService(
         `WITH clock AS (SELECT COALESCE($5::timestamptz, now()) AS at),
               updated AS (
                 UPDATE ${p}_accounts
-                   SET display_name = COALESCE($3::text, display_name),
+                   SET display_name = CASE
+                         WHEN $7::boolean THEN NULL
+                         ELSE COALESCE($3::text, display_name)
+                       END,
                        email = COALESCE($4::text, email),
                        email_verified_at = CASE
                          WHEN $4::text IS NOT NULL AND $4::text IS DISTINCT FROM email
@@ -1201,9 +1208,11 @@ export function createIdentityService(
           // Field names only. The values themselves (display name, address)
           // are user data and have no business in an audit trail.
           metadataJson({
-            displayNameChanged: displayName !== null,
+            displayNameChanged: displayName !== null || clearDisplayName,
+            displayNameCleared: clearDisplayName,
             emailChanged: email !== null,
           }),
+          clearDisplayName,
         ],
       );
       return mapAccount(
