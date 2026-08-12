@@ -68,6 +68,7 @@ const MAX_CONTEXT_HASH_LENGTH = 128;
 const RATE_LIMIT_RETENTION_SECONDS = 86_400;
 
 const RATE_LIMIT_BUCKET_DOMAIN = "web2-ish-self-custody rate limit bucket v1";
+const RATE_LIMIT_MISSING_IP_HASH = "missing-ip-hash";
 
 type RateLimitRule = Readonly<{
   id: string;
@@ -198,6 +199,10 @@ function sanitizeContextHash(value: string | undefined): string | null {
     return null;
   }
   return trimmed;
+}
+
+function rateLimitIpHash(context: RequestContext | undefined): string {
+  return sanitizeContextHash(context?.ipHash) ?? RATE_LIMIT_MISSING_IP_HASH;
 }
 
 function requestNow(context: RequestContext | undefined): string | null {
@@ -668,7 +673,7 @@ export function createIdentityService(
       const checkedPurpose = assertChallengePurpose(purpose);
       await enforceRateLimit(
         requireRule("challenge"),
-        [usernameNormalized, checkedPurpose],
+        [rateLimitIpHash(context), usernameNormalized, checkedPurpose],
         context,
       );
 
@@ -739,7 +744,7 @@ export function createIdentityService(
 
       await enforceRateLimit(
         requireRule("register"),
-        [usernameNormalized],
+        [rateLimitIpHash(context), usernameNormalized],
         context,
       );
 
@@ -922,7 +927,11 @@ export function createIdentityService(
       context?: RequestContext,
     ): Promise<{ account: IdentityAccount; session: IssuedSession }> {
       const usernameNormalized = normalizeUsername(input.username);
-      await enforceRateLimit(requireRule("login"), [usernameNormalized], context);
+      await enforceRateLimit(
+        requireRule("login"),
+        [rateLimitIpHash(context), usernameNormalized],
+        context,
+      );
 
       const challenge = await consumeChallenge(input.challengeId, "login", context);
       if (challenge.usernameNormalized !== usernameNormalized) {

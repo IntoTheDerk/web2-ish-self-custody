@@ -1035,12 +1035,17 @@ caller who just tried to register a name learns it is taken either way.
 ### Rate limits
 
 `<p>_rate_limits` backs fixed-window counters keyed by an opaque bucket string.
-Limit challenge creation, login, registration, and email verification
-separately; a shared bucket lets cheap requests exhaust the budget for expensive
-ones. Buckets should combine the route, the normalized username, and the
-caller's **hashed** IP — never a raw IP, which the service refuses to accept in
-the first place. Supply that hash through the router's `hashRequestIp` option,
-which receives the `Request` and returns a string the host has already hashed.
+Challenge creation, login, registration, and email verification use separate
+rules; a shared bucket would let cheap requests exhaust the budget for expensive
+ones. Challenge, registration, and login buckets combine the rule, normalized
+username, and caller's **hashed** IP so requests from one source cannot exhaust
+another source's username budget. The opaque stored bucket is itself hashed, so
+neither the username nor the supplied IP hash is persisted in the clear. Never
+pass a raw IP: supply a hash through the router's `hashRequestIp` option, which
+receives the `Request` and returns a string the host has already hashed. If the
+host omits that context, these credential routes intentionally share a
+conservative missing-IP bucket rather than falling back to a global
+username-only bucket.
 
 A fixed window is not a token bucket: a burst straddling a window boundary can
 deliver up to two windows' worth of requests. Size the window accordingly, and
