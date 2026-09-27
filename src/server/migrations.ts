@@ -70,36 +70,6 @@ export function identityMigrations(
 
   const mutationGuard = `${p}_reject_immutable_mutation`;
 
-  // Re-validated here rather than trusted from config: this value is
-  // interpolated into DDL, and it decides which wallets the deployment can
-  // still reach. An adopted salt is only ever consumed on first provisioning.
-  const adopted = config.adoptPublicSaltHex;
-  if (adopted !== null && !/^[0-9a-f]{64}$/u.test(adopted)) {
-    throw new IdentityError(
-      "adoptPublicSaltHex must be exactly 32 hex-encoded bytes.",
-      "invalid-service-profile",
-    );
-  }
-  const saltExpression =
-    adopted === null ? "gen_random_bytes(32)" : `decode('${adopted}', 'hex')`;
-
-  // Adoption is a no-op once provisioning has happened. Without this check an
-  // operator who adopts the wrong salt onto an already-provisioned database
-  // gets silence and assumes success, while the deployment keeps serving a
-  // different wallet namespace than they intended.
-  const adoptionGuard =
-    adopted === null
-      ? ""
-      : `
-             IF NOT EXISTS (
-               SELECT 1 FROM ${p}_service_profiles
-               WHERE service_profile_id = '${serviceProfileId}'
-                 AND public_salt = decode('${adopted}', 'hex')
-             ) THEN
-               RAISE EXCEPTION
-                 'service profile ${serviceProfileId} is already provisioned with a different public salt than adoptPublicSaltHex; refusing to continue';
-             END IF;`;
-
   return Object.freeze([
     Object.freeze({
       version: 1,
@@ -206,7 +176,7 @@ export function identityMigrations(
              ) THEN
                RAISE EXCEPTION
                  'service profile ${serviceProfileId} is missing; restore its original public salt from backup';
-             END IF;${adoptionGuard}
+             END IF;
            ELSE
              INSERT INTO ${p}_service_profiles (
                service_profile_id, profile_id, algorithm, curve,
@@ -214,7 +184,7 @@ export function identityMigrations(
                kdf_n, kdf_r, kdf_p, kdf_dk_len
              ) VALUES (
                '${serviceProfileId}', '${profileId}', '${algorithm}', '${curve}',
-               '${applicationId}', '${networkId}', ${saltExpression},
+               '${applicationId}', '${networkId}', gen_random_bytes(32),
                ${profile.kdf.N}, ${profile.kdf.r}, ${profile.kdf.p}, ${profile.kdf.dkLen}
              ) ON CONFLICT (service_profile_id) DO NOTHING;
 

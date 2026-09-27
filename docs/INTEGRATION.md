@@ -237,11 +237,11 @@ The client half is unchanged by adopting it. A browser still calls
 `withDerivedWallet` with the imported profile and the salt the server published;
 the server only verifies the resulting signature against an enrolled public key.
 
-A deployment that already has live wallets under an existing salt must adopt that
-salt before its first `migrate()` call, or every existing user's wallet becomes
-unreachable. A first migration against an empty database mints a fresh random
-salt and the schema then refuses to change it. See
-[Adopting an existing salt](SERVER_API.md#adopting-an-existing-salt).
+A first migration against an empty database mints a fresh random salt, and the
+schema then refuses to change it. There is no way to supply or rotate a salt, so
+the database that holds it is the wallet namespace: keep it, back it up, and
+restore-test it. See
+[There is no salt adoption](SERVER_API.md#there-is-no-salt-adoption).
 
 See [the server API reference](SERVER_API.md) for the wire format, the schema and
 its invariants, deployment, and threat notes.

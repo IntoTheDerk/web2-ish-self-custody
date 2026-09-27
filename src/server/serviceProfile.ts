@@ -34,11 +34,6 @@ export type PlatformSaltConfig = Readonly<{
   networkId: string;
   /** Table namespace, so one database can host several platforms. */
   tablePrefix?: string;
-  /**
-   * Adopts an existing deployment's salt instead of minting one. Required when
-   * migrating a service that already has live wallets.
-   */
-  adoptPublicSaltHex?: string;
 }>;
 
 function resolve(config: PlatformSaltConfig) {

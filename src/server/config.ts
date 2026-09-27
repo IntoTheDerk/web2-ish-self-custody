@@ -25,26 +25,20 @@ function assertPositiveInteger(value: number, field: string, max: number): numbe
   return value;
 }
 
-const publicSaltHexPattern = /^[0-9a-f]{64}$/u;
-
-function assertAdoptedSalt(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (!publicSaltHexPattern.test(normalized)) {
+/**
+ * `adoptPublicSaltHex` was removed in v0.9.0. It is refused rather than
+ * ignored: a caller still passing it expects its first provisioning to insert
+ * that salt, and silently minting a fresh one instead would move every user
+ * into a new wallet namespace. The type no longer has the field, but a spread
+ * or an untyped caller can still deliver it.
+ */
+function assertNoRemovedOptions(config: IdentityServiceConfig): void {
+  if ((config as Readonly<Record<string, unknown>>)["adoptPublicSaltHex"] !== undefined) {
     throw new IdentityError(
-      "adoptPublicSaltHex must be exactly 32 hex-encoded bytes.",
+      "adoptPublicSaltHex was removed in v0.9.0; the salt is always minted by the database on first provisioning.",
       "invalid-service-profile",
     );
   }
-  if (/^0{64}$/u.test(normalized)) {
-    throw new IdentityError(
-      "adoptPublicSaltHex must not be all zeros.",
-      "invalid-service-profile",
-    );
-  }
-  return normalized;
 }
 
 /**
@@ -84,13 +78,13 @@ function assertServiceableProfile(profile: DerivationProfile): DerivationProfile
 export function resolveIdentityServiceConfig(
   config: IdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
+  assertNoRemovedOptions(config);
   return Object.freeze({
     serviceProfileId: config.serviceProfileId,
     profile: assertServiceableProfile(config.profile),
     applicationId: config.applicationId,
     networkId: config.networkId,
     tablePrefix: config.tablePrefix ?? defaults.tablePrefix,
-    adoptPublicSaltHex: assertAdoptedSalt(config.adoptPublicSaltHex),
     sessionTtlSeconds: assertPositiveInteger(
       config.sessionTtlSeconds ?? defaults.sessionTtlSeconds,
       "sessionTtlSeconds",

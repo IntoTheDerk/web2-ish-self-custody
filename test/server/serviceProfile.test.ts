@@ -45,14 +45,14 @@ describe("platform salt migration", () => {
     expect(sql).toContain("network_id = 'zera-mainnet'");
   });
 
-  it("adopts an existing salt instead of minting one", () => {
-    const adopted = "5c".repeat(32);
-    const sql = platformSaltMigration({ ...config, adoptPublicSaltHex: adopted })
-      .statements.join("\n;\n");
+  it("mints the salt in the database and refuses the removed adoption option", () => {
+    const sql = platformSaltMigration(config).statements.join("\n;\n");
+    expect(sql).toContain("gen_random_bytes(32)");
 
-    expect(sql).toContain(`decode('${adopted}', 'hex')`);
-    expect(sql).not.toContain("gen_random_bytes(32)");
-    expect(sql).toContain("already provisioned with a different public salt");
+    const legacy = { ...config, adoptPublicSaltHex: "5c".repeat(32) } as PlatformSaltConfig;
+    expect(() => platformSaltMigration(legacy)).toThrowError(
+      expect.objectContaining({ code: "invalid-service-profile" }),
+    );
   });
 
   it("refuses a profile that has no salt for a platform to own", () => {

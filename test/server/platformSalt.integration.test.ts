@@ -1,31 +1,29 @@
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
-import { withDerivedWallet } from "../../src/index.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { runIdentityMigrations } from "../../src/server/migrations.js";
 import {
   provisionPlatformSalt,
   readPlatformSalt,
+  type PlatformSaltConfig,
 } from "../../src/server/serviceProfile.js";
-import { createIdentityService } from "../../src/server/service.js";
 import { pgDriver, type SqlDriver } from "../../src/server/sql.js";
 import type { IdentityServiceConfig } from "../../src/server/types.js";
 
 declare const process: { readonly env: Readonly<Record<string, string | undefined>> };
 
 /**
- * Adopting an existing deployment's public salt is the one irreversible step in
- * consolidating separate identity stores: the salt IS the wallet namespace, so
- * getting it wrong silently reassigns every existing user to an address they
- * cannot reach. These tests pin the guarantees that make the cutover safe.
+ * The public salt IS the wallet namespace: minted once by the database on
+ * first provisioning, then immutable. Getting any of that wrong silently
+ * reassigns every user to an address they cannot reach. These tests pin the
+ * guarantees against a real PostgreSQL.
  */
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
 const profile = zeraEd25519ExternalSalt;
 const applicationId = "existing-service";
 const networkId = "zera-testnet";
-const derivationTimeoutMs = 120_000;
 
 type PgLikeClient = Readonly<{
   query: (
@@ -90,18 +88,14 @@ function randomSuffix(): string {
 
 const createdPrefixes: string[] = [];
 
-function configFor(
-  prefix: string,
-  adoptPublicSaltHex?: string,
-): IdentityServiceConfig {
-  const base = {
-    serviceProfileId: `w2sc-adopt-${prefix.slice(-8)}`,
+function configFor(prefix: string): IdentityServiceConfig {
+  return {
+    serviceProfileId: `w2sc-salt-${prefix.slice(-8)}`,
     profile,
     applicationId,
     networkId,
     tablePrefix: prefix,
-  } as const;
-  return adoptPublicSaltHex === undefined ? base : { ...base, adoptPublicSaltHex };
+  };
 }
 
 function newPrefix(): string {
@@ -147,49 +141,33 @@ afterAll(async () => {
   await client.end?.();
 });
 
-describe.skipIf(client === null)("adopting an existing public salt", () => {
+describe.skipIf(client === null)("provisioning the public salt", () => {
   const sql = pgDriver(client as PgLikeClient);
-  // A salt standing in for one exported from an existing production service.
-  const inheritedSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
 
-  it("provisions exactly the adopted salt rather than minting one", async () => {
+  it("mints a fresh non-zero salt and keeps it across re-runs", async () => {
     const prefix = newPrefix();
-    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix, inheritedSalt)));
-
-    expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
-  });
-
-  it("is idempotent when re-run with the same adopted salt", async () => {
-    const prefix = newPrefix();
-    const config = resolveIdentityServiceConfig(configFor(prefix, inheritedSalt));
+    const config = resolveIdentityServiceConfig(configFor(prefix));
 
     const first = await runIdentityMigrations(sql, config);
+    const minted = await storedSaltHex(sql, prefix);
     const second = await runIdentityMigrations(sql, config);
 
     expect(first).toEqual([1, 2, 3, 4]);
     expect(second).toEqual([]);
-    expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
-  });
+    expect(minted).toMatch(/^[0-9a-f]{64}$/u);
+    expect(minted).not.toBe("0".repeat(64));
+    expect(await storedSaltHex(sql, prefix)).toBe(minted);
 
-  it("refuses to continue when a different salt is already provisioned", async () => {
-    const prefix = newPrefix();
-    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix, inheritedSalt)));
-
-    // Simulate an operator re-pointing the deployment at the wrong exported
-    // salt. Silently ignoring this is exactly how a namespace gets orphaned.
-    const wrongSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
-    await sql.query(`DELETE FROM ${prefix}_schema_migrations WHERE version = 1`);
-
-    await expect(
-      runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix, wrongSalt))),
-    ).rejects.toThrow(/different public salt/u);
-
-    expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
+    // A second namespace gets its own salt, not a copy of the first.
+    const other = newPrefix();
+    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(other)));
+    expect(await storedSaltHex(sql, other)).not.toBe(minted);
   });
 
   it("keeps the provisioned salt immutable against update, delete, and truncate", async () => {
     const prefix = newPrefix();
-    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix, inheritedSalt)));
+    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix)));
+    const minted = await storedSaltHex(sql, prefix);
 
     await expect(
       sql.query(
@@ -210,17 +188,7 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
       sql.query(`TRUNCATE ${prefix}_service_profiles CASCADE`),
     ).rejects.toThrow(/immutable/u);
 
-    expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
-  });
-
-  it("mints a fresh non-zero salt when nothing is adopted", async () => {
-    const prefix = newPrefix();
-    await runIdentityMigrations(sql, resolveIdentityServiceConfig(configFor(prefix)));
-
-    const minted = await storedSaltHex(sql, prefix);
-    expect(minted).toMatch(/^[0-9a-f]{64}$/u);
-    expect(minted).not.toBe("0".repeat(64));
-    expect(minted).not.toBe(inheritedSalt);
+    expect(await storedSaltHex(sql, prefix)).toBe(minted);
   });
 
   it("converges when several runners migrate the same namespace at once", async () => {
@@ -230,7 +198,7 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
     // check-then-act and raises a unique violation on pg_extension, and
     // `CREATE TRIGGER` has no IF NOT EXISTS at all.
     const prefix = newPrefix();
-    const config = resolveIdentityServiceConfig(configFor(prefix, inheritedSalt));
+    const config = resolveIdentityServiceConfig(configFor(prefix));
 
     // Separate connections: one client would serialize the statements and
     // prove nothing.
@@ -249,12 +217,13 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
         rejected.map((each) => String((each as PromiseRejectedResult).reason)),
       ).toEqual([]);
 
-      // Exactly one profile row, holding the adopted salt.
+      // Exactly one profile row: the racing runners agreed on one salt rather
+      // than each minting their own.
       const rows = await sql.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM ${prefix}_service_profiles`,
       );
       expect(rows[0]?.count).toBe("1");
-      expect(await storedSaltHex(sql, prefix)).toBe(inheritedSalt);
+      expect(await storedSaltHex(sql, prefix)).toMatch(/^[0-9a-f]{64}$/u);
 
       // Every immutability trigger landed exactly once.
       const triggers = await sql.query<{ count: string }>(
@@ -271,71 +240,23 @@ describe.skipIf(client === null)("adopting an existing public salt", () => {
     }
   });
 
-  it(
-    "reproduces the exact wallet an existing user already derived",
-    async () => {
-      const prefix = newPrefix();
-      const config = configFor(prefix, inheritedSalt);
-      const service = createIdentityService(sql, config);
-      await service.migrate();
+  it("refuses the removed adoption option before touching the database", async () => {
+    const prefix = newPrefix();
+    const legacy = {
+      ...configFor(prefix),
+      adoptPublicSaltHex: bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
+    } as PlatformSaltConfig;
 
-      const username = `legacy-user-${randomSuffix()}`;
-      const password = new TextEncoder().encode("correct horse battery staple etc");
-
-      // What the user's wallet was before consolidation: derived against the
-      // salt the old deployment issued.
-      const legacyAddress = await withDerivedWallet(
-        {
-          profile,
-          username,
-          password: Uint8Array.from(password),
-          context: { applicationId, networkId },
-          salt: hexToBytes(inheritedSalt),
-        },
-        (wallet) => wallet.identity.address,
-      );
-
-      // What the consolidated service now publishes.
-      const published = await service.derivationProfile();
-      expect(published.publicSaltHex).toBe(inheritedSalt);
-
-      const challenge = await service.createChallenge(username, "registration");
-      const proof = await withDerivedWallet(
-        {
-          profile,
-          username,
-          password: Uint8Array.from(password),
-          context: { applicationId, networkId },
-          salt: hexToBytes(published.publicSaltHex),
-        },
-        (wallet) => ({
-          address: wallet.identity.address,
-          publicKey: wallet.identity.publicKey,
-          signature: bytesToHex(
-            wallet.signExactMessageUnsafe(new TextEncoder().encode(challenge.message)),
-          ),
-        }),
-      );
-
-      // The whole point: the same credentials still produce the same wallet.
-      expect(proof.address).toBe(legacyAddress);
-
-      const registered = await service.register({
-        username,
-        address: proof.address,
-        publicKey: proof.publicKey,
-        challengeId: challenge.id,
-        signature: proof.signature,
-      });
-      expect(registered.wallet.address).toBe(legacyAddress);
-      expect(registered.wallet.codecId).toBe(profile.codec.id);
-
-      const authenticated = await service.authenticate(registered.session.token);
-      expect(authenticated.wallets[0]?.address).toBe(legacyAddress);
-      expect(authenticated.wallets[0]?.codecId).toBe(profile.codec.id);
-    },
-    derivationTimeoutMs,
-  );
+    await expect(provisionPlatformSalt(sql, legacy)).rejects.toThrowError(
+      expect.objectContaining({ code: "invalid-service-profile" }),
+    );
+    // Nothing was created, so nothing was minted.
+    const tables = await sql.query<{ name: string | null }>(
+      `SELECT to_regclass($1)::text AS name`,
+      [`${prefix}_service_profiles`],
+    );
+    expect(tables[0]?.name ?? null).toBeNull();
+  });
 });
 
 describe.skipIf(client === null)("platform salt provisioned on its own", () => {

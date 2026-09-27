@@ -44,7 +44,6 @@ describe("resolveIdentityServiceConfig defaults", () => {
       applicationId: "knight-armor",
       networkId: "zera-mainnet",
       tablePrefix: "w2sc",
-      adoptPublicSaltHex: null,
       sessionTtlSeconds: 60 * 60 * 24 * 14,
       challengeTtlSeconds: 300,
       emailVerificationTtlSeconds: 900,
@@ -57,18 +56,16 @@ describe("resolveIdentityServiceConfig defaults", () => {
     expect(Object.isFrozen(resolved)).toBe(true);
   });
 
-  it("normalizes an adopted public salt and rejects unusable ones", () => {
-    const salt = "a".repeat(64);
-    expect(
-      resolveIdentityServiceConfig(withOverride({ adoptPublicSaltHex: salt.toUpperCase() }))
-        .adoptPublicSaltHex,
-    ).toBe(salt);
-
-    for (const invalid of ["0".repeat(64), "a".repeat(63), "a".repeat(66), "zz".repeat(32), ""]) {
-      expect(() =>
-        resolveIdentityServiceConfig(withOverride({ adoptPublicSaltHex: invalid })),
-      ).toThrowError(expect.objectContaining({ code: "invalid-service-profile" }));
+  it("refuses the removed adoptPublicSaltHex option rather than ignoring it", () => {
+    // Ignoring it would mint a fresh salt on first provisioning for a caller
+    // that expected to keep an existing one: a new wallet namespace, silently.
+    for (const salt of ["a".repeat(64), "", "not hex"]) {
+      const legacy = { ...minimal, adoptPublicSaltHex: salt } as IdentityServiceConfig;
+      expectIdentityError(() => resolveIdentityServiceConfig(legacy), "invalid-service-profile");
     }
+    // An explicit undefined carries no intent and resolves normally.
+    const unset = { ...minimal, adoptPublicSaltHex: undefined } as IdentityServiceConfig;
+    expect(resolveIdentityServiceConfig(unset)).not.toHaveProperty("adoptPublicSaltHex");
   });
 
   it("exposes the same defaults as a frozen constant", () => {

@@ -28,16 +28,6 @@ export type IdentityServiceConfig = Readonly<{
   networkId: string;
   /** Table namespace. Lets one database host several services side by side. */
   tablePrefix?: string;
-  /**
-   * Adopts an existing service's public salt instead of minting a new one.
-   *
-   * Required when migrating a deployment that already has live wallets: the
-   * salt IS the wallet namespace, so a fresh one silently reassigns every
-   * existing user to an address they cannot reach. Only ever consulted during
-   * first provisioning — once the bootstrap row exists this is ignored, and
-   * the stored salt is immutable thereafter.
-   */
-  adoptPublicSaltHex?: string;
   sessionTtlSeconds?: number;
   challengeTtlSeconds?: number;
   emailVerificationTtlSeconds?: number;
@@ -52,8 +42,6 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   applicationId: string;
   networkId: string;
   tablePrefix: string;
-  /** Validated lowercase hex, or null to mint a fresh salt on provisioning. */
-  adoptPublicSaltHex: string | null;
   sessionTtlSeconds: number;
   challengeTtlSeconds: number;
   emailVerificationTtlSeconds: number;
