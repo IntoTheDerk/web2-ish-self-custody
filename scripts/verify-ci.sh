@@ -5,7 +5,7 @@
 # Mirrors .github/workflows/ci.yml (the single `verify` job) on this machine, so
 # a green signal does not depend on GitHub Actions being available. CI runs:
 #
-#   setup-node (matrix: node 20, 24)
+#   setup-node (matrix: node 22, 24)
 #   setup-python 3.12
 #   python -m pip install --only-binary=:all: --require-hashes -r scripts/requirements-vector-verifier-ci.txt
 #   npm ci
