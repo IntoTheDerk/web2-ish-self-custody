@@ -107,11 +107,27 @@ These rules are core-wide. A profile does not get to vary them.
 
 ### Password
 
-The password is supplied as raw bytes, not as a string. It must be 24 to 1,024
-bytes inclusive — also core-wide. No normalization, trimming, case folding, or
-Unicode normalization is applied: the exact bytes are hashed. A UTF-8 encoding
-of the user's input is the expected form, and the byte count, not the character
-count, is what the bounds apply to.
+The password is supplied as raw bytes, not as a string: the UTF-8 encoding of
+what the user typed. No normalization, trimming, case folding, or Unicode
+normalization is applied; the exact bytes are hashed. The bounds are core-wide:
+
+- The bytes must be well-formed UTF-8 (Unicode §3.9: no overlong forms, no
+  surrogate code points, nothing above U+10FFFF, no truncated sequence).
+- They must decode to at least **10 characters**, counted as Unicode code
+  points. Because nothing is normalized, that is the code-point count of exactly
+  the bytes that are hashed: a space counts, a combining mark counts separately
+  from the letter it modifies, and a leading U+FEFF counts rather than being
+  stripped as a byte-order mark.
+- They must be at most **1,024 bytes**. The ceiling is on the encoded bytes,
+  which is what the KDF consumes.
+
+The floor is a length check, not a strength check. A ten-character password can
+still be one an offline attacker tries early; the application that lets a user
+choose a password owns the strength policy (see
+[the security model](SECURITY_MODEL.md)).
+
+These bounds are validation only. They are not part of the transcript, so
+changing them does not change what any accepted password derives.
 
 ### Derivation context
 
@@ -356,7 +372,7 @@ salt = SHA-256( utf8(
 
 Committed in `vectors/`. **Test-only credentials — never derive a real wallet
 from these values.** Both use the password `correct horse battery staple lantern
-orbit` (42 UTF-8 bytes) and the username `JESSE@example.COM`, which normalizes
+orbit` (42 characters, 42 UTF-8 bytes) and the username `JESSE@example.COM`, which normalizes
 to `jesse@example.com`.
 
 `vectors/built-in-v1.json`, `web2ish-zera-ed25519-v1`, with

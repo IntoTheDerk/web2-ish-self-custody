@@ -13,7 +13,7 @@ export { DerivationError } from "./errors.js";
 export type { DerivationErrorCode } from "./errors.js";
 export {
   MAXIMUM_PASSWORD_BYTES,
-  MINIMUM_PASSWORD_BYTES,
+  MINIMUM_PASSWORD_CHARACTERS,
   normalizeUsername,
 } from "./normalization.js";
 export { defineDerivationProfile } from "./profile.js";

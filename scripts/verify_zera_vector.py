@@ -99,9 +99,11 @@ def load_fixture() -> tuple[str, dict[str, Any]]:
         fail("fixture.warning does not contain the required test-only warning")
 
     password = require_string(fixture["passwordUtf8"], "fixture.passwordUtf8")
+    if len(password) < 10:
+        fail("fixture.passwordUtf8 must be at least 10 characters (code points)")
     password_bytes = password.encode("utf-8")
-    if not 24 <= len(password_bytes) <= 1_024:
-        fail("fixture.passwordUtf8 must encode to 24-1,024 UTF-8 bytes")
+    if len(password_bytes) > 1_024:
+        fail("fixture.passwordUtf8 must encode to at most 1,024 UTF-8 bytes")
 
     zera = require_exact_object(
         fixture["zeraEd25519V1"], EXPECTED_ZERA_KEYS, "fixture.zeraEd25519V1"

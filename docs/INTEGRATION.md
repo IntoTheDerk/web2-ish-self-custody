@@ -75,6 +75,15 @@ The same six steps apply to every profile; only the credentials object differs.
    the signature or signed transaction, terminate the worker, and clear
    caller-owned password bytes.
 
+The SDK rejects a password shorter than 10 characters (Unicode code points) or
+longer than 1,024 UTF-8 bytes with `invalid-password`, before any KDF work. Mirror
+`MINIMUM_PASSWORD_CHARACTERS` and `MAXIMUM_PASSWORD_BYTES` in the form so the
+user hears about it first — counting characters as code points (`[...value].length`
+in JavaScript, not `value.length`) — and add a strength check and a common-password
+blocklist where a password is created or changed. Do not apply that stricter
+policy at sign-in: it would lock existing wallets out. See
+[the security model](SECURITY_MODEL.md#password-floor).
+
 Pin the profile in source. A client that accepts a profile id, a codec id, or
 KDF parameters from a server response has handed that server a downgrade lever.
 When you call `GET /profile` to fetch the salt, validate the published

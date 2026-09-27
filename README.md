@@ -201,8 +201,8 @@ import {
 import { zeraEd25519Codec, zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
 
 // Enrol the wallet these credentials already derive; its address is preserved.
-// vaultPassword is a Uint8Array of 24–1024 bytes and may differ from the
-// derivation password.
+// vaultPassword is the UTF-8 encoding of at least 10 characters (at most 1,024
+// bytes) and may differ from the derivation password.
 const { vault, recoveryCode } = await createWalletVaultFromCredentials(
   { profile: zeraEd25519ExternalSalt, username, password, salt, context },
   vaultPassword,
@@ -388,7 +388,7 @@ moment a wallet is derived under them.
 | `deriveIdentityFromSeed(seed, codec)` | function | public identity for an existing 32-byte Ed25519 seed |
 | `normalizeUsername(username)` | function | the exact username normalization derivation applies |
 | `ED25519_SEED_BYTES` | constant | 32 |
-| `MINIMUM_PASSWORD_BYTES` / `MAXIMUM_PASSWORD_BYTES` | constants | 24 and 1024 |
+| `MINIMUM_PASSWORD_CHARACTERS` / `MAXIMUM_PASSWORD_BYTES` | constants | 10 characters (Unicode code points) and 1,024 UTF-8 bytes |
 | `DerivationError` / `DerivationErrorCode` | class / type | every failure this package throws |
 | `createWalletVault`, `createWalletVaultFromCredentials`, `openWalletVaultWithPassword`, `openWalletVaultWithRecoveryCode`, `rewrapWalletVaultPassword`, `parseWalletVault` | functions | the [wallet vault](#wallet-vault-and-recovery-code) |
 | `generateRecoveryCode` / `normalizeRecoveryCode` | functions | vault recovery codes |

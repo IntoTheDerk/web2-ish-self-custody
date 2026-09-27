@@ -245,6 +245,24 @@ describe("changing the password keeps the wallet", () => {
 });
 
 describe("createWalletVault input validation", () => {
+  it("holds a vault password to the same floor as a derivation password", async () => {
+    // Nine characters, and 36 bytes: the floor counts characters, not bytes.
+    for (const shortPassword of [encoder.encode("too-short"), encoder.encode("🔐".repeat(9))]) {
+      await expect(
+        createWalletVault({
+          profile: zeraEd25519ExternalSalt,
+          context,
+          username,
+          password: shortPassword,
+          seed: new Uint8Array(32).fill(3),
+        }),
+      ).rejects.toThrowError(expect.objectContaining({ code: "invalid-password" }));
+      await expect(
+        rewrapWalletVaultPassword(vault, { recoveryCode }, shortPassword, recoveryCode),
+      ).rejects.toThrowError(expect.objectContaining({ code: "invalid-password" }));
+    }
+  });
+
   it("requires a 32-byte seed", async () => {
     await expect(
       createWalletVault({

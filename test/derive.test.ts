@@ -6,7 +6,7 @@ import {
   DerivationError,
   derivePublicIdentity,
   MAXIMUM_PASSWORD_BYTES,
-  MINIMUM_PASSWORD_BYTES,
+  MINIMUM_PASSWORD_CHARACTERS,
   withDerivedWallet,
 } from "../src/index.js";
 
@@ -104,42 +104,33 @@ describe("stateless ZERA Ed25519 derivation", () => {
   );
 
   it(
-    "enforces the published password byte bounds before any KDF work",
+    "enforces the published password bounds before any KDF work",
     async () => {
-      await expect(
+      const derive = (candidate: Uint8Array) =>
         derivePublicIdentity({
           profile: zeraEd25519,
           username: "jesse@example.com",
-          password: new Uint8Array(MINIMUM_PASSWORD_BYTES - 1),
+          password: candidate,
           context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        }),
-      ).rejects.toMatchObject({ code: "invalid-password" } satisfies Partial<DerivationError>);
+        });
 
-      await expect(
-        derivePublicIdentity({
-          profile: zeraEd25519,
-          username: "jesse@example.com",
-          password: new Uint8Array(MAXIMUM_PASSWORD_BYTES + 1),
-          context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        }),
-      ).rejects.toMatchObject({ code: "invalid-password" } satisfies Partial<DerivationError>);
-
-      await expect(
-        derivePublicIdentity({
-          profile: zeraEd25519,
-          username: "jesse@example.com",
-          password: vectors.passwordUtf8 as unknown as Uint8Array,
-          context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        }),
-      ).rejects.toMatchObject({ code: "invalid-password" } satisfies Partial<DerivationError>);
+      for (const rejected of [
+        // One character short of the floor.
+        encoder.encode("a".repeat(MINIMUM_PASSWORD_CHARACTERS - 1)),
+        // 36 bytes, but only nine characters: the floor counts characters.
+        encoder.encode("🔐".repeat(MINIMUM_PASSWORD_CHARACTERS - 1)),
+        new Uint8Array(MAXIMUM_PASSWORD_BYTES + 1).fill(0x61),
+        // Not UTF-8, so it has no character count at all.
+        new Uint8Array(32).fill(0xff),
+        vectors.passwordUtf8 as unknown as Uint8Array,
+      ]) {
+        await expect(derive(rejected)).rejects.toMatchObject({
+          code: "invalid-password",
+        } satisfies Partial<DerivationError>);
+      }
 
       // The accepting edge of the same bound, so the minimum stays usable.
-      const shortest = await derivePublicIdentity({
-        profile: zeraEd25519,
-        username: "jesse@example.com",
-        password: new Uint8Array(MINIMUM_PASSWORD_BYTES).fill(0x61),
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-      });
+      const shortest = await derive(encoder.encode("a".repeat(MINIMUM_PASSWORD_CHARACTERS)));
       expect(shortest.curve).toBe("ed25519");
     },
     derivationTimeoutMs,

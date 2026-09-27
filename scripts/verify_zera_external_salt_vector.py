@@ -140,9 +140,13 @@ def verify_vector(fixture: dict[str, str]) -> None:
         fixture["applicationId"], "fixture.applicationId"
     )
     network_id = canonicalize_context(fixture["networkId"], "fixture.networkId")
+    # Python's len() on a str counts code points, which is exactly the unit of
+    # the SDK's MINIMUM_PASSWORD_CHARACTERS; the ceiling is on encoded bytes.
+    if len(fixture["passwordUtf8"]) < 10:
+        fail("fixture password must be at least 10 characters (code points)")
     password = fixture["passwordUtf8"].encode("utf-8")
-    if not 24 <= len(password) <= 1_024:
-        fail("fixture password must encode to 24-1,024 UTF-8 bytes")
+    if len(password) > 1_024:
+        fail("fixture password must encode to at most 1,024 UTF-8 bytes")
 
     password_hash = hashlib.sha512(
         b"web2-ish-self-custody password hash v1\n" + password

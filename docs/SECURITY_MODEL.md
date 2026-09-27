@@ -10,9 +10,15 @@ The public key or wallet address is a password-verification oracle. An attacker 
 
 The username is domain and identity context, not a secret. It must not be counted as password entropy.
 
+## Password floor
+
+Every derivation, vault creation, and vault password change requires a password of at least 10 characters (Unicode code points of well-formed UTF-8) and at most 1,024 UTF-8 bytes. That floor exists to reject the obviously unusable; it is not a strength guarantee. Length says little about guessability — a ten-character dictionary word with a digit appended falls early to an offline attacker who holds the public identity.
+
+The strength policy therefore belongs to the application at the moment a password is chosen: when an account is created and when a password is set or changed. There it should estimate strength, refuse common and breached passwords, and encourage password-manager-generated or long passphrase credentials. It should not re-apply that policy on sign-in, because the wallet already exists and a policy that tightens later would lock its owner out of it.
+
 ## Assumptions
 
-- Passwords are generated and retained by a password manager or comparably strong process.
+- Passwords are generated and retained by a password manager or comparably strong process, and the application enforces a strength policy when a password is chosen; the SDK's 10-character floor alone does not provide one.
 - Consuming applications pin one known profile rather than accepting arbitrary KDF settings from a server.
 - Applications run derivation and signing in a fresh dedicated worker.
 - Applications permit only one active derivation, terminate the worker for immediate cancellation, and do not await UI or network work inside the synchronous wallet callback.
