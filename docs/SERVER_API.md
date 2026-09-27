@@ -207,12 +207,12 @@ Public. No request body.
 
 ```json
 {
-  "serviceProfileId": "knight-armor",
+  "serviceProfileId": "example-app-password-wallet-v1",
   "profileId": "web2ish-zera-ed25519-external-salt-v1",
   "codecId": "zera-ed25519-base58-v1",
   "algorithm": "scrypt-sha512-ed25519-external-32-v1",
   "curve": "ed25519",
-  "applicationId": "knight-armor",
+  "applicationId": "example-app",
   "networkId": "zera-mainnet",
   "publicSaltHex": "3f8a…64 hex characters…c1",
   "kdf": { "N": 65536, "r": 8, "p": 1, "dkLen": 32 }
@@ -244,7 +244,7 @@ Public.
   "id": "3a1f7c2e-9b64-4f0d-8c5a-1e2d3f4a5b6c",
   "purpose": "login",
   "usernameNormalized": "ada@example.org",
-  "message": "web2-ish-self-custody auth challenge v1\nknight-armor\n…",
+  "message": "web2-ish-self-custody auth challenge v1\nexample-app-password-wallet-v1\n…",
   "expiresAt": "2026-08-07T18:24:05.000Z"
 }
 ```
@@ -264,7 +264,7 @@ Public. Registration. Returns `201`.
   "address": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
   "publicKey": "A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
   "challengeId": "3a1f7c2e-9b64-4f0d-8c5a-1e2d3f4a5b6c",
-  "signature": "b658…128 hex characters…04"
+  "signature": "16e3…128 hex characters…07"
 }
 ```
 
@@ -275,7 +275,7 @@ confirmed, when the deployment sets `requireVerifiedEmail`.
 {
   "account": {
     "id": "8d2c…",
-    "serviceProfileId": "knight-armor",
+    "serviceProfileId": "example-app-password-wallet-v1",
     "usernameNormalized": "ada@example.org",
     "displayName": "Ada",
     "email": "ada@example.org",
@@ -287,11 +287,11 @@ confirmed, when the deployment sets `requireVerifiedEmail`.
   "wallet": {
     "id": "6b0e…",
     "accountId": "8d2c…",
-    "serviceProfileId": "knight-armor",
+    "serviceProfileId": "example-app-password-wallet-v1",
     "profileId": "web2ish-zera-ed25519-external-salt-v1",
     "codecId": "zera-ed25519-base58-v1",
     "curve": "ed25519",
-    "applicationId": "knight-armor",
+    "applicationId": "example-app",
     "networkId": "zera-mainnet",
     "address": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
     "addressNormalized": "gmadrppbc7p5arkv8g3djiwp89vz1jlk23v2gbjuaegb",
@@ -327,7 +327,7 @@ Public. Login. Returns `200`.
 {
   "username": "ada@example.org",
   "challengeId": "3a1f7c2e-9b64-4f0d-8c5a-1e2d3f4a5b6c",
-  "signature": "b658…128 hex characters…04"
+  "signature": "16e3…128 hex characters…07"
 }
 ```
 
@@ -537,20 +537,20 @@ Field values:
 
 | field | value |
 | --- | --- |
-| `serviceProfileId` | `knight-armor` |
-| `applicationId` | `knight-armor` |
+| `serviceProfileId` | `example-app-password-wallet-v1` |
+| `applicationId` | `example-app` |
 | `networkId` | `zera-mainnet` |
 | `purpose` | `login` |
 | `usernameNormalized` | `ada@example.org` |
 | `nonceHex` | `8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e` |
 | `expiresAt` | `2026-08-07T18:24:05.000Z` |
 
-The exact message, 190 UTF-8 bytes:
+The exact message, 207 UTF-8 bytes:
 
 ```
 web2-ish-self-custody auth challenge v1
-knight-armor
-knight-armor
+example-app-password-wallet-v1
+example-app
 zera-mainnet
 login
 ada@example.org
@@ -561,19 +561,19 @@ ada@example.org
 As a JavaScript string literal:
 
 ```
-"web2-ish-self-custody auth challenge v1\nknight-armor\nknight-armor\nzera-mainnet\nlogin\nada@example.org\n8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e\n2026-08-07T18:24:05.000Z"
+"web2-ish-self-custody auth challenge v1\nexample-app-password-wallet-v1\nexample-app\nzera-mainnet\nlogin\nada@example.org\n8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e\n2026-08-07T18:24:05.000Z"
 ```
 
 First 48 bytes, hex:
 
 ```
-776562322d6973682d73656c662d637573746f64792061757468206368616c6c656e67652076310a6b6e696768742d61
+776562322d6973682d73656c662d637573746f64792061757468206368616c6c656e67652076310a6578616d706c652d
 ```
 
 `SHA-256` of the full message bytes:
 
 ```
-391d120f544818613671fd82f485219f03b62590f5a9428a99cc8ff5393a5ffe
+20256c97f565715a1119a9b7911b7d0090548f84266021a44d7a97f2b63cd4f7
 ```
 
 Signed with the synthetic Ed25519 seed of 32 `0x07` bytes — for reproduction
@@ -588,7 +588,7 @@ reproduce.
 | address (ZERA codec) | `GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
 | public key identifier (ZERA codec) | `A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
 | fingerprint | `GMAD RPPB C7P5 ARKV` |
-| signature | `b658e7299dd5b8733b3827becb870d815b2b9084d24e6f512ae4accb0d768ddaa1a51d97d91e49c3525573b5062b388341c51216a2a8bb2558c4e19980bbdd04` |
+| signature | `16e36813c73451dd719df46bfbd35256c1c7d97da742e26e6db59a0b5b87d091c4db0414404829d9f14a75e2d4b093fb7edd334224f092aa4c18c57ece468d07` |
 
 ### Signature conventions
 
@@ -872,16 +872,16 @@ const service = createNeonIdentityService({
   neon,
   connectionString: process.env.DATABASE_URL!,
   config: {
-    serviceProfileId: "knight-armor",
+    serviceProfileId: "example-app-password-wallet-v1",
     profile: zeraEd25519ExternalSalt,
-    applicationId: "knight-armor",
+    applicationId: "example-app",
     networkId: "zera-mainnet",
   },
 });
 
 const handler = createIdentityRouter(service, {
   basePath: "/api/identity",
-  trustedOrigins: ["https://app.knight-armor.example"],
+  trustedOrigins: ["https://app.example.com"],
 });
 
 export { handler as GET, handler as POST, handler as PATCH, handler as DELETE };
@@ -930,16 +930,16 @@ import {
 const service = createPgIdentityService({
   pool: new Pool({ connectionString: process.env.DATABASE_URL, max: 10 }),
   config: {
-    serviceProfileId: "knight-armor",
+    serviceProfileId: "example-app-password-wallet-v1",
     profile: zeraEd25519ExternalSalt,
-    applicationId: "knight-armor",
+    applicationId: "example-app",
     networkId: "zera-mainnet",
   },
 });
 
 const handler = createIdentityRouter(service, {
   basePath: "/api/identity",
-  trustedOrigins: ["https://app.knight-armor.example"],
+  trustedOrigins: ["https://app.example.com"],
 });
 
 createServer(nodeRequestListener(handler)).listen(8080);

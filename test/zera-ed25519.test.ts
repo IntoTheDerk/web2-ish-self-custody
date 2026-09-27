@@ -18,7 +18,7 @@ const zeraAddress = "FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF";
 describe("direct-seed ZERA Ed25519 identity", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("matches Knight Armor's established direct-seed identity vector", () => {
+  it("matches the established direct-seed identity vector", () => {
     expect(deriveZeraEd25519IdentityFromSeed(seed)).toEqual({
       curve: "ed25519",
       codecId: "zera-ed25519-base58-v1",

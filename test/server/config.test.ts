@@ -15,7 +15,7 @@ import {
 const minimal: IdentityServiceConfig = {
   serviceProfileId: "acme.identity",
   profile: zeraEd25519ExternalSalt,
-  applicationId: "knight-armor",
+  applicationId: "example-app",
   networkId: "zera-mainnet",
 };
 
@@ -41,7 +41,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
     expect(resolved).toEqual({
       serviceProfileId: "acme.identity",
       profile: zeraEd25519ExternalSalt,
-      applicationId: "knight-armor",
+      applicationId: "example-app",
       networkId: "zera-mainnet",
       tablePrefix: "w2sc",
       sessionTtlSeconds: 60 * 60 * 24 * 14,

@@ -27,7 +27,7 @@ const encoder = new TextEncoder();
 const profile = zeraEd25519ExternalSalt;
 const profileId = profile.id;
 const codecId = profile.codec.id;
-const applicationId = "knight-armor";
+const applicationId = "example-app";
 const networkId = "zera-testnet";
 
 const derivationTimeoutMs = 120_000;

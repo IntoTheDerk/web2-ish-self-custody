@@ -9,7 +9,7 @@ import type { ResolvedIdentityServiceConfig } from "../../src/server/types.js";
 const config = resolveIdentityServiceConfig({
   serviceProfileId: "acme.identity",
   profile: zeraEd25519ExternalSalt,
-  applicationId: "knight-armor",
+  applicationId: "example-app",
   networkId: "zera-mainnet",
   tablePrefix: "acme_id",
 });
@@ -80,7 +80,7 @@ describe("identityMigrations input validation", () => {
       { applicationId: injection },
       { networkId: injection },
       { serviceProfileId: "" },
-      { applicationId: "Knight-Armor" },
+      { applicationId: "Example-App" },
       { networkId: "zera mainnet" },
       { serviceProfileId: "acme.identity'" },
       { serviceProfileId: `a${"b".repeat(80)}` },
@@ -221,7 +221,7 @@ describe("generated migration SQL", () => {
     expect(table).toContain("profile_id = 'web2ish-zera-ed25519-external-salt-v1'");
     expect(table).toContain("algorithm = 'scrypt-sha512-ed25519-external-32-v1'");
     expect(table).toContain("curve = 'ed25519'");
-    expect(table).toContain("application_id = 'knight-armor'");
+    expect(table).toContain("application_id = 'example-app'");
     expect(table).toContain("network_id = 'zera-mainnet'");
     expect(table).toContain("octet_length(public_salt) = 32");
     expect(table).toContain("public_salt <> decode(repeat('00', 32), 'hex')");
@@ -240,7 +240,7 @@ describe("generated migration SQL", () => {
     expect(table).toContain("codec_id = 'zera-ed25519-base58-v1'");
     expect(table).toContain("profile_id = 'web2ish-zera-ed25519-external-salt-v1'");
     expect(table).toContain("curve = 'ed25519'");
-    expect(table).toContain("application_id = 'knight-armor'");
+    expect(table).toContain("application_id = 'example-app'");
     expect(table).toContain("network_id = 'zera-mainnet'");
     expect(table).toContain("address_normalized = lower(address)");
   });

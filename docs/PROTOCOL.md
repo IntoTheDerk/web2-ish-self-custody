@@ -367,19 +367,25 @@ which normalizes to `jesse@example.com`.
 
 `vectors/zera-ed25519-external-salt-v1.json`,
 `web2ish-zera-ed25519-external-salt-v1`, with
-`applicationId = knight-armor` and `networkId = zera-mainnet`:
+`applicationId = example-app` and `networkId = zera-mainnet`:
 
 | field | value |
 | --- | --- |
 | supplied salt | `c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a` |
-| public key | `12249679d7d9d24bd28b896a0202c11318b221093913b5107f8fa09eba7f4d28` |
-| address | `2DphRgcYxibmCvNmfYtrbpR3HhNuvEDt6WYpUdkSz4yu` |
-| public key identifier | `A_2DphRgcYxibmCvNmfYtrbpR3HhNuvEDt6WYpUdkSz4yu` |
+| public key | `f3523423a7b13060341239d864994d1e574378a9230d4a9dd9ce972af94e06c3` |
+| address | `HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A` |
+| public key identifier | `A_HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A` |
 | message | `fixture-governance-intent-external-salt-v1` |
-| signature | `4db6ed100cdd9963c5a5f1ae120b89dc1e50a69de60bf76db79c3d8dc4d2b507564ab79e50d2f5f61898578efd688d76c5d119365282d9df366915fde123670e` |
+| signature | `be7f8f5ac3ba40f304194ba01d74bf1bbc5bbc195ea76e80f76bcfa0d8c66ac8f2ad9f5e423cc6dcb6f139b843c87f4cb266878c9031b5b9d9cc437294dac705` |
 
-A refactor that changes these values is wrong. The vectors are not updated to
-match an implementation; the implementation is corrected to match the vectors.
+The fixture's application id changed to the neutral `example-app` in v0.9.0.
+That is a change of input, not of derivation: the v0.8.0 and v0.9.0
+implementations and the independent Python verifier all produce the values above
+from the new input, and all three reproduce the previous vector from the previous
+input.
+
+A refactor that changes these values is wrong. The vector is not updated to
+match an implementation; the implementation is corrected to match the vector.
 
 ## Independent vector verification
 

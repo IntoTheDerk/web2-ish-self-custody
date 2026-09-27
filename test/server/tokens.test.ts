@@ -177,7 +177,7 @@ describe("challenge nonces", () => {
     expect(() =>
       buildChallengeMessage({
         serviceProfileId: "acme.identity",
-        applicationId: "knight-armor",
+        applicationId: "example-app",
         networkId: "zera-mainnet",
         purpose: "login",
         usernameNormalized: "jesse@example.com",

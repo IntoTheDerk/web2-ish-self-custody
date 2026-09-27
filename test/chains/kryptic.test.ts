@@ -222,7 +222,7 @@ describe("the identity service accepts a second chain unchanged", () => {
   const config = resolveIdentityServiceConfig({
     serviceProfileId: "kryptic.identity",
     profile: krypticExternalSalt,
-    applicationId: "knight-armor",
+    applicationId: "example-app",
     networkId: "kryptic-testnet",
     tablePrefix: "kryptic_id",
   });

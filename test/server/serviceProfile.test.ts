@@ -11,7 +11,7 @@ import { krypticStateless } from "../support/kryptic-chain.js";
 const config: PlatformSaltConfig = {
   serviceProfileId: "acme.identity",
   profile: zeraEd25519ExternalSalt,
-  applicationId: "knight-armor",
+  applicationId: "example-app",
   networkId: "zera-mainnet",
   tablePrefix: "acme_id",
 };
@@ -41,7 +41,7 @@ describe("platform salt migration", () => {
     // A wiped profile row must be detectable rather than silently reminted.
     expect(sql).toContain("restore its original public salt from backup");
     // The namespace is pinned to this platform.
-    expect(sql).toContain("application_id = 'knight-armor'");
+    expect(sql).toContain("application_id = 'example-app'");
     expect(sql).toContain("network_id = 'zera-mainnet'");
   });
 
@@ -77,7 +77,7 @@ describe("platform salt migration", () => {
   });
 
   it("gives each platform a distinct namespace", () => {
-    const knightArmor = platformSaltMigration(config).statements.join("");
+    const exampleApp = platformSaltMigration(config).statements.join("");
     const democracyOs = platformSaltMigration({
       ...config,
       serviceProfileId: "democracyos-password-wallet-v1",
@@ -85,7 +85,7 @@ describe("platform salt migration", () => {
       tablePrefix: "dos_identity",
     }).statements.join("");
 
-    expect(knightArmor).not.toBe(democracyOs);
+    expect(exampleApp).not.toBe(democracyOs);
     expect(democracyOs).toContain("application_id = 'democracy-os'");
     expect(democracyOs).toContain("dos_identity_service_profiles");
     expect(democracyOs).not.toContain("acme_id_service_profiles");

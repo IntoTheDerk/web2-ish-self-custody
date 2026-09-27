@@ -54,7 +54,7 @@ describe("identity service rate-limit buckets", () => {
     const service = createIdentityService(rateLimitedDriver(calls), {
       serviceProfileId: "rate-limit-test",
       profile: zeraEd25519ExternalSalt,
-      applicationId: "knight-armor",
+      applicationId: "example-app",
       networkId: "zera-mainnet",
       tablePrefix: "rate_limit_test",
     });
@@ -116,7 +116,7 @@ describe("identity service rate-limit buckets", () => {
     const service = createIdentityService(rateLimitedDriver(calls), {
       serviceProfileId: "rate-limit-test",
       profile: zeraEd25519ExternalSalt,
-      applicationId: "knight-armor",
+      applicationId: "example-app",
       networkId: "zera-mainnet",
       tablePrefix: "rate_limit_test",
     });

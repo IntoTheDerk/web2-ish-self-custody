@@ -149,7 +149,8 @@ without turning this package into a browser storage or policy layer.
 
 ## Two services, one identity format
 
-Knight Armor and DemocracyOS both import the **same** profile object:
+Any two applications on the bundled ZERA profile — say DemocracyOS and a second
+product, called Example App here — import the **same** profile object:
 
 ```ts
 import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
@@ -164,7 +165,7 @@ They do not share wallets. Each runs its own deployment with its own
 `serviceProfileId`, its own fixed `applicationId`, and its own immutable 32-byte
 public salt:
 
-| | Knight Armor | DemocracyOS |
+| | Example App | DemocracyOS |
 | --- | --- | --- |
 | profile object | `zeraEd25519ExternalSalt` | `zeraEd25519ExternalSalt` |
 | `applicationId` | its own, fixed in source | its own, fixed in source |
@@ -179,7 +180,7 @@ take custody of the other's users. Sharing one namespace would require a single
 salt and a single application id — that is, one service wearing two names, with
 the blast radius to match.
 
-Applications outside these two adopt the profile the same way: pick a stable
+Every application adopts the profile the same way: pick a stable
 `serviceProfileId` and `applicationId`, provision a salt, and never change any
 of the three.
 
@@ -197,11 +198,11 @@ import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
 import { createIdentityService } from "web2-ish-self-custody/server";
 
 const service = createIdentityService(sql, {
-  serviceProfileId: "knight-armor",
+  serviceProfileId: "example-app-password-wallet-v1",
   profile: zeraEd25519ExternalSalt,
-  applicationId: "knight-armor",
+  applicationId: "example-app",
   networkId: "zera-mainnet",
-  tablePrefix: "knight_armor_identity",
+  tablePrefix: "example_identity",
 });
 ```
 

@@ -24,8 +24,8 @@ const derivationTimeoutMs = 30_000;
 const nonceHex = "3f".repeat(32);
 
 const baseInput: ChallengeMessageInput = {
-  serviceProfileId: "knight-armor-identity",
-  applicationId: "knight-armor",
+  serviceProfileId: "example-app-password-wallet-v1",
+  applicationId: "example-app",
   networkId: "zera-mainnet",
   purpose: "login",
   usernameNormalized: "jesse@example.com",
@@ -109,8 +109,8 @@ describe("buildChallengeMessage", () => {
     expect(CHALLENGE_DOMAIN).toBe("web2-ish-self-custody auth challenge v1");
     expect(challengeMessage.split("\n")).toEqual([
       CHALLENGE_DOMAIN,
-      "knight-armor-identity",
-      "knight-armor",
+      "example-app-password-wallet-v1",
+      "example-app",
       "zera-mainnet",
       "login",
       "jesse@example.com",

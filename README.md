@@ -90,16 +90,14 @@ package builds itself through its `prepare` script during the Git install.
 | --- | --- |
 | [DemocracyOS-web](https://github.com/IntoTheDerk/DemocracyOS-web) | the browser password wallet (`withDerivedWallet` with `zeraEd25519ExternalSalt`) and the wallet-vault workers |
 | [DemocracyOS-backend](https://github.com/IntoTheDerk/DemocracyOS-backend) | the platform salt and server identity configuration: `provisionPlatformSalt` / `readPlatformSalt` from `/server`, configured with `zeraEd25519ExternalSalt` |
-| [Knight-Armor](https://github.com/IntoTheDerk/Knight-Armor) | the identity service (`createIdentityService` / `createIdentityRouter` from `/server`) and the browser credential-derived wallet |
 
-Each consumer pins one reviewed commit (currently `v0.8.0`,
-`051b4bcf2521e664f9688553dc27f01e2b6badf0`). DemocracyOS uses
+Both pin a reviewed release commit by its full SHA (see [Install](#install));
+the Git tags and the [changelog](CHANGELOG.md) name each release. DemocracyOS uses
 `serviceProfileId: "democracyos-password-wallet-v1"` with
-`applicationId: "democracy-os"`; Knight-Armor uses
-`"knight-armor-password-wallet-v1"` with `"knight-armor"`. Both share the
-`zeraEd25519ExternalSalt` profile but each has its own application id and its own
-public salt, so the same username and password derive **different** wallets in
-each product. That is by design — see
+`applicationId: "democracy-os"`. Any other application on the same
+`zeraEd25519ExternalSalt` profile has its own application id and its own public
+salt, so the same username and password derive a **different** wallet there.
+That is by design — see
 [Two services, one identity format](docs/INTEGRATION.md#two-services-one-identity-format).
 
 ## Usage
@@ -123,7 +121,7 @@ try {
       // Exactly 32 bytes, published by your own service. Public metadata.
       salt: publicSaltFromYourService,
       context: {
-        applicationId: "knight-armor",
+        applicationId: "example-app",
         networkId: "zera-mainnet",
       },
     },
@@ -417,16 +415,16 @@ const service = createNeonIdentityService({
   neon,
   connectionString: process.env.DATABASE_URL!,
   config: {
-    serviceProfileId: "knight-armor",
+    serviceProfileId: "example-app-password-wallet-v1",
     profile: zeraEd25519ExternalSalt,
-    applicationId: "knight-armor",
+    applicationId: "example-app",
     networkId: "zera-mainnet",
   },
 });
 
 const handler = createIdentityRouter(service, {
   basePath: "/api/identity",
-  trustedOrigins: ["https://app.knight-armor.example"],
+  trustedOrigins: ["https://app.example.com"],
 });
 
 export { handler as GET, handler as POST, handler as PATCH, handler as DELETE };

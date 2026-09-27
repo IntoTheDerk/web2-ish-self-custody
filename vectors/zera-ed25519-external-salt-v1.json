@@ -4,12 +4,12 @@
   "passwordUtf8": "correct horse battery staple lantern orbit",
   "username": "JESSE@example.COM",
   "normalizedUsername": "jesse@example.com",
-  "applicationId": "knight-armor",
+  "applicationId": "example-app",
   "networkId": "zera-mainnet",
   "saltHex": "c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a",
   "messageUtf8": "fixture-governance-intent-external-salt-v1",
-  "publicKeyHex": "12249679d7d9d24bd28b896a0202c11318b221093913b5107f8fa09eba7f4d28",
-  "publicKeyIdentifier": "A_2DphRgcYxibmCvNmfYtrbpR3HhNuvEDt6WYpUdkSz4yu",
-  "address": "2DphRgcYxibmCvNmfYtrbpR3HhNuvEDt6WYpUdkSz4yu",
-  "signatureHex": "4db6ed100cdd9963c5a5f1ae120b89dc1e50a69de60bf76db79c3d8dc4d2b507564ab79e50d2f5f61898578efd688d76c5d119365282d9df366915fde123670e"
+  "publicKeyHex": "f3523423a7b13060341239d864994d1e574378a9230d4a9dd9ce972af94e06c3",
+  "publicKeyIdentifier": "A_HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A",
+  "address": "HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A",
+  "signatureHex": "be7f8f5ac3ba40f304194ba01d74bf1bbc5bbc195ea76e80f76bcfa0d8c66ac8f2ad9f5e423cc6dcb6f139b843c87f4cb266878c9031b5b9d9cc437294dac705"
 }

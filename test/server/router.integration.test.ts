@@ -32,7 +32,7 @@ const encoder = new TextEncoder();
 const derivationProfile = zeraEd25519ExternalSalt;
 const profileId = derivationProfile.id;
 const codecId = derivationProfile.codec.id;
-const applicationId = "knight-armor";
+const applicationId = "example-app";
 const networkId = "zera-testnet";
 
 const basePath = "/identity";
