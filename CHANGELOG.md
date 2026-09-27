@@ -5,38 +5,96 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased
+## v0.9.0 — 2026-09-27
 
-Tooling and documentation only. No change to any runtime source file, public
-API, profile, codec, vector, or wire format; `v0.8.0` (`051b4bc`) remains the
-commit consumers pin.
+A normal password floor, and the legacy surface removed. Derivation is
+unchanged: every password the new rules accept derives exactly the wallet it
+derived under v0.8.0. For every configuration that did not adopt a salt, the
+generated migration SQL is byte-identical to v0.8.0's, so a provisioned
+database needs nothing.
 
+### Breaking changes
+
+- **Password floor: 10 characters, not 24 bytes.** `MINIMUM_PASSWORD_BYTES`
+  (24) is replaced by `MINIMUM_PASSWORD_CHARACTERS` (10), counted as Unicode
+  code points of the password bytes. `MAXIMUM_PASSWORD_BYTES` (1,024) is
+  unchanged. Passwords are still not normalized, so the count is over exactly
+  the bytes that are hashed; counting code points means the bytes must now be
+  well-formed UTF-8. The floor applies where it did before: every derivation,
+  vault creation, and vault password re-wrap, all failing with
+  `invalid-password` before any KDF work. It is a length check, not a strength
+  check; the docs now say the application owns the strength policy when a
+  password is chosen. (`404dc51`)
+- **`zeraEd25519` removed.** The self-salting built-in profile
+  `web2ish-zera-ed25519-v1` is no longer exported from
+  `web2-ish-self-custody/chains/zera`, and `zeraProfiles` no longer contains
+  it. Its vector (`vectors/built-in-v1.json`) and Python verifier
+  (`scripts/verify_zera_vector.py`) are gone. The generic
+  `derived-from-username` salt policy remains in the core. (`aa0eb44`)
+- **`adoptPublicSaltHex` removed.** `IdentityServiceConfig`,
+  `ResolvedIdentityServiceConfig`, and `PlatformSaltConfig` no longer have it.
+  A configuration that still passes it is refused with
+  `invalid-service-profile` before any SQL runs rather than silently ignored,
+  since ignoring it would mint a fresh salt for a caller that expected to keep
+  an old one. The salt is always minted by the database on first provisioning.
+  (`d1b4f48`)
+
+### Migrating from v0.8.0
+
+- Replace `MINIMUM_PASSWORD_BYTES` with `MINIMUM_PASSWORD_CHARACTERS`, and
+  count characters as code points (`[...value].length` in JavaScript, not
+  `value.length`). A password of 10–23 ASCII characters is now accepted; one of
+  24 or more bytes but fewer than 10 characters (six 4-byte emoji, for
+  example) is now rejected, as is any byte string that is not well-formed
+  UTF-8. `TextEncoder` output is always well-formed.
+- Import `zeraEd25519ExternalSalt` wherever `zeraEd25519` was imported. They
+  derive **different** wallets for the same credentials, so an application
+  that had users on `zeraEd25519` would need an enrollment migration; no known
+  consumer did.
+- Delete any `adoptPublicSaltHex` from identity-service and platform-salt
+  configuration. A database that is already provisioned keeps its salt; nothing
+  else changes for it.
+- Fixtures that copied `vectors/zera-ed25519-external-salt-v1.json` must pick
+  up its new expected values (see below).
+
+### Other changes
+
+- **Knight-Armor decoupled.** Tests and docs use neutral example ids
+  (`example-app`, `example-app-password-wallet-v1`, `example_identity`). The
+  external-salt vector's application id changed accordingly, which changes its
+  public key, address, identifier, and signature; the v0.8.0 and v0.9.0 builds
+  and the independent Python verifier agree on the new values, and both builds
+  still reproduce the old ones from the old input. The challenge worked example
+  in `docs/SERVER_API.md` is recomputed for the new ids. The README "Used by"
+  table lists DemocracyOS only. (`633e08d`)
+- `test/server/saltAdoption.integration.test.ts` is now
+  `test/server/platformSalt.integration.test.ts`, covering minting, idempotent
+  re-runs, immutability, concurrent first provisioning, and the refusal of the
+  removed option against a real PostgreSQL. (`d1b4f48`)
 - **CI**: `package-lock.json` is back in sync with `package.json`. It was
   missing the `pg` and `@types/pg` dev dependencies and still declared
   `engines.node >=20`, so `npm ci` had failed on every CI run since `v0.3.0`.
   The only other lock change is the dev-only transitive `nanoid` 3.3.16 →
   3.3.19 (advisory GHSA-2v37-7h3g-55p8); runtime dependencies are unchanged.
+  (`5425002`)
 - **CI**: the Node matrix is `[22, 24]`, matching `engines.node >=22` (it was
   `[20, 24]`). `actions/checkout`, `actions/setup-node`, and
   `actions/setup-python` are bumped to v7, which run on the Node 24 Actions
-  runtime, and stay pinned by commit SHA.
+  runtime, and stay pinned by commit SHA. (`5425002`)
 - **Typecheck**: `tsconfig.json` sets `"types": []`. The synced lock installs
   `@types/node` (a dependency of `@types/pg`), which would otherwise load Node
   globals into the browser-first typecheck and trip the deliberate
   `@ts-expect-error` in `test/zera-ed25519.test.ts`. Emitted `dist/` is
-  byte-identical either way.
+  byte-identical either way. (`5425002`)
 - **Build**: `npm run build` now removes `dist/` first (new `clean` script,
-  plain Node, no new dependency), so outputs of deleted modules such as
-  `dist/profiles.*` and `dist/zera-ed25519.*` can no longer linger locally or
-  be packed.
+  plain Node, no new dependency), so outputs of deleted modules can no longer
+  linger locally or be packed. (`2b2be8b`)
 - **Docs**: the README documents the wallet vault and recovery code (shipped in
-  `v0.5.0`) and no longer claims the package cannot encrypt or recover a
-  wallet. The install snippet uses the `git+https://…#<sha>` form consumers
+  `v0.5.0`), the install snippet uses the `git+https://…#<sha>` form consumers
   use, a "Used by" section lists the consumers, and the API tables include the
   vault and platform-salt exports. `docs/INTEGRATION.md`'s encrypted-vault
   guidance, `SECURITY.md`, and `docs/SECURITY_MODEL.md` are aligned with the
-  vault.
-- Added this changelog.
+  vault. Added this changelog. (`b6e750c`)
 
 ## v0.8.0 — 2026-08-20
 
