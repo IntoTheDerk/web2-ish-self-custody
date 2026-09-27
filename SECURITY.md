@@ -129,7 +129,8 @@ Never send a real username/password pair, seed, private key, recovery secret, si
 These are intentional properties, not bugs:
 
 - public identities make offline password verification possible
-- forgotten credentials are not recoverable by this package
+- forgotten credentials are not recoverable by this package, except through the
+  recovery code of a wallet vault created before they were forgotten
 - credential, profile, or codec changes derive a different wallet or a different
   address for the same key
 - JavaScript strings cannot be reliably zeroized

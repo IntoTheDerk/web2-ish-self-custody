@@ -21,6 +21,7 @@ variable, or a config file to swap out from under you.
 | a wallet from credentials alone, with no server to consult | `zeraEd25519` | `web2-ish-self-custody/chains/zera` |
 | a wallet whose namespace your service owns and can separate from every other service | `zeraEd25519ExternalSalt` | `web2-ish-self-custody/chains/zera` |
 | a public identity for a seed you already generated randomly | `deriveZeraEd25519IdentityFromSeed` | `web2-ish-self-custody/chains/zera` |
+| a seed that survives a password change, with a recovery code | `createWalletVault`, `createWalletVaultFromCredentials`, and the other vault functions | `web2-ish-self-custody` |
 | the server half of a service-salted profile | `createIdentityService` and friends | `web2-ish-self-custody/server` |
 
 The two derivation profiles are not interchangeable. Selecting a different one
@@ -85,17 +86,58 @@ Do not replace an application's random-seed vault with deterministic custody
 without an explicit product decision. The deterministic mode has different
 recovery and password-guessing properties, and no migration reconciles them.
 
-## Random encrypted-vault integrations
+## Encrypted-vault integrations
 
-Applications that already create a random wallet seed should not replace it with
-a username/password-derived seed merely to use this package.
+Since v0.5.0 the package ships a wallet vault: the seed encrypted under a random
+data key, with that data key wrapped once under the vault password and once
+under a generated 256-bit recovery code. The format, the cryptography, and the
+limits are described in the
+[README](../README.md#wallet-vault-and-recovery-code). Two situations use it
+differently.
 
-Use `deriveZeraEd25519IdentityFromSeed` (or the generic
-`deriveIdentityFromSeed(seed, codec)` with your own chain's codec) only to derive
-the public identity from an application-owned random seed. Keep encryption,
-storage, recovery, origin binding, and lifecycle controls in the application.
-This split lets several applications share one address convention without
-turning this package into a browser storage or policy layer.
+**Your application already generates a random seed.** Do not replace it with a
+username/password-derived seed merely to use this package. Derive its public
+identity with `deriveZeraEd25519IdentityFromSeed` (or the generic
+`deriveIdentityFromSeed(seed, codec)` with your own chain's codec). You may keep
+your own encryption, or seal the seed with
+`createWalletVault({ profile, context, username, password, seed })` to get the
+password-plus-recovery-code envelope. The profile there supplies the codec, the
+profile id recorded in the envelope, and the scrypt cost used for the password
+wrapper; the seed itself is not derived from anything.
+
+**Your users have credential-derived wallets and need password changes or a
+recovery path.** Enrol each wallet with `createWalletVaultFromCredentials` while
+the user can still derive it. The seed is derived, sealed, and zeroed inside
+that call, and the address the user already has is preserved. From then on the
+vault, not re-derivation, is the source of the seed: sign through
+`openWalletVaultWithPassword` or `openWalletVaultWithRecoveryCode`, and change
+the password with `rewrapWalletVaultPassword`. Once a vault password has been
+changed, deriving from the new credentials produces a *different* wallet, so the
+client must open the vault instead.
+
+In both cases:
+
+- Run vault creation, opening, and re-wrapping in the same kind of one-shot
+  worker as derivation. They take the password as bytes, and the callback that
+  receives the wallet is synchronous and scoped exactly like `withDerivedWallet`.
+- The host stores the vault. It is a plain JSON-serializable object whose header
+  (username, address, public key, application, network, profile and codec ids)
+  is readable and whose seed and data key are not. Run `parseWalletVault` on
+  anything read back from storage before using it. The host never needs the
+  vault password or the recovery code, and the identity server module in
+  `web2-ish-self-custody/server` does not store vaults.
+- Show the recovery code to the user once, at creation. The vault does not keep
+  it, and `rewrapWalletVaultPassword` re-seals with whichever code it is given,
+  so pass the user's existing code on a password change to keep their kit valid.
+- A user who has lost both the vault password and the recovery code has lost
+  that wallet. Anything the product offers at that point is a new wallet, not
+  a recovery.
+
+Encryption does not make browser storage safe by itself. Origin binding,
+storage and backup of the envelope, access control on who may fetch it, and
+lifecycle controls remain the application's responsibility. This split lets
+several applications share one address convention and one envelope format
+without turning this package into a browser storage or policy layer.
 
 ## Two services, one identity format
 

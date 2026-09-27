@@ -22,7 +22,8 @@ The username is domain and identity context, not a secret. It must not be counte
 
 ## Failure modes
 
-- Forgotten password or username: permanent wallet loss.
+- Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
+- Lost vault password and lost recovery code: permanent wallet loss.
 - Password or username change: different wallet identity.
 - Profile/context change: different wallet identity.
 - External salt loss, rotation, or substitution: different wallet identity.

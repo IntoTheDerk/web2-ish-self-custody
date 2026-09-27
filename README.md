@@ -45,32 +45,62 @@ change to any of them is a new profile id, never an edit. See
 - Uses no network, filesystem, storage, telemetry, or Node-only runtime APIs.
 - Derives a public identity from an application-owned random 32-byte seed
   through a separate, storage-agnostic entry point.
+- Seals a 32-byte seed into an encrypted [wallet vault](#wallet-vault-and-recovery-code)
+  that opens with either a password or a generated recovery code, so a password
+  change or a forgotten password need not mean a new wallet.
 
 ## What it does not do
 
-These lists describe the derivation entry points. The separate
-`web2-ish-self-custody/server` module is the one part of this package that holds
-state, and it holds only public identity material.
+These lists describe the client-side entry points (derivation and the wallet
+vault). The separate `web2-ish-self-custody/server` module is the one part of
+this package that holds state, and it holds only public identity material.
 
-- Recover forgotten passwords.
-- Preserve a wallet when the username, password, context, salt, or profile changes.
+- Recover a forgotten password. A deterministic wallet is a function of its
+  password; the only recovery path the package offers is the recovery code of a
+  wallet vault created *before* the password was lost.
+- Recover a vault whose password and recovery code are both lost.
+- Preserve a derived wallet when the username, password, context, salt, or
+  profile changes. (A vault preserves the seed across password changes, but
+  re-deriving from new credentials still yields a different wallet.)
 - Prevent offline password guessing.
 - Protect against malicious same-origin JavaScript, browser extensions, a compromised browser, or a compromised operating system.
-- Store sessions, challenges, wallets, or account records.
+- Store sessions, challenges, wallets, vaults, or account records. A vault is
+  returned as a plain object; persisting it is the host's job.
 - Build or submit transactions.
-- Generate, encrypt, persist, or recover random-seed vaults.
 
 ## Install
 
-The package has not yet been published to npm. During integration, depend on an immutable Git commit:
+The package has not yet been published to npm. During integration, depend on an
+immutable, reviewed Git commit — the same form every current consumer uses:
 
 ```json
 {
   "dependencies": {
-    "web2-ish-self-custody": "github:IntoTheDerk/web2-ish-self-custody#<reviewed-commit>"
+    "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>"
   }
 }
 ```
+
+Pin a full 40-character commit SHA rather than a branch or a tag name. The
+package builds itself through its `prepare` script during the Git install.
+
+## Used by
+
+| consumer | what it uses |
+| --- | --- |
+| [DemocracyOS-web](https://github.com/IntoTheDerk/DemocracyOS-web) | the browser password wallet (`withDerivedWallet` with `zeraEd25519ExternalSalt`) and the wallet-vault workers |
+| [DemocracyOS-backend](https://github.com/IntoTheDerk/DemocracyOS-backend) | the platform salt and server identity configuration: `provisionPlatformSalt` / `readPlatformSalt` from `/server`, configured with `zeraEd25519ExternalSalt` |
+| [Knight-Armor](https://github.com/IntoTheDerk/Knight-Armor) | the identity service (`createIdentityService` / `createIdentityRouter` from `/server`) and the browser credential-derived wallet |
+
+Each consumer pins one reviewed commit (currently `v0.8.0`,
+`051b4bcf2521e664f9688553dc27f01e2b6badf0`). DemocracyOS uses
+`serviceProfileId: "democracyos-password-wallet-v1"` with
+`applicationId: "democracy-os"`; Knight-Armor uses
+`"knight-armor-password-wallet-v1"` with `"knight-armor"`. Both share the
+`zeraEd25519ExternalSalt` profile but each has its own application id and its own
+public salt, so the same username and password derive **different** wallets in
+each product. That is by design — see
+[Two services, one identity format](docs/INTEGRATION.md#two-services-one-identity-format).
 
 ## Usage
 
@@ -151,7 +181,103 @@ This standardizes only public-key derivation and address encoding for a seed the
 application already owns. It does not derive that seed from credentials and does
 not store, encrypt, recover, or sign with it. The generic form is
 `deriveIdentityFromSeed(seed, codec)`; the ZERA helper is that function with
-`zeraEd25519Codec` already applied.
+`zeraEd25519Codec` already applied. To encrypt such a seed, see the wallet vault
+below.
+
+### Wallet vault and recovery code
+
+Deterministic derivation alone cannot survive a password change: a new password
+is a new wallet, and a forgotten password is a lost one. A wallet vault
+(`src/vault.ts`, since v0.5.0) decouples the two by storing the seed encrypted
+under two independent wrappers.
+
+```ts
+import {
+  createWalletVaultFromCredentials,
+  openWalletVaultWithPassword,
+  parseWalletVault,
+  rewrapWalletVaultPassword,
+} from "web2-ish-self-custody";
+import { zeraEd25519Codec, zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+
+// Enrol the wallet these credentials already derive; its address is preserved.
+// vaultPassword is a Uint8Array of 24–1024 bytes and may differ from the
+// derivation password.
+const { vault, recoveryCode } = await createWalletVaultFromCredentials(
+  { profile: zeraEd25519ExternalSalt, username, password, salt, context },
+  vaultPassword,
+);
+// Show recoveryCode to the user once so they can write it down. Store `vault`
+// (a plain JSON-serializable object) wherever the application keeps it.
+
+// Later: parse what came back from storage, then open it inside a scope.
+const signature = await openWalletVaultWithPassword(
+  parseWalletVault(storedVault),
+  vaultPassword,
+  zeraEd25519Codec,
+  (wallet) => wallet.signExactMessageUnsafe(exactTypedMessageBytes),
+);
+
+// Password forgotten: unlock with the recovery code and set a new password.
+// The seed, and therefore the address, does not change.
+const rotated = await rewrapWalletVaultPassword(
+  parseWalletVault(storedVault),
+  { recoveryCode },
+  newVaultPassword,
+  recoveryCode,
+);
+```
+
+How it works:
+
+- A random 32-byte data key encrypts the seed with AES-256-GCM (WebCrypto).
+  The data key is wrapped twice: once under a key stretched from the vault
+  password with scrypt at the profile's KDF parameters and a fresh random salt,
+  and once under a key derived by HKDF-SHA-256 from the recovery code.
+- `generateRecoveryCode()` produces a 256-bit code in a 32-symbol alphabet
+  without `I`, `O`, `0`, or `1`, grouped in fours, and is what the create
+  functions use by default. The recovery wrapper does no stretching, so a code
+  must always come from this function and never be user-chosen; the optional
+  `recoveryCode` parameters exist only to re-seal a kit the user already holds.
+  `normalizeRecoveryCode` accepts any case and grouping when it is typed back.
+- The format, version, profile id, codec id, application id, network id,
+  normalized username, address, and public key are authenticated as AES-GCM
+  associated data, so a relabelled envelope does not open. On open, the
+  decrypted seed is re-derived to its address and compared with the envelope.
+- A wrong password, a wrong recovery code, and a tampered envelope all fail with
+  the same error code, `vault-authentication-failed`.
+- Opening follows the same scope rules as derivation: the callback must be
+  synchronous, and the signer stops working when it returns.
+
+The entry points:
+
+| export | purpose |
+| --- | --- |
+| `createWalletVault({ profile, context, username, password, seed, recoveryCode? })` | seals any 32-byte seed the application already has, such as a random one |
+| `createWalletVaultFromCredentials(credentials, vaultPassword, recoveryCode?)` | derives the deterministic seed and seals it without ever returning it |
+| `openWalletVaultWithPassword(vault, password, codec, useWallet)` | opens with the password |
+| `openWalletVaultWithRecoveryCode(vault, recoveryCode, codec, useWallet)` | opens with the recovery code |
+| `rewrapWalletVaultPassword(vault, unlock, newPassword, recoveryCode)` | re-seals the same seed under a new password; `unlock` is `{ password }` or `{ recoveryCode }` |
+| `parseWalletVault(value)` | strict structural validation of a stored vault before any key work |
+| `generateRecoveryCode()` / `normalizeRecoveryCode(code)` | recovery-code generation and input normalization |
+
+Limits worth stating plainly:
+
+- Losing **both** the vault password and the recovery code loses the wallet.
+  There is no server-side reset, by design.
+- The vault does not store its recovery code. `rewrapWalletVaultPassword`
+  re-seals with whatever code it is given, without checking it against the old
+  wrapper, so pass the user's existing code to keep their written-down kit
+  valid. Unlocking with `{ recoveryCode }` and passing that same code, as above,
+  checks it first.
+- Anyone holding a vault can test password guesses against it offline at the
+  scrypt cost recorded in the envelope (the profile's cost when the vault was
+  created here), much as anyone holding a public address can against a
+  deterministic wallet. A strong vault password still matters.
+- The vault header (username, address, public key, application, network) is
+  readable by whoever stores it. Only the seed and data key are encrypted.
+- The package does not persist, transmit, or back up vaults. Storage, access
+  control, and delivery of the recovery code to the user are the host's job.
 
 ### The signer is deliberately named unsafe
 
@@ -264,10 +390,14 @@ moment a wallet is derived under them.
 | `ED25519_SEED_BYTES` | constant | 32 |
 | `MINIMUM_PASSWORD_BYTES` / `MAXIMUM_PASSWORD_BYTES` | constants | 24 and 1024 |
 | `DerivationError` / `DerivationErrorCode` | class / type | every failure this package throws |
+| `createWalletVault`, `createWalletVaultFromCredentials`, `openWalletVaultWithPassword`, `openWalletVaultWithRecoveryCode`, `rewrapWalletVaultPassword`, `parseWalletVault` | functions | the [wallet vault](#wallet-vault-and-recovery-code) |
+| `generateRecoveryCode` / `normalizeRecoveryCode` | functions | vault recovery codes |
+| `WALLET_VAULT_FORMAT` | constant | `"web2-ish-self-custody-wallet-vault-v1"` |
 
-Exported types: `DerivationContext`, `DerivationCredentials`,
-`DerivationProfile`, `DerivedIdentity`, `DerivedWallet`, `IdentityCodec`,
-`ProfileDomains`, `SaltPolicy`, and `SeedIdentity`.
+Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
+`DerivationCredentials`, `DerivationProfile`, `DerivedIdentity`,
+`DerivedWallet`, `IdentityCodec`, `ProfileDomains`, `SaltPolicy`, `SealedBox`,
+`SeedIdentity`, and `WalletVault`.
 
 `web2-ish-self-custody/chains/zera` exports:
 
@@ -342,6 +472,7 @@ comes into existence, and the schema then refuses to change it.
 | challenges | `CHALLENGE_DOMAIN`, `buildChallengeMessage`, `canonicalWalletIdentity`, `verifyChallengeSignature` |
 | config | `identityServiceDefaults`, `resolveIdentityServiceConfig` |
 | migrations | `identityMigrations`, `runIdentityMigrations` |
+| platform salt only | `platformSaltMigration`, `provisionPlatformSalt`, `readPlatformSalt` |
 | errors | `IdentityError`, `identityErrorStatus`, `enumerationSensitiveCodes` |
 | constants | `challengePurposes` |
 
