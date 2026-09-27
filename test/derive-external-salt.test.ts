@@ -1,7 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
 import vector from "../vectors/zera-ed25519-external-salt-v1.json" with { type: "json" };
-import { zeraEd25519, zeraEd25519ExternalSalt } from "../src/chains/zera.js";
+import { zeraEd25519ExternalSalt } from "../src/chains/zera.js";
 import { DerivationError, derivePublicIdentity, withDerivedWallet } from "../src/index.js";
 
 const encoder = new TextEncoder();
@@ -106,28 +106,4 @@ describe("external-salt ZERA Ed25519 profile", () => {
     derivationTimeoutMs,
   );
 
-  it(
-    "does not reproduce the stateless profile with identical credentials",
-    async () => {
-      const [external, stateless] = await Promise.all([
-        derivePublicIdentity({
-          profile: zeraEd25519ExternalSalt,
-          username: vector.username,
-          password,
-          context,
-          salt,
-        }),
-        derivePublicIdentity({
-          profile: zeraEd25519,
-          username: vector.username,
-          password,
-          context,
-        }),
-      ]);
-      expect(external.publicKey).not.toBe(stateless.publicKey);
-      // Same chain, so the two share an address convention but not a wallet.
-      expect(external.codecId).toBe(stateless.codecId);
-    },
-    derivationTimeoutMs,
-  );
 });

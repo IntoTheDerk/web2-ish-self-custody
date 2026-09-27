@@ -1,7 +1,7 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
-import vectors from "../vectors/built-in-v1.json" with { type: "json" };
-import { zeraEd25519 } from "../src/chains/zera.js";
+import vector from "../vectors/zera-ed25519-external-salt-v1.json" with { type: "json" };
+import { zeraEd25519ExternalSalt } from "../src/chains/zera.js";
 import {
   DerivationError,
   derivePublicIdentity,
@@ -9,66 +9,47 @@ import {
   MINIMUM_PASSWORD_CHARACTERS,
   withDerivedWallet,
 } from "../src/index.js";
+import { krypticStateless } from "./support/kryptic-chain.js";
 
 const encoder = new TextEncoder();
-const password = encoder.encode(vectors.passwordUtf8);
+const password = encoder.encode(vector.passwordUtf8);
+const salt = hexToBytes(vector.saltHex);
+const context = { applicationId: vector.applicationId, networkId: vector.networkId };
+
+const credentials = {
+  profile: zeraEd25519ExternalSalt,
+  username: vector.username,
+  password,
+  context,
+  salt,
+} as const;
 
 /** scrypt at N=65536 costs ~200ms per call, and this file makes many. */
 const derivationTimeoutMs = 60_000;
 
-describe("stateless ZERA Ed25519 derivation", () => {
+/**
+ * Behaviour of the core that holds for every profile. The committed vector's
+ * own field-by-field check lives in derive-external-salt.test.ts.
+ */
+describe("deterministic derivation", () => {
   it(
-    "derives stable, normalized ZERA Ed25519 identities",
+    "derives stable identities from differently written usernames",
     async () => {
       const first = await derivePublicIdentity({
-        profile: zeraEd25519,
-        username: "  JESSE@example.COM ",
-        password,
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
+        ...credentials,
+        username: `  ${vector.username.toUpperCase()} `,
       });
-      const second = await derivePublicIdentity({
-        profile: zeraEd25519,
-        username: "jesse@example.com",
-        password,
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-      });
+      const second = await derivePublicIdentity({ ...credentials });
 
       expect(first.curve).toBe("ed25519");
-      expect(first.profileId).toBe("web2ish-zera-ed25519-v1");
+      expect(first.profileId).toBe("web2ish-zera-ed25519-external-salt-v1");
       // Recorded on the identity so a stored address stays resolvable even if a
       // deployment ever adds a second address encoding.
       expect(first.codecId).toBe("zera-ed25519-base58-v1");
-      expect(first.normalizedUsername).toBe("jesse@example.com");
+      expect(first.normalizedUsername).toBe(vector.normalizedUsername);
       expect(first.publicKey).toBe(`A_${first.address}`);
       expect(first.publicKey).toBe(second.publicKey);
-      expect(first.publicKey).toBe(vectors.zeraEd25519V1.publicKeyIdentifier);
-    },
-    derivationTimeoutMs,
-  );
-
-  it(
-    "domain-separates the stateless profile by application, network, username, and password",
-    async () => {
-      const base = {
-        profile: zeraEd25519,
-        username: "jesse@example.com",
-        password,
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-      };
-      const identities = await Promise.all([
-        derivePublicIdentity(base),
-        derivePublicIdentity({ ...base, username: "other@example.com" }),
-        derivePublicIdentity({
-          ...base,
-          password: encoder.encode("correct horse battery staple lantern orbit!"),
-        }),
-        derivePublicIdentity({ ...base, context: { ...base.context, applicationId: "other-app" } }),
-        derivePublicIdentity({ ...base, context: { ...base.context, networkId: "zera-testnet" } }),
-      ]);
-
-      expect(new Set(identities.map((identity) => identity.publicKey)).size).toBe(
-        identities.length,
-      );
+      expect(first.publicKey).toBe(vector.publicKeyIdentifier);
     },
     derivationTimeoutMs,
   );
@@ -78,21 +59,13 @@ describe("stateless ZERA Ed25519 derivation", () => {
     async () => {
       let retainedWallet: Parameters<Parameters<typeof withDerivedWallet>[1]>[0] | undefined;
       const message = encoder.encode("test-only login challenge");
-      const result = await withDerivedWallet(
-        {
-          profile: zeraEd25519,
-          username: "jesse@example.com",
-          password,
-          context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        },
-        (wallet) => {
-          retainedWallet = wallet;
-          return {
-            signature: wallet.signExactMessageUnsafe(message),
-            publicKey: wallet.identity.publicKeyBytes,
-          };
-        },
-      );
+      const result = await withDerivedWallet({ ...credentials }, (wallet) => {
+        retainedWallet = wallet;
+        return {
+          signature: wallet.signExactMessageUnsafe(message),
+          publicKey: wallet.identity.publicKeyBytes,
+        };
+      });
 
       const { ed25519 } = await import("@noble/curves/ed25519.js");
       expect(ed25519.verify(result.signature, message, result.publicKey)).toBe(true);
@@ -107,12 +80,7 @@ describe("stateless ZERA Ed25519 derivation", () => {
     "enforces the published password bounds before any KDF work",
     async () => {
       const derive = (candidate: Uint8Array) =>
-        derivePublicIdentity({
-          profile: zeraEd25519,
-          username: "jesse@example.com",
-          password: candidate,
-          context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        });
+        derivePublicIdentity({ ...credentials, password: candidate });
 
       for (const rejected of [
         // One character short of the floor.
@@ -122,7 +90,7 @@ describe("stateless ZERA Ed25519 derivation", () => {
         new Uint8Array(MAXIMUM_PASSWORD_BYTES + 1).fill(0x61),
         // Not UTF-8, so it has no character count at all.
         new Uint8Array(32).fill(0xff),
-        vectors.passwordUtf8 as unknown as Uint8Array,
+        vector.passwordUtf8 as unknown as Uint8Array,
       ]) {
         await expect(derive(rejected)).rejects.toMatchObject({
           code: "invalid-password",
@@ -138,9 +106,11 @@ describe("stateless ZERA Ed25519 derivation", () => {
 
   it("rejects anything that is not a derivation profile object", async () => {
     // The core has no profile registry, so a caller holding a stored id string
-    // — including the deleted secp256k1 one — cannot resolve it into a profile.
+    // — including the removed built-in ZERA and secp256k1 ones — cannot resolve
+    // it into a profile.
     for (const profile of [
       "web2ish-zera-ed25519-v1",
+      "web2ish-zera-ed25519-external-salt-v1",
       "democracyos-scrypt-sha512-secp256k1-v2",
       "",
       null,
@@ -150,24 +120,21 @@ describe("stateless ZERA Ed25519 derivation", () => {
       {},
     ]) {
       await expect(
-        derivePublicIdentity({
-          profile: profile as never,
-          username: "jesse@example.com",
-          password,
-          context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        }),
+        derivePublicIdentity({ ...credentials, profile: profile as never }),
         `profile ${JSON.stringify(profile) ?? String(profile)} must be rejected`,
       ).rejects.toMatchObject({ code: "invalid-profile" } satisfies Partial<DerivationError>);
     }
   });
 
   it("rejects a stray salt and a pre-aborted signal before any KDF work", async () => {
+    // A profile that derives its own salt refuses one from the caller outright
+    // rather than silently ignoring it.
     await expect(
       derivePublicIdentity({
-        profile: zeraEd25519,
-        username: "jesse@example.com",
+        profile: krypticStateless,
+        username: vector.username,
         password,
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
+        context,
         salt: new Uint8Array(32),
       }),
     ).rejects.toMatchObject({ code: "invalid-salt" } satisfies Partial<DerivationError>);
@@ -175,13 +142,7 @@ describe("stateless ZERA Ed25519 derivation", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(
-      derivePublicIdentity({
-        profile: zeraEd25519,
-        username: "jesse@example.com",
-        password,
-        context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-        signal: controller.signal,
-      }),
+      derivePublicIdentity({ ...credentials, signal: controller.signal }),
     ).rejects.toMatchObject({ code: "aborted" } satisfies Partial<DerivationError>);
   });
 
@@ -191,13 +152,7 @@ describe("stateless ZERA Ed25519 derivation", () => {
       const controller = new AbortController();
       await expect(
         derivePublicIdentity({
-          profile: zeraEd25519,
-          username: vectors.zeraEd25519V1.username,
-          password,
-          context: {
-            applicationId: vectors.zeraEd25519V1.applicationId,
-            networkId: vectors.zeraEd25519V1.networkId,
-          },
+          ...credentials,
           signal: controller.signal,
           onProgress(progress) {
             if (progress === 1) controller.abort();
@@ -209,59 +164,14 @@ describe("stateless ZERA Ed25519 derivation", () => {
   );
 
   it(
-    "verifies every committed ZERA Ed25519 vector field",
-    async () => {
-      const message = encoder.encode(vectors.zeraEd25519V1.messageUtf8);
-      const result = await withDerivedWallet(
-        {
-          profile: zeraEd25519,
-          username: vectors.zeraEd25519V1.username,
-          password,
-          context: {
-            applicationId: vectors.zeraEd25519V1.applicationId,
-            networkId: vectors.zeraEd25519V1.networkId,
-          },
-        },
-        (wallet) => ({
-          identity: wallet.identity,
-          signatureHex: bytesToHex(wallet.signExactMessageUnsafe(message)),
-        }),
-      );
-
-      expect(result.identity.profileId).toBe(vectors.zeraEd25519V1.profile);
-      expect(result.identity.normalizedUsername).toBe(
-        vectors.zeraEd25519V1.normalizedUsername,
-      );
-      expect(result.identity.address).toBe(vectors.zeraEd25519V1.address);
-      expect(result.identity.publicKey).toBe(vectors.zeraEd25519V1.publicKeyIdentifier);
-      expect(bytesToHex(result.identity.publicKeyBytes)).toBe(
-        vectors.zeraEd25519V1.publicKeyHex,
-      );
-      expect(result.signatureHex).toBe(vectors.zeraEd25519V1.signatureHex);
-    },
-    derivationTimeoutMs,
-  );
-
-  it(
     "rejects asynchronous callbacks and closes retained wallet objects",
     async () => {
       let retainedWallet: Parameters<Parameters<typeof withDerivedWallet>[1]>[0] | undefined;
       await expect(
-        withDerivedWallet(
-          {
-            profile: zeraEd25519,
-            username: vectors.zeraEd25519V1.username,
-            password,
-            context: {
-              applicationId: vectors.zeraEd25519V1.applicationId,
-              networkId: vectors.zeraEd25519V1.networkId,
-            },
-          },
-          (wallet) => {
-            retainedWallet = wallet;
-            return Promise.resolve("not allowed");
-          },
-        ),
+        withDerivedWallet({ ...credentials }, (wallet) => {
+          retainedWallet = wallet;
+          return Promise.resolve("not allowed");
+        }),
       ).rejects.toMatchObject({
         code: "async-wallet-scope",
       } satisfies Partial<DerivationError>);

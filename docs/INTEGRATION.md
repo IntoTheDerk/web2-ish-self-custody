@@ -18,15 +18,14 @@ variable, or a config file to swap out from under you.
 
 | you need | import | from |
 | --- | --- | --- |
-| a wallet from credentials alone, with no server to consult | `zeraEd25519` | `web2-ish-self-custody/chains/zera` |
 | a wallet whose namespace your service owns and can separate from every other service | `zeraEd25519ExternalSalt` | `web2-ish-self-custody/chains/zera` |
 | a public identity for a seed you already generated randomly | `deriveZeraEd25519IdentityFromSeed` | `web2-ish-self-custody/chains/zera` |
 | a seed that survives a password change, with a recovery code | `createWalletVault`, `createWalletVaultFromCredentials`, and the other vault functions | `web2-ish-self-custody` |
 | the server half of a service-salted profile | `createIdentityService` and friends | `web2-ish-self-custody/server` |
 
-The two derivation profiles are not interchangeable. Selecting a different one
-for an existing user derives a different wallet, which is a product migration
-with an enrollment step, never a configuration change.
+Derivation profiles are not interchangeable. Selecting a different one for an
+existing user derives a different wallet, which is a product migration with an
+enrollment step, never a configuration change.
 
 ## New chain, or new profile?
 
@@ -42,7 +41,7 @@ codec, a new codec always implies at least one new profile as well.
 **Define a new profile against an existing codec when only the transcript
 changes.** Same addresses, different derivation: a different salt policy, a
 different KDF cost, a new domain string, a new version of the same wallet family.
-The two bundled ZERA profiles are exactly this — one codec, two transcripts.
+One codec can carry any number of transcripts this way.
 
 **Reuse an existing profile** when you want the same wallet family and only your
 namespace differs. Two services on `zeraEd25519ExternalSalt` with different

@@ -59,30 +59,14 @@ export const zeraEd25519Codec: IdentityCodec = defineIdentityCodec({
 });
 
 /**
- * Every string below is fixed wire surface. They are reproduced here exactly as
- * originally specified — including the trailing newline on the password-hash
- * domain, which is concatenated with the raw password bytes rather than
- * line-joined. Editing any of them redefines every wallet derived under that
- * profile, so a change belongs in a new profile id, never here.
+ * Service-salted: the caller supplies a 32-byte salt the service owns.
+ *
+ * Every string below is fixed wire surface, reproduced exactly as originally
+ * specified — including the trailing newline on the password-hash domain,
+ * which is concatenated with the raw password bytes rather than line-joined.
+ * Editing any of them redefines every wallet derived under this profile, so a
+ * change belongs in a new profile id, never here.
  */
-const PASSWORD_HASH_DOMAIN = "web2-ish-self-custody password hash v1\n";
-
-/** Stateless: the salt is derived from the normalized username and context. */
-export const zeraEd25519: DerivationProfile = defineDerivationProfile({
-  id: "web2ish-zera-ed25519-v1",
-  curve: "ed25519",
-  algorithm: "scrypt-sha512-ed25519-v1",
-  saltPolicy: "derived-from-username",
-  kdf: { N: 65_536, r: 8, p: 1, dkLen: 32 },
-  domains: {
-    passwordHash: PASSWORD_HASH_DOMAIN,
-    entropy: "web2-ish-self-custody ZERA Ed25519 entropy v1",
-    salt: "web2-ish-self-custody public username salt v1",
-  },
-  codec: zeraEd25519Codec,
-});
-
-/** Service-salted: the caller supplies a 32-byte salt the service owns. */
 export const zeraEd25519ExternalSalt: DerivationProfile = defineDerivationProfile({
   id: "web2ish-zera-ed25519-external-salt-v1",
   curve: "ed25519",
@@ -90,14 +74,14 @@ export const zeraEd25519ExternalSalt: DerivationProfile = defineDerivationProfil
   saltPolicy: "external-32",
   kdf: { N: 65_536, r: 8, p: 1, dkLen: 32 },
   domains: {
-    passwordHash: PASSWORD_HASH_DOMAIN,
+    passwordHash: "web2-ish-self-custody password hash v1\n",
     entropy: "web2-ish-self-custody ZERA Ed25519 external salt entropy v1",
   },
   codec: zeraEd25519Codec,
 });
 
+/** The bundled ZERA profiles, keyed by id, for resolving a stored profile id. */
 export const zeraProfiles: Readonly<Record<string, DerivationProfile>> = Object.freeze({
-  [zeraEd25519.id]: zeraEd25519,
   [zeraEd25519ExternalSalt.id]: zeraEd25519ExternalSalt,
 });
 

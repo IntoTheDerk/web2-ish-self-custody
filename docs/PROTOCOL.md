@@ -6,10 +6,10 @@ This document is the wire specification. It has two layers:
    over that profile's domain-separation strings, salt policy, and KDF
    parameters. It contains no chain-specific value.
 2. **The ZERA instance** — the exact literal constants that turn the generic
-   rule into the two bundled ZERA profiles.
+   rule into the bundled ZERA profile.
 
 Someone should be able to reimplement either layer from this document alone:
-part 1 to support a new chain, part 2 to reproduce the committed ZERA vectors
+part 1 to support a new chain, part 2 to reproduce the committed ZERA vector
 byte for byte. Where this document and the committed source disagree, the source
 and the vectors are the contract.
 
@@ -309,41 +309,41 @@ fixed wire surface, reproduced here exactly as specified.
 6. Require exactly 32 decoded bytes.
 
 Base58 has no fixed output length: a public key with leading zero bytes encodes
-shorter. Both committed vectors are 44 characters and the accepted range is 32
-to 64, so validators should accept a range rather than pin a single length.
+shorter. The committed vector's address is 44 characters and the accepted range
+is 32 to 64, so validators should accept a range rather than pin a single length.
 
-## The two ZERA profiles
+## The ZERA profile
 
-Both use `zeraEd25519Codec`, the Ed25519 curve, and scrypt
-`N = 65536, r = 8, p = 1, dkLen = 32`. They differ in exactly two things: where
-the salt comes from, and the entropy domain that keeps their transcripts apart.
+`zeraEd25519ExternalSalt` uses `zeraEd25519Codec`, the Ed25519 curve, and scrypt
+`N = 65536, r = 8, p = 1, dkLen = 32`:
 
-| | `zeraEd25519` | `zeraEd25519ExternalSalt` |
-| --- | --- | --- |
-| `id` | `web2ish-zera-ed25519-v1` | `web2ish-zera-ed25519-external-salt-v1` |
-| `algorithm` | `scrypt-sha512-ed25519-v1` | `scrypt-sha512-ed25519-external-32-v1` |
-| `saltPolicy` | `derived-from-username` | `external-32` |
-| `domains.salt` | `web2-ish-self-custody public username salt v1` | *(absent)* |
+| field | value |
+| --- | --- |
+| `id` | `web2ish-zera-ed25519-external-salt-v1` |
+| `algorithm` | `scrypt-sha512-ed25519-external-32-v1` |
+| `saltPolicy` | `external-32` |
+| `domains.salt` | *(absent)* |
+
+Until v0.9.0 the package also bundled a self-salting sibling,
+`web2ish-zera-ed25519-v1` (`derived-from-username`, entropy domain
+`web2-ish-self-custody ZERA Ed25519 entropy v1`, salt domain
+`web2-ish-self-custody public username salt v1`). No consumer imported it, and
+it was removed. Its id and domain strings stay retired: a future profile must not
+reuse them.
 
 ## Exact domain strings
 
-All UTF-8. Only the password-hash domain carries a trailing newline; the others
-are joined into transcripts with explicit `\n` separators.
+All UTF-8. Only the password-hash domain carries a trailing newline; the entropy
+domain is joined into its transcript with explicit `\n` separators.
 
 | constant | exact value |
 | --- | --- |
-| `D_pw`, both profiles | `web2-ish-self-custody password hash v1\n` |
-| `D_ent`, `web2ish-zera-ed25519-v1` | `web2-ish-self-custody ZERA Ed25519 entropy v1` |
-| `D_ent`, `web2ish-zera-ed25519-external-salt-v1` | `web2-ish-self-custody ZERA Ed25519 external salt entropy v1` |
-| `D_salt`, `web2ish-zera-ed25519-v1` only | `web2-ish-self-custody public username salt v1` |
+| `D_pw` | `web2-ish-self-custody password hash v1\n` |
+| `D_ent` | `web2-ish-self-custody ZERA Ed25519 external salt entropy v1` |
 
-The password-hash domain is 39 bytes including its trailing LF (U+000A). The two
-profiles share it deliberately: the password hash is an input to the entropy
-transcript, and it is that transcript's own domain that separates them.
+The password-hash domain is 39 bytes including its trailing LF (U+000A).
 
 ## Fully instantiated derivation
-
-For `web2ish-zera-ed25519-external-salt-v1`:
 
 ```
 passwordHash  = SHA-512( utf8("web2-ish-self-custody password hash v1\n") ‖ passwordBytes )
@@ -358,37 +358,16 @@ address       = base58(publicKey)
 identifier    = "A_" ‖ address
 ```
 
-For `web2ish-zera-ed25519-v1`, the entropy domain becomes
-`web2-ish-self-custody ZERA Ed25519 entropy v1` and the salt is derived instead
-of supplied:
-
-```
-salt = SHA-256( utf8(
-         "web2-ish-self-custody public username salt v1" ‖ "\n" ‖
-         applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖ normalizedUsername ) )
-```
-
-## Test vectors
+## Test vector
 
 Committed in `vectors/`. **Test-only credentials — never derive a real wallet
-from these values.** Both use the password `correct horse battery staple lantern
-orbit` (42 characters, 42 UTF-8 bytes) and the username `JESSE@example.COM`, which normalizes
-to `jesse@example.com`.
-
-`vectors/built-in-v1.json`, `web2ish-zera-ed25519-v1`, with
-`applicationId = knight-armor` and `networkId = zera-mainnet`:
-
-| field | value |
-| --- | --- |
-| derived salt | `bdd5abf02ffd09a5f88efd8e29a4c9b6706a4aba2a25799d622306568a2c495e` |
-| public key | `be286995d02f50aa4e7563b21d1f402c9ba45aa6dbf8abaec772fd8855bc5724` |
-| address | `DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX` |
-| public key identifier | `A_DoJCoim5tijbVDZqeCxRMqT9Aid1bCAjo7tX8PSGjbUX` |
-| message | `fixture-governance-intent-v1` |
-| signature | `6fd0c5a4dfbdf54f2d43714b0f7bbc329cc42052a05681511b4423c094265d674d1c25d370024e710919844e41157de1706e9d42b02489e05cd727a68efe2502` |
+from these values.** It uses the password `correct horse battery staple lantern
+orbit` (42 characters, 42 UTF-8 bytes) and the username `JESSE@example.COM`,
+which normalizes to `jesse@example.com`.
 
 `vectors/zera-ed25519-external-salt-v1.json`,
-`web2ish-zera-ed25519-external-salt-v1`, same application and network:
+`web2ish-zera-ed25519-external-salt-v1`, with
+`applicationId = knight-armor` and `networkId = zera-mainnet`:
 
 | field | value |
 | --- | --- |
@@ -399,26 +378,21 @@ to `jesse@example.com`.
 | message | `fixture-governance-intent-external-salt-v1` |
 | signature | `4db6ed100cdd9963c5a5f1ae120b89dc1e50a69de60bf76db79c3d8dc4d2b507564ab79e50d2f5f61898578efd688d76c5d119365282d9df366915fde123670e` |
 
-The two vectors share credentials, application, and network. Their addresses
-differ solely because the salt and the entropy domain differ, which is the
-profile separation this specification exists to guarantee.
-
 A refactor that changes these values is wrong. The vectors are not updated to
 match an implementation; the implementation is corrected to match the vectors.
 
 ## Independent vector verification
 
-`scripts/verify_zera_vector.py` and
-`scripts/verify_zera_external_salt_vector.py` reconstruct the committed vectors
-from the fixtures using Python's standard-library `hashlib` and the separately
-maintained `cryptography` package. Neither imports or executes the TypeScript
-implementation. Between them they check username normalization, both
-domain-separated transcripts, the salt (derived and supplied), the scrypt
+`scripts/verify_zera_external_salt_vector.py` reconstructs the committed vector
+from the fixture using Python's standard-library `hashlib` and the separately
+maintained `cryptography` package. It does not import or execute the TypeScript
+implementation. It checks username normalization, context canonicalization, the
+password bounds, the domain-separated transcript, the supplied salt, the scrypt
 result, the public key, the Base58 identity encoding, the deterministic
-signature, and signature verification. Both fail on missing, unexpected,
+signature, and signature verification, and it fails on missing, unexpected,
 duplicate, incorrectly typed, or incorrectly encoded fixture fields.
 
-This is cross-implementation regression evidence for the committed vectors. It
+This is cross-implementation regression evidence for the committed vector. It
 is not a cryptographic audit, does not prove browser or deployment safety, does
 not assess credential entropy, and does not replace additional vectors and
 external review before funded use.

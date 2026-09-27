@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519, zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import {
   identityServiceDefaults,
   resolveIdentityServiceConfig,
 } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
 import type { IdentityServiceConfig } from "../../src/server/types.js";
-import { krypticExternalSalt, truncatingProfile } from "../support/kryptic-chain.js";
+import {
+  krypticExternalSalt,
+  krypticStateless,
+  truncatingProfile,
+} from "../support/kryptic-chain.js";
 
 const minimal: IdentityServiceConfig = {
   serviceProfileId: "acme.identity",
@@ -112,14 +116,14 @@ describe("resolveIdentityServiceConfig profile validation", () => {
     }
   });
 
-  it("rejects the stateless profile, which has no server-held salt", () => {
+  it("rejects a self-salting profile, which has no server-held salt", () => {
     // A service exists to own and publish a salt. Configuring a profile that
     // computes its own would publish a salt clients are required to ignore.
     expectIdentityError(
-      () => resolveIdentityServiceConfig(withOverride({ profile: zeraEd25519 })),
+      () => resolveIdentityServiceConfig(withOverride({ profile: krypticStateless })),
       "invalid-service-profile",
     );
-    expect(zeraEd25519.saltPolicy).toBe("derived-from-username");
+    expect(krypticStateless.saltPolicy).toBe("derived-from-username");
   });
 
   it("rejects a codec that does not round-trip its own encoding", () => {

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519, zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { identityMigrations } from "../../src/server/migrations.js";
 import {
   platformSaltMigration,
   type PlatformSaltConfig,
 } from "../../src/server/serviceProfile.js";
+import { krypticStateless } from "../support/kryptic-chain.js";
 
 const config: PlatformSaltConfig = {
   serviceProfileId: "acme.identity",
@@ -55,9 +56,9 @@ describe("platform salt migration", () => {
   });
 
   it("refuses a profile that has no salt for a platform to own", () => {
-    // The stateless profile derives its salt from the username, so a service
+    // A self-salting profile derives its salt from the username, so a service
     // holding one would be publishing a value clients must ignore.
-    expect(() => platformSaltMigration({ ...config, profile: zeraEd25519 })).toThrowError(
+    expect(() => platformSaltMigration({ ...config, profile: krypticStateless })).toThrowError(
       expect.objectContaining({ code: "invalid-service-profile" }),
     );
   });

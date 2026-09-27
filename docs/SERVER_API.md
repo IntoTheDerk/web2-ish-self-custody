@@ -84,14 +84,14 @@ CHECK constraint on `<p>_service_profiles`; migration 2 bakes `profile.id` and
 `profile.codec.id` into the binding CHECK on `<p>_account_wallets`. A deployment
 whose configuration has drifted from its database cannot write a row at all.
 
-The bundled ZERA profile that satisfies the policy:
+The bundled ZERA profile, which satisfies the policy:
 
 | `profileId` | codec | curve | algorithm | scrypt |
 | --- | --- | --- | --- | --- |
 | `web2ish-zera-ed25519-external-salt-v1` | `zera-ed25519-base58-v1` | ed25519 | `scrypt-sha512-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
 
-Its sibling `web2ish-zera-ed25519-v1` derives its own salt and is therefore not
-serviceable.
+A profile that derives its own salt from the username (the generic
+`derived-from-username` policy) is not serviceable.
 
 ## Registration sequence
 

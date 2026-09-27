@@ -143,26 +143,6 @@ rotating, or returning the wrong service salt derives a different wallet.
 Applications must pin the profile in source and validate the salt source rather
 than accepting KDF parameters from a server response.
 
-### Stateless ZERA (no server at all)
-
-```ts
-import { withDerivedWallet } from "web2-ish-self-custody";
-import { zeraEd25519 } from "web2-ish-self-custody/chains/zera";
-
-const identity = await withDerivedWallet(
-  {
-    profile: zeraEd25519,
-    username,
-    password,
-    context: { applicationId: "knight-armor", networkId: "zera-mainnet" },
-  },
-  (wallet) => wallet.identity,
-);
-```
-
-This profile derives its own salt from the canonical username, application, and
-network. It rejects a caller-supplied `salt` outright rather than ignoring it.
-
 ### Random-seed public identity
 
 ```ts
@@ -404,9 +384,8 @@ Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
 | export | kind | purpose |
 | --- | --- | --- |
 | `zeraEd25519Codec` | `IdentityCodec` | base58 address, `A_<base58>` public-key identifier |
-| `zeraEd25519` | `DerivationProfile` | stateless; derives its salt from the username |
 | `zeraEd25519ExternalSalt` | `DerivationProfile` | service-salted; takes 32 bytes from the caller |
-| `zeraProfiles` | record | both profiles, keyed by id |
+| `zeraProfiles` | record | the bundled profile, keyed by id |
 | `deriveZeraEd25519IdentityFromSeed(seed)` | function | ZERA public identity for a random seed |
 
 There is no private-key export anywhere in the package.
@@ -492,10 +471,11 @@ strings, salt policy, KDF settings, curve, or codec. Never edit a codec's
 encoding. Any behavioral change requires a new id and a migration plan, because
 a wallet is defined by the profile that produced it.
 
-Bundled ZERA profiles, both Ed25519, both using `zera-ed25519-base58-v1`:
-
-- `web2ish-zera-ed25519-v1` — derives its own public salt from the username
-- `web2ish-zera-ed25519-external-salt-v1` — takes a 32-byte salt the service owns
+The bundled ZERA profile is `web2ish-zera-ed25519-external-salt-v1`: Ed25519,
+the `zera-ed25519-base58-v1` codec, and a 32-byte salt the service owns. (The
+self-salting `web2ish-zera-ed25519-v1` profile was removed in v0.9.0; the generic
+`derived-from-username` salt policy remains available to chains that define
+their own profile.)
 
 See [the protocol](docs/PROTOCOL.md), [security model](docs/SECURITY_MODEL.md), and [integration guide](docs/INTEGRATION.md).
 
