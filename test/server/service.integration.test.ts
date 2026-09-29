@@ -642,4 +642,48 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
       }
     }, 180_000);
   });
+
+  it("limits verification starts per recipient across usernames and per address hash", async () => {
+    const { service } = h();
+    const victim = `victim-${suffix}@example.org`;
+
+    // Eight starts per recipient per hour, whatever username names it.
+    for (let index = 0; index < 8; index += 1) {
+      await service.startEmailVerification(
+        { username: `rotate-${String(index)}-${suffix}`, email: victim },
+        { ipHash: `ip-${String(index)}-${suffix}` },
+      );
+    }
+    const recipientLimited = await captureIdentityError(() =>
+      service.startEmailVerification(
+        { username: `rotate-8-${suffix}`, email: victim },
+        { ipHash: `ip-8-${suffix}` },
+      ),
+    );
+    expect(recipientLimited.code).toBe("rate-limited");
+
+    // Twenty per address hash, across recipients.
+    const ipHash = `shared-ip-${suffix}`;
+    for (let index = 0; index < 20; index += 1) {
+      await service.startEmailVerification(
+        { username: `fan-${String(index)}-${suffix}`, email: `fan-${String(index)}-${suffix}@example.org` },
+        { ipHash },
+      );
+    }
+    const ipLimited = await captureIdentityError(() =>
+      service.startEmailVerification(
+        { username: `fan-20-${suffix}`, email: `fan-20-${suffix}@example.org` },
+        { ipHash },
+      ),
+    );
+    expect(ipLimited.code).toBe("rate-limited");
+
+    // Without an address hash there is no shared bucket to exhaust.
+    for (let index = 0; index < 21; index += 1) {
+      await service.startEmailVerification({
+        username: `nohash-${String(index)}-${suffix}`,
+        email: `nohash-${String(index)}-${suffix}@example.org`,
+      });
+    }
+  });
 });

@@ -399,14 +399,89 @@ Public, because verification may precede account creation.
 }
 ```
 
-**The minted code is withheld from this response on purpose.** Returning it
-would let anyone who can name an address verify it. The service hands the code
-to your application code, which owns delivery — transport, templating, and
-suppression lists belong to the application, not to a custody SDK. To send it,
-call `service.startEmailVerification(...)` directly rather than proxying this
-route; the router's response deliberately has no way to reach the code.
+**The minted code is never in this response.** Returning it would let anyone
+who can name an address verify it. It reaches the address only through the
+router's `emailVerification` option (see [Email delivery](#email-delivery)):
+the router renders the message, hands it to the configured provider, and
+answers only after the provider accepted it. Without that option the route
+still mints and stores a code that nobody receives, which only suits a host
+that calls `service.startEmailVerification(...)` and delivers the code itself.
 
-Errors: `invalid-username`, `invalid-email` (400); `rate-limited` (429).
+Errors: `invalid-username`, `invalid-email` (400); `rate-limited` (429);
+`email-delivery-failed` (502) when the provider refused or could not be
+reached. The stored code is left to expire, and a retry mints a fresh one.
+
+### Email delivery
+
+Pass `emailVerification` to `createIdentityRouter` to have the start route send
+the code:
+
+```ts
+import {
+  createEmailSender,
+  createIdentityRouter,
+} from "web2-ish-self-custody/server";
+
+const router = createIdentityRouter(service, {
+  // …
+  emailVerification: {
+    sender: createEmailSender({ provider: "resend", apiKey: process.env.RESEND_API_KEY! }),
+    from: "Example <verify@example.com>",
+    replyTo: "support@example.com",          // optional
+    theme: { productName: "Example", accentColor: "#2f6fed" },
+    onFailure: (failure) => console.warn("verification email not sent", failure),
+  },
+});
+```
+
+**Providers.** `createEmailSender({ provider, … })` selects one from
+configuration; each also has its own factory. All are a single HTTPS `POST`
+through `fetch` with no added dependency, a 10-second timeout (`timeoutMs`),
+and redirects refused.
+
+| `provider` | factory | credential option |
+| --- | --- | --- |
+| `resend` | `createResendEmailSender` | `apiKey` |
+| `postmark` | `createPostmarkEmailSender` | `serverToken` (and `messageStream`, default `outbound`) |
+| `sendgrid` | `createSendGridEmailSender` | `apiKey` |
+
+Any object with a `provider` label and `send(message) → { provider, messageId }`
+is an `EmailSender`, so another transport (SES, SMTP through a relay, a queue)
+plugs in without a change here. Resend receives `Idempotency-Key:
+email-verification/<verificationId>`, so a retried send is one message.
+
+**Content and design** belong to the host. Either:
+
+- set `theme` to style the built-in template — `productName` is required;
+  `subject`, `heading`, `intro`, `ignoreNotice`, `footerText`, `supportUrl`,
+  `logoUrl`/`logoAlt`/`logoWidth`, eight colors (`backgroundColor`,
+  `cardColor`, `borderColor`, `textColor`, `mutedTextColor`, `accentColor`,
+  `codeBackgroundColor`, `codeTextColor`) and three font stacks
+  (`headingFontFamily`, `bodyFontFamily`, `codeFontFamily`) are optional; or
+- set `render(input) → { subject, text, html }` to replace the template
+  entirely. `input` carries `code`, `formattedCode` (`ABCD-2345`; confirm
+  accepts either form), `email`, `expiresAt`, and `expiresInMinutes`.
+  `renderVerificationEmail(input, theme)` and `escapeHtml` are exported for a
+  render that only wraps the built-in one.
+
+The built-in template is a table-laid card with inline styles and a plain-text
+part, and loads no remote resource unless the theme names a `logoUrl`. Every
+host-supplied string is HTML-escaped; colors must be hex, font stacks plain
+lists, URLs `https:`, and the subject one line, all checked when the router is
+built. A rendered message that does not contain the code in both its text and
+HTML parts is refused rather than sent.
+
+**Secrets and logging.** A provider credential is held in a closure, not on the
+sender object, so logging or serializing a sender cannot print it. Nothing in
+the delivery path logs. A failure is an `EmailDeliveryError` whose fields —
+`provider`, `reason` (`timeout`, `network`, `rejected`, `invalid-response`,
+`render`), and HTTP `status` — are all that `onFailure` receives; provider
+response bodies are never read into it, because providers echo recipients and
+request fields there.
+
+The recipient is a caller-named address, so delivery makes the start route a
+way to send mail. See [Rate limits](#rate-limits) for the per-recipient and
+per-address bounds, and add an edge limit in front of it.
 
 ### `POST /email-verifications/confirm`
 
@@ -472,6 +547,7 @@ Service codes, from `IdentityError`:
 | `challenge-consumed` | 409 |
 | `challenge-expired` | 410 |
 | `challenge-not-found` | 404 |
+| `email-delivery-failed` | 502 |
 | `email-verification-expired` | 410 |
 | `email-verification-failed` | 400 |
 | `invalid-address` | 400 |
@@ -1022,7 +1098,14 @@ deliver up to two windows' worth of requests. Size the window accordingly, and
 do not treat this table as a substitute for an edge rate limiter or DDoS
 protection. It exists to bound credential guessing, not traffic.
 
-Email verification carries a second, independent bound: `attempts` on each
+Starting an email verification is bounded three ways, each per hour: 5 per
+normalized username and address pair, 8 per recipient address whatever the
+username, and 20 per hashed IP. The recipient bound is what stops one caller
+rotating usernames at a single inbox. The per-IP bound applies only when the
+host supplies `hashRequestIp`; without it every caller would share one bucket
+and throttle the whole deployment.
+
+Email verification carries a further, independent bound: `attempts` on each
 verification row, compared against `emailVerificationMaxAttempts` (default 5).
 An 8-character code from a 32-symbol alphabet is roughly 40 bits, but the
 attempt bound is what makes a *specific* code unguessable within its 15-minute

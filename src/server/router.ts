@@ -12,6 +12,13 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { utf8 } from "../encoding.js";
 import type { IdentityService } from "./contract.js";
+import {
+  EmailDeliveryError,
+  assertEmailVerificationDelivery,
+  deliverEmailVerification,
+  type EmailDeliveryFailure,
+  type EmailVerificationDelivery,
+} from "./email.js";
 import { IdentityError, enumerationSensitiveCodes } from "./errors.js";
 import {
   challengePurposes,
@@ -39,6 +46,12 @@ export type IdentityRouterOptions = Readonly<{
   trustedOrigins?: readonly string[];
   /** The service never sees a raw IP; the host decides how to hash one. */
   hashRequestIp?: (request: Request) => string | undefined;
+  /**
+   * Sends the code minted by `POST /email-verifications`. Without it the route
+   * still mints and stores a code but nobody receives it, which only suits a
+   * host that calls `service.startEmailVerification` itself.
+   */
+  emailVerification?: EmailVerificationDelivery;
 }>;
 
 /** 64 KiB. Every accepted body here is a handful of short strings. */
@@ -56,6 +69,7 @@ type RouterContext = Readonly<{
   useCookies: boolean;
   trustedOrigins: ReadonlySet<string> | null;
   hashRequestIp: ((request: Request) => string | undefined) | null;
+  emailVerification: EmailVerificationDelivery | null;
 }>;
 
 type RouteHandler = (ctx: RouterContext, request: Request) => Promise<Response>;
@@ -105,6 +119,9 @@ export function createIdentityRouter(
   if (cookieName.startsWith("__Host-") && options.cookieDomain !== undefined) {
     throw new TypeError("A __Host- prefixed cookie cannot declare a Domain attribute.");
   }
+  if (options.emailVerification !== undefined) {
+    assertEmailVerificationDelivery(options.emailVerification);
+  }
 
   const ctx: RouterContext = Object.freeze({
     service,
@@ -117,6 +134,7 @@ export function createIdentityRouter(
         ? null
         : new Set(options.trustedOrigins.map(normalizeOrigin)),
     hashRequestIp: options.hashRequestIp ?? null,
+    emailVerification: options.emailVerification ?? null,
   });
 
   return async function handleIdentityRequest(request: Request): Promise<Response> {
@@ -611,9 +629,12 @@ async function handleUpdateAccount(
 }
 
 /**
- * The minted code is withheld on purpose. Delivery belongs to the host
- * application, and returning the code to the requester would let anyone who
- * can name an address verify it.
+ * The minted code is never in the response: returning it to the requester
+ * would let anyone who can name an address verify it. It reaches the address
+ * only through the host's configured `emailVerification` sender.
+ *
+ * A failed send is reported as `email-delivery-failed` so the client can offer
+ * a retry; the stored code is left to expire, since nobody holds it.
  */
 async function handleStartEmailVerification(
   ctx: RouterContext,
@@ -624,11 +645,37 @@ async function handleStartEmailVerification(
     { username: requireString(body, "username"), email: requireString(body, "email") },
     requestContext(ctx, request),
   );
+  if (ctx.emailVerification !== null) {
+    await sendVerificationEmail(ctx.emailVerification, issued);
+  }
   return jsonResponse({
     verificationId: issued.verificationId,
     email: issued.email,
     expiresAt: issued.expiresAt,
   });
+}
+
+async function sendVerificationEmail(
+  delivery: EmailVerificationDelivery,
+  issued: Readonly<{ verificationId: string; code: string; email: string; expiresAt: Date }>,
+): Promise<void> {
+  try {
+    await deliverEmailVerification(delivery, issued);
+  } catch (error) {
+    const failure: EmailDeliveryFailure =
+      error instanceof EmailDeliveryError
+        ? { provider: error.provider, reason: error.reason, status: error.status }
+        : { provider: delivery.sender.provider, reason: "network", status: null };
+    try {
+      delivery.onFailure?.(Object.freeze(failure));
+    } catch {
+      // A broken reporter must not change the caller's response.
+    }
+    throw new IdentityError(
+      "The verification email could not be sent; try again shortly.",
+      "email-delivery-failed",
+    );
+  }
 }
 
 async function handleConfirmEmailVerification(

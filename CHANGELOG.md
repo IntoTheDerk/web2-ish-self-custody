@@ -5,6 +5,29 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## v0.9.1 — 2026-09-29
+
+Verification codes can now be delivered. Nothing changes for a router built
+without the new option, and derivation and the schema are untouched.
+
+- **`emailVerification` router option.** `POST /email-verifications` renders
+  the code into an email and sends it through a configured `EmailSender`
+  before answering; the code is still never in the response. A failed send
+  answers the new `email-delivery-failed` (502).
+- **Providers:** `createEmailSender({ provider })` with `resend`, `postmark`,
+  and `sendgrid`, each also exported as its own factory. Plain `fetch`, no new
+  dependency; credentials are kept off the sender object and provider response
+  bodies are never surfaced.
+- **Host-owned content and design:** theme the built-in template
+  (`VerificationEmailTheme`: copy, colors, fonts, optional logo, footer) or
+  replace it with `render`. `renderVerificationEmail`, `escapeHtml`,
+  `formatVerificationCode`, `parseMailbox`, `deliverEmailVerification`, and
+  `EmailDeliveryError` are exported. A rendered message that drops the code is
+  refused.
+- **Tighter start limits.** Verification starts are now also limited to 8 per
+  recipient per hour across usernames, and to 20 per hashed IP per hour when
+  the host supplies `hashRequestIp`.
+
 ## v0.9.0 — 2026-09-27
 
 A normal password floor, and the legacy surface removed. Derivation is

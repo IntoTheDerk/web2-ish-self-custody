@@ -35,6 +35,42 @@ export { identityServiceDefaults, resolveIdentityServiceConfig } from "./config.
 
 export type { IdentityService } from "./contract.js";
 
+export {
+  EmailDeliveryError,
+  assertEmailVerificationDelivery,
+  deliverEmailVerification,
+  escapeHtml,
+  formatVerificationCode,
+  parseMailbox,
+  renderVerificationEmail,
+  resolveVerificationEmailTheme,
+} from "./email.js";
+export type {
+  EmailDeliveryFailure,
+  EmailDeliveryFailureReason,
+  EmailDeliveryReceipt,
+  EmailMessage,
+  EmailSender,
+  EmailVerificationDelivery,
+  VerificationEmailContent,
+  VerificationEmailInput,
+  VerificationEmailTheme,
+} from "./email.js";
+export {
+  createEmailSender,
+  createPostmarkEmailSender,
+  createResendEmailSender,
+  createSendGridEmailSender,
+  emailProviders,
+} from "./emailProviders.js";
+export type {
+  EmailProviderConfig,
+  EmailProviderName,
+  PostmarkEmailSenderOptions,
+  ResendEmailSenderOptions,
+  SendGridEmailSenderOptions,
+} from "./emailProviders.js";
+
 export { IdentityError, enumerationSensitiveCodes, identityErrorStatus } from "./errors.js";
 export type { IdentityErrorCode } from "./errors.js";
 
