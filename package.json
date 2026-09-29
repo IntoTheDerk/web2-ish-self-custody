@@ -1,0 +1,92 @@
+{
+  "name": "web2-ish-self-custody",
+  "version": "0.10.0-alpha.0",
+  "description": "Generic deterministic Ed25519 wallet derivation and a portable identity service, with pluggable per-chain address codecs.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git"
+  },
+  "homepage": "https://github.com/IntoTheDerk/web2-ish-self-custody#readme",
+  "bugs": {
+    "url": "https://github.com/IntoTheDerk/web2-ish-self-custody/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./chains/kalvora": {
+      "types": "./dist/chains/kalvora.d.ts",
+      "import": "./dist/chains/kalvora.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./server/adapters/neon": {
+      "types": "./dist/server/adapters/neon.d.ts",
+      "import": "./dist/server/adapters/neon.js"
+    },
+    "./server/adapters/node": {
+      "types": "./dist/server/adapters/node.d.ts",
+      "import": "./dist/server/adapters/node.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "scripts/requirements-vector-verifier-ci.txt",
+    "scripts/verify_kalvora_external_salt_vector.py",
+    "vectors",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:server:integration": "vitest run test/server/service.integration.test.ts",
+    "verify:vectors:python": "python3 scripts/verify_kalvora_external_salt_vector.py",
+    "prepare": "npm run build",
+    "prepack": "npm run verify",
+    "verify": "npm run typecheck && npm test && npm run verify:vectors:python && npm run build",
+    "verify:ci": "bash scripts/verify-ci.sh"
+  },
+  "keywords": [
+    "self-custody",
+    "wallet",
+    "deterministic",
+    "scrypt",
+    "ed25519",
+    "kalvora",
+    "browser"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
+    "bs58": "6.0.0"
+  },
+  "peerDependencies": {
+    "kalvora.js": "0.0.1-alpha.0"
+  },
+  "peerDependenciesMeta": {
+    "kalvora.js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/pg": "8.21.0",
+    "kalvora.js": "file:vendor/kalvora.js-0.0.1-alpha.0.tgz",
+    "pg": "8.22.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
