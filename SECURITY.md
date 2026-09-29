@@ -113,7 +113,7 @@ profile's scrypt cost rather than by any server-side control.
 
 ## Reporting
 
-Do not open a public issue for a suspected vulnerability. Contact the repository owner privately through their GitHub profile until a dedicated security contact is published.
+Do not open a public issue for a suspected vulnerability. Report it privately through the repository's **Security** tab ("Report a vulnerability").
 
 Include:
 

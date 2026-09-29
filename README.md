@@ -814,7 +814,7 @@ assurance boundary.
 
 ## Versioning and releases
 
-Releases are Git tags (`v0.9.1`, `v0.10.0-alpha.0`, …), each described in
+Releases are Git tags (`v0.10.0-alpha.0`, …), each described in
 [CHANGELOG.md](CHANGELOG.md). The package is not published to npm; consumers
 pin a reviewed release commit by its full SHA.
 
