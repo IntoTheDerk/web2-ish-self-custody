@@ -31,3 +31,31 @@ jobs:
           -r scripts/requirements-vector-verifier-ci.txt
       - run: npm ci
       - run: npm run verify
+
+  attribution:
+    name: no AI attribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check commit messages and PR description
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          pattern='(co-authored-by:.*(claude|anthropic|openai|codex|chatgpt|copilot|gemini|cursor))|generated with \[?(claude|codex|chatgpt|copilot|cursor)'
+          fail=0
+          if git log --format='%H%n%B' "$BASE..$HEAD" | grep -Eiq "$pattern"; then
+            echo "::error::A commit message contains an AI co-author or 'Generated with' line. Reword the commit(s) to remove it."
+            git log --format='%h %s' "$BASE..$HEAD"
+            fail=1
+          fi
+          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -Eiq "$pattern"; then
+            echo "::error::The PR title or description contains an AI attribution line. Edit the PR to remove it."
+            fail=1
+          fi
+          exit $fail
