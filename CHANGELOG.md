@@ -5,7 +5,18 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## v0.10.0-alpha.0 — unreleased (alpha pre-release)
+## v0.10.0-alpha.1 — 2026-09-29 (alpha pre-release)
+
+- **kalvora.js `0.0.1-alpha.1`.** The optional peer dependency moves from
+  `0.0.1-alpha.0`, which is withdrawn from npm, to `0.0.1-alpha.1`, installed
+  from npm (the vendored tarball is removed). kalvora.js reports key derivation
+  and every derived address as byte-identical to `0.0.1-alpha.0`; the committed
+  Kalvora vector and the cross-check against kalvora.js's `createWallet` still
+  pass, so no wallet changes.
+- Consumers migrating from v0.9.x add `kalvora.js@0.0.1-alpha.1` rather than
+  `0.0.1-alpha.0`.
+
+## v0.10.0-alpha.0 — 2026-09-29 (alpha pre-release)
 
 **Alpha.** This release depends on kalvora.js `0.0.1-alpha.0`, and neither it
 nor the Kalvora network is live. Any `0.10.0-alpha.x` release may change the

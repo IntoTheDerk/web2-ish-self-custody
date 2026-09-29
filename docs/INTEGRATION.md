@@ -31,7 +31,7 @@ the exact version in this package's `peerDependencies`:
 {
   "dependencies": {
     "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>",
-    "kalvora.js": "0.0.1-alpha.0"
+    "kalvora.js": "0.0.1-alpha.1"
   }
 }
 ```
