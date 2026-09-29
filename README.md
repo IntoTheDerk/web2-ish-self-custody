@@ -102,7 +102,7 @@ the server do not need it.
 | [DemocracyOS-web](https://github.com/IntoTheDerk/DemocracyOS-web) | the browser password wallet (`withDerivedWallet` with `kalvoraEd25519ExternalSalt`) and the wallet-vault workers |
 | [DemocracyOS-backend](https://github.com/IntoTheDerk/DemocracyOS-backend) | the platform salt and server identity configuration: `provisionPlatformSalt` / `readPlatformSalt` from `/server`, configured with `kalvoraEd25519ExternalSalt` |
 
-Both pin v0.9.0 or earlier, on the ZERA profile that this release replaces with
+Both pin v0.9.x or earlier, on the ZERA profile that this release replaces with
 Kalvora; moving to Kalvora is a new wallet family for them (see the
 [changelog](CHANGELOG.md)). Both pin a reviewed release commit by its full SHA
 (see [Install](#install));

@@ -4,6 +4,7 @@ export type IdentityErrorCode =
   | "challenge-consumed"
   | "challenge-expired"
   | "challenge-not-found"
+  | "email-delivery-failed"
   | "email-verification-expired"
   | "email-verification-failed"
   | "invalid-address"
@@ -28,6 +29,7 @@ const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze(
   "challenge-consumed": 409,
   "challenge-expired": 410,
   "challenge-not-found": 404,
+  "email-delivery-failed": 502,
   "email-verification-expired": 410,
   "email-verification-failed": 400,
   "invalid-address": 400,

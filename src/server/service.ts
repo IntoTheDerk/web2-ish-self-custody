@@ -85,6 +85,18 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
     limit: 5,
     windowSeconds: 3_600,
   }),
+  // A delivered code is mail to an address the caller merely names, so the
+  // pair bucket alone would let one caller rotate usernames at one inbox.
+  emailVerificationRecipient: Object.freeze({
+    id: "email-verification-recipient",
+    limit: 8,
+    windowSeconds: 3_600,
+  }),
+  emailVerificationIp: Object.freeze({
+    id: "email-verification-ip",
+    limit: 20,
+    windowSeconds: 3_600,
+  }),
 });
 
 function requireRule(name: string): RateLimitRule {
@@ -1248,6 +1260,13 @@ export function createIdentityService(
         [usernameNormalized, email],
         context,
       );
+      await enforceRateLimit(requireRule("emailVerificationRecipient"), [email], context);
+      // Without a host-supplied address hash every caller would share one
+      // bucket, which would throttle the whole deployment rather than a caller.
+      const ipHash = sanitizeContextHash(context?.ipHash);
+      if (ipHash !== null) {
+        await enforceRateLimit(requireRule("emailVerificationIp"), [ipHash], context);
+      }
 
       // The id is minted client-side so the code hash can bind to it before
       // the row exists.

@@ -36,7 +36,7 @@ wallet key derived by standard SLIP-0010 at SLIP-44 coin type 5258.
   exactly kalvora.js's first Ed25519 wallet for the scrypt output; that entry
   has no network or protobuf code.
 
-### Migrating from v0.9.0
+### Migrating from v0.9.x
 
 - Replace `chains/zera` imports with `chains/kalvora` and each `zera*` export
   with its `kalvora*` counterpart, and add `kalvora.js@0.0.1-alpha.0` as a
@@ -65,6 +65,29 @@ wallet key derived by standard SLIP-0010 at SLIP-44 coin type 5258.
   pinned path and coin type agree with kalvora.js's constants.
 - The challenge worked example in `docs/SERVER_API.md` is recomputed for
   `networkId = kalvora-mainnet`.
+
+## v0.9.1 — 2026-09-29
+
+Verification codes can now be delivered. Nothing changes for a router built
+without the new option, and derivation and the schema are untouched.
+
+- **`emailVerification` router option.** `POST /email-verifications` renders
+  the code into an email and sends it through a configured `EmailSender`
+  before answering; the code is still never in the response. A failed send
+  answers the new `email-delivery-failed` (502).
+- **Providers:** `createEmailSender({ provider })` with `resend`, `postmark`,
+  and `sendgrid`, each also exported as its own factory. Plain `fetch`, no new
+  dependency; credentials are kept off the sender object and provider response
+  bodies are never surfaced.
+- **Host-owned content and design:** theme the built-in template
+  (`VerificationEmailTheme`: copy, colors, fonts, optional logo, footer) or
+  replace it with `render`. `renderVerificationEmail`, `escapeHtml`,
+  `formatVerificationCode`, `parseMailbox`, `deliverEmailVerification`, and
+  `EmailDeliveryError` are exported. A rendered message that drops the code is
+  refused.
+- **Tighter start limits.** Verification starts are now also limited to 8 per
+  recipient per hour across usernames, and to 20 per hashed IP per hour when
+  the host supplies `hashRequestIp`.
 
 ## v0.9.0 — 2026-09-27
 
