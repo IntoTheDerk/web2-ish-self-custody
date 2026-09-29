@@ -4,7 +4,8 @@ This package is a generic Ed25519 deterministic-custody core plus a pluggable
 chain. Integrating it means answering three questions in order:
 
 1. **Which chain?** That decides the `IdentityCodec` — how a public key becomes
-   an address. ZERA ships in the box at `web2-ish-self-custody/chains/zera`.
+   an address. Kalvora ships in the box at `web2-ish-self-custody/chains/kalvora`,
+   backed by [kalvora.js](#kalvora-and-kalvorajs).
 2. **Which profile of that chain?** That decides the transcript and, in
    particular, where the scrypt salt comes from.
 3. **Which namespace?** Your `applicationId`, your `networkId`, and — for a
@@ -14,12 +15,49 @@ The core has no profile registry. You import the profile object from the chain
 package and pass it in. There is no id string for a server, an environment
 variable, or a config file to swap out from under you.
 
+## Kalvora and kalvora.js
+
+The Kalvora chain is provided by [kalvora.js](https://github.com/IntoTheDerk/kalvora.js),
+the Kalvora SDK: `web2-ish-self-custody/chains/kalvora` calls its
+`kalvora.js/wallet` entry for the SLIP-0010 key step and for address encoding.
+That entry is the SDK's wallet surface on its own — no network, protobuf, or
+transaction code — so the browser custody path stays offline.
+
+kalvora.js is an **optional peer dependency**. An application that imports
+`web2-ish-self-custody/chains/kalvora` installs it alongside this package, at
+the exact version in this package's `peerDependencies`:
+
+```json
+{
+  "dependencies": {
+    "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>",
+    "kalvora.js": "0.0.1-alpha.0"
+  }
+}
+```
+
+An application that only uses the core, the vault, or the server with another
+chain does not need it.
+
+What this buys: a password wallet here **is** a kalvora.js wallet. The scrypt
+output is a SLIP-0010 master seed, and the wallet key is its node at
+`m/44'/5258'/0'/0'/0'` — kalvora.js's first wallet for that seed, and what any
+SLIP-0010 implementation derives at that path. Addresses and `A_` identifiers
+are spelled by kalvora.js's own encoder. The suite checks both against
+kalvora.js directly, and the Python verifier re-derives the committed vector
+with its own SLIP-0010 implementation.
+
+The path is pinned in this package, not read from kalvora.js: a kalvora.js
+release that changed its default path must not move existing password wallets.
+Upgrading kalvora.js is still a custody change — the committed vector is what
+proves the upgrade derives the same wallets.
+
 ## Choosing what to import
 
 | you need | import | from |
 | --- | --- | --- |
-| a wallet whose namespace your service owns and can separate from every other service | `zeraEd25519ExternalSalt` | `web2-ish-self-custody/chains/zera` |
-| a public identity for a seed you already generated randomly | `deriveZeraEd25519IdentityFromSeed` | `web2-ish-self-custody/chains/zera` |
+| a wallet whose namespace your service owns and can separate from every other service | `kalvoraEd25519ExternalSalt` | `web2-ish-self-custody/chains/kalvora` |
+| a public identity for a seed you already generated randomly | `deriveKalvoraEd25519IdentityFromSeed` | `web2-ish-self-custody/chains/kalvora` |
 | a seed that survives a password change, with a recovery code | `createWalletVault`, `createWalletVaultFromCredentials`, and the other vault functions | `web2-ish-self-custody` |
 | the server half of a service-salted profile | `createIdentityService` and friends | `web2-ish-self-custody/server` |
 
@@ -44,7 +82,7 @@ different KDF cost, a new domain string, a new version of the same wallet family
 One codec can carry any number of transcripts this way.
 
 **Reuse an existing profile** when you want the same wallet family and only your
-namespace differs. Two services on `zeraEd25519ExternalSalt` with different
+namespace differs. Two services on `kalvoraEd25519ExternalSalt` with different
 salts and different `applicationId` values already get fully separated wallets;
 that separation needs no new profile and no new code.
 
@@ -105,7 +143,7 @@ differently.
 
 **Your application already generates a random seed.** Do not replace it with a
 username/password-derived seed merely to use this package. Derive its public
-identity with `deriveZeraEd25519IdentityFromSeed` (or the generic
+identity with `deriveKalvoraEd25519IdentityFromSeed` (or the generic
 `deriveIdentityFromSeed(seed, codec)` with your own chain's codec). You may keep
 your own encryption, or seal the seed with
 `createWalletVault({ profile, context, username, password, seed })` to get the
@@ -149,16 +187,16 @@ without turning this package into a browser storage or policy layer.
 
 ## Two services, one identity format
 
-Any two applications on the bundled ZERA profile — say DemocracyOS and a second
+Any two applications on the bundled Kalvora profile — say DemocracyOS and a second
 product, called Example App here — import the **same** profile object:
 
 ```ts
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 ```
 
-They therefore share the Ed25519 curve, the `zera-ed25519-base58-v1` codec, the
-base58 address encoding, the `A_` public-key identifier, and the ZERA
-`networkId`. A wallet from either is the same kind of object on the same network,
+They therefore share the Ed25519 curve, the `kalvora-ed25519-base58-v1` codec, the
+base58 address encoding, the `A_` public-key identifier, the SLIP-0010 step at
+`m/44'/5258'/0'/0'/0'`, and the Kalvora `networkId`. A wallet from either is the same kind of object on the same network,
 and both are verified by the same `canonicalWalletIdentity` code path.
 
 They do not share wallets. Each runs its own deployment with its own
@@ -167,7 +205,7 @@ public salt:
 
 | | Example App | DemocracyOS |
 | --- | --- | --- |
-| profile object | `zeraEd25519ExternalSalt` | `zeraEd25519ExternalSalt` |
+| profile object | `kalvoraEd25519ExternalSalt` | `kalvoraEd25519ExternalSalt` |
 | `applicationId` | its own, fixed in source | its own, fixed in source |
 | public salt | its own, minted once | its own, minted once |
 | resulting wallet for identical credentials | one address | a **different** address |
@@ -194,21 +232,21 @@ touches a database, and it never receives a password, a seed, or a ciphertext.
 Configuration takes the profile object, not an id:
 
 ```ts
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 import { createIdentityService } from "web2-ish-self-custody/server";
 
 const service = createIdentityService(sql, {
   serviceProfileId: "example-app-password-wallet-v1",
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   applicationId: "example-app",
-  networkId: "zera-mainnet",
+  networkId: "kalvora-mainnet",
   tablePrefix: "example_identity",
 });
 ```
 
 That single object is where the service gets its KDF parameters, its algorithm
 label, and — importantly — its codec. Address and public-key canonicalization
-runs through `profile.codec`, so a non-ZERA deployment uses the same service
+runs through `profile.codec`, so a non-Kalvora deployment uses the same service
 unchanged. Serviceability is a policy rather than a list: any profile with
 `saltPolicy: "external-32"` whose codec round-trips is accepted, and a profile
 that derives its own salt is rejected at construction because it leaves the

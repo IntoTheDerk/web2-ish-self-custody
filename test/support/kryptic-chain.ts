@@ -1,5 +1,5 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { defineIdentityCodec, type IdentityCodec } from "../../src/codec.js";
 import { DerivationError } from "../../src/errors.js";
 import { defineDerivationProfile, type DerivationProfile } from "../../src/profile.js";
@@ -7,11 +7,11 @@ import { defineDerivationProfile, type DerivationProfile } from "../../src/profi
 const hex64 = /^[0-9a-f]{64}$/u;
 
 /**
- * A throwaway second chain that shares nothing with ZERA: lowercase hex behind
+ * A throwaway second chain that shares nothing with Kalvora: lowercase hex behind
  * a `k_` tag instead of base58 behind `A_`.
  *
  * It exists so the suite can prove the core is genuinely chain-agnostic rather
- * than ZERA behind an interface. Every assertion made against it runs through
+ * than Kalvora behind an interface. Every assertion made against it runs through
  * the same derivation, challenge, and identity-service code the real chain
  * uses; nothing here is imported by `src/`.
  */
@@ -75,20 +75,22 @@ export const krypticStateless: DerivationProfile = defineDerivationProfile({
 });
 
 /**
- * ZERA's exact transcript — same domains, same KDF — behind the hex codec.
+ * Kalvora's exact transcript — same domains, same KDF, same key-derivation
+ * step — behind the hex codec.
  *
  * The profile id is not part of the signed transcript, so this must derive the
- * very same key bytes as the committed ZERA external-salt vector and differ
+ * very same key bytes as the committed Kalvora external-salt vector and differ
  * only in how those bytes are spelled. That is the cleanest available proof
  * that the codec is a presentation seam and not a derivation input.
  */
-export const krypticZeraTranscript: DerivationProfile = defineDerivationProfile({
-  id: "kryptic-zera-transcript-v1",
+export const krypticKalvoraTranscript: DerivationProfile = defineDerivationProfile({
+  id: "kryptic-kalvora-transcript-v1",
   curve: "ed25519",
   algorithm: "scrypt-sha512-ed25519-external-32-v1",
   saltPolicy: "external-32",
-  kdf: { ...zeraEd25519ExternalSalt.kdf },
-  domains: { ...zeraEd25519ExternalSalt.domains },
+  kdf: { ...kalvoraEd25519ExternalSalt.kdf },
+  domains: { ...kalvoraEd25519ExternalSalt.domains },
+  keyDerivation: kalvoraEd25519ExternalSalt.keyDerivation!,
   codec: krypticHexCodec,
 });
 

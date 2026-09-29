@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { normalizeUsername, withDerivedWallet } from "../../src/index.js";
 import { CHALLENGE_DOMAIN } from "../../src/server/challenge.js";
 import { createIdentityRouter } from "../../src/server/router.js";
@@ -29,11 +29,11 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
 const encoder = new TextEncoder();
-const derivationProfile = zeraEd25519ExternalSalt;
+const derivationProfile = kalvoraEd25519ExternalSalt;
 const profileId = derivationProfile.id;
 const codecId = derivationProfile.codec.id;
 const applicationId = "example-app";
-const networkId = "zera-testnet";
+const networkId = "kalvora-testnet";
 
 const basePath = "/identity";
 const trustedOrigin = "https://identity.example";

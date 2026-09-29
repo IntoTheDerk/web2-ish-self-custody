@@ -50,9 +50,9 @@ code, and it deserves committed vectors before any wallet is derived under it.
 
 ## Direct-seed identity helper
 
-`deriveIdentityFromSeed(seed, codec)` — and the ZERA-bound
-`deriveZeraEd25519IdentityFromSeed(seed)` from
-`web2-ish-self-custody/chains/zera` — accepts an existing 32-byte seed only long
+`deriveIdentityFromSeed(seed, codec)` — and the Kalvora-bound
+`deriveKalvoraEd25519IdentityFromSeed(seed)` from
+`web2-ish-self-custody/chains/kalvora` — accepts an existing 32-byte seed only long
 enough to derive its public Ed25519 identity. It copies and clears its
 package-owned seed buffer and does not mutate the caller's buffer. It
 intentionally does not generate, persist, encrypt, recover, or sign with private

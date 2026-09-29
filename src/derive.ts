@@ -10,6 +10,7 @@ import type { DerivationCredentials, DerivedIdentity, DerivedWallet } from "./ty
 
 const EXTERNAL_SALT_BYTES = 32;
 const MAXIMUM_MESSAGE_BYTES = 1_048_576;
+const ED25519_KEY_BYTES = 32;
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) {
@@ -88,6 +89,32 @@ async function runScrypt(
   }
 }
 
+/** Runs the profile's key-derivation step and holds it to exactly 32 bytes. */
+function deriveChainKey(profile: DerivationProfile, masterSeed: Uint8Array): Uint8Array {
+  // The step gets its own copy, so nothing it does can reach the seed the
+  // caller of this function still zeroes.
+  const input = Uint8Array.from(masterSeed);
+  let key: unknown;
+  try {
+    key = profile.keyDerivation?.deriveKey(input);
+  } catch {
+    throw new DerivationError(
+      `Key derivation "${profile.keyDerivation?.id}" failed.`,
+      "invalid-profile",
+    );
+  } finally {
+    input.fill(0);
+  }
+  if (!(key instanceof Uint8Array) || key.byteLength !== ED25519_KEY_BYTES) {
+    if (key instanceof Uint8Array) key.fill(0);
+    throw new DerivationError(
+      `Key derivation "${profile.keyDerivation?.id}" must return exactly 32 bytes.`,
+      "invalid-profile",
+    );
+  }
+  return key;
+}
+
 /**
  * Package-internal seed access.
  *
@@ -116,6 +143,7 @@ async function derive(
   let salt: Uint8Array | undefined;
   let passwordEntropyHash: Uint8Array | undefined;
   let walletEntropy: Uint8Array | undefined;
+  let masterSeed: Uint8Array | undefined;
   let seed: Uint8Array | undefined;
 
   try {
@@ -140,8 +168,14 @@ async function derive(
       ),
     );
 
-    seed = await runScrypt(walletEntropy, salt, credentials);
+    masterSeed = await runScrypt(walletEntropy, salt, credentials);
     throwIfAborted(credentials.signal);
+    if (profile.keyDerivation === undefined) {
+      seed = masterSeed;
+      masterSeed = undefined;
+    } else {
+      seed = deriveChainKey(profile, masterSeed);
+    }
 
     const publicKeyBytes = ed25519.getPublicKey(seed);
     const address = profile.codec.encodeAddress(publicKeyBytes);
@@ -167,6 +201,7 @@ async function derive(
     salt?.fill(0);
     passwordEntropyHash?.fill(0);
     walletEntropy?.fill(0);
+    masterSeed?.fill(0);
   }
 }
 

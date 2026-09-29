@@ -1,7 +1,7 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
-import vector from "../vectors/zera-ed25519-external-salt-v1.json" with { type: "json" };
-import { zeraEd25519ExternalSalt } from "../src/chains/zera.js";
+import vector from "../vectors/kalvora-ed25519-external-salt-v1.json" with { type: "json" };
+import { kalvoraEd25519ExternalSalt } from "../src/chains/kalvora.js";
 import {
   DerivationError,
   derivePublicIdentity,
@@ -17,7 +17,7 @@ const salt = hexToBytes(vector.saltHex);
 const context = { applicationId: vector.applicationId, networkId: vector.networkId };
 
 const credentials = {
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   username: vector.username,
   password,
   context,
@@ -42,10 +42,10 @@ describe("deterministic derivation", () => {
       const second = await derivePublicIdentity({ ...credentials });
 
       expect(first.curve).toBe("ed25519");
-      expect(first.profileId).toBe("web2ish-zera-ed25519-external-salt-v1");
+      expect(first.profileId).toBe("web2ish-kalvora-ed25519-external-salt-v1");
       // Recorded on the identity so a stored address stays resolvable even if a
       // deployment ever adds a second address encoding.
-      expect(first.codecId).toBe("zera-ed25519-base58-v1");
+      expect(first.codecId).toBe("kalvora-ed25519-base58-v1");
       expect(first.normalizedUsername).toBe(vector.normalizedUsername);
       expect(first.publicKey).toBe(`A_${first.address}`);
       expect(first.publicKey).toBe(second.publicKey);
@@ -106,11 +106,11 @@ describe("deterministic derivation", () => {
 
   it("rejects anything that is not a derivation profile object", async () => {
     // The core has no profile registry, so a caller holding a stored id string
-    // — including the removed built-in ZERA and secp256k1 ones — cannot resolve
+    // — including the removed built-in Kalvora and secp256k1 ones — cannot resolve
     // it into a profile.
     for (const profile of [
-      "web2ish-zera-ed25519-v1",
-      "web2ish-zera-ed25519-external-salt-v1",
+      "web2ish-kalvora-ed25519-v1",
+      "web2ish-kalvora-ed25519-external-salt-v1",
       "democracyos-scrypt-sha512-secp256k1-v2",
       "",
       null,

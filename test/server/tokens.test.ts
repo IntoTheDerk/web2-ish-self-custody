@@ -178,7 +178,7 @@ describe("challenge nonces", () => {
       buildChallengeMessage({
         serviceProfileId: "acme.identity",
         applicationId: "example-app",
-        networkId: "zera-mainnet",
+        networkId: "kalvora-mainnet",
         purpose: "login",
         usernameNormalized: "jesse@example.com",
         nonceHex: randomNonceHex(),

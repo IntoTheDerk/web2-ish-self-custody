@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import {
   identityServiceDefaults,
   resolveIdentityServiceConfig,
@@ -14,9 +14,9 @@ import {
 
 const minimal: IdentityServiceConfig = {
   serviceProfileId: "acme.identity",
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   applicationId: "example-app",
-  networkId: "zera-mainnet",
+  networkId: "kalvora-mainnet",
 };
 
 function expectIdentityError(run: () => unknown, code: IdentityErrorCode): void {
@@ -40,9 +40,9 @@ describe("resolveIdentityServiceConfig defaults", () => {
 
     expect(resolved).toEqual({
       serviceProfileId: "acme.identity",
-      profile: zeraEd25519ExternalSalt,
+      profile: kalvoraEd25519ExternalSalt,
       applicationId: "example-app",
-      networkId: "zera-mainnet",
+      networkId: "kalvora-mainnet",
       tablePrefix: "w2sc",
       sessionTtlSeconds: 60 * 60 * 24 * 14,
       challengeTtlSeconds: 300,
@@ -52,7 +52,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
     });
     // The very object, not a copy: the codec identity has to survive resolution
     // or the service would encode addresses with something else.
-    expect(resolved.profile).toBe(zeraEd25519ExternalSalt);
+    expect(resolved.profile).toBe(kalvoraEd25519ExternalSalt);
     expect(Object.isFrozen(resolved)).toBe(true);
   });
 
@@ -108,7 +108,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
 
 describe("resolveIdentityServiceConfig profile validation", () => {
   it("accepts any external-salt profile, from any chain", () => {
-    for (const profile of [zeraEd25519ExternalSalt, krypticExternalSalt]) {
+    for (const profile of [kalvoraEd25519ExternalSalt, krypticExternalSalt]) {
       expect(resolveIdentityServiceConfig(withOverride({ profile })).profile).toBe(profile);
     }
   });
@@ -136,7 +136,7 @@ describe("resolveIdentityServiceConfig profile validation", () => {
     // `profileId` strings were the old configuration surface; a deployment that
     // still passes one must fail loudly rather than derive a default profile.
     for (const profile of [
-      "web2ish-zera-ed25519-external-salt-v1",
+      "web2ish-kalvora-ed25519-external-salt-v1",
       "",
       null,
       undefined,

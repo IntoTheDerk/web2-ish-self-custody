@@ -1,0 +1,15 @@
+{
+  "warning": "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET.",
+  "profile": "web2ish-kalvora-ed25519-external-salt-v1",
+  "passwordUtf8": "correct horse battery staple lantern orbit",
+  "username": "JESSE@example.COM",
+  "normalizedUsername": "jesse@example.com",
+  "applicationId": "example-app",
+  "networkId": "kalvora-mainnet",
+  "saltHex": "c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a",
+  "messageUtf8": "fixture-governance-intent-kalvora-external-salt-v1",
+  "publicKeyHex": "a2fadca05e2179c65826d89c7598256a36d43801fe4d089e3389a4b2aff2812f",
+  "publicKeyIdentifier": "A_ByCuowLiVTKHn7b9GbiEw4iRNWE4zRzo6bCxQQSXcDQJ",
+  "address": "ByCuowLiVTKHn7b9GbiEw4iRNWE4zRzo6bCxQQSXcDQJ",
+  "signatureHex": "abcb6d7755da6604f732d97b9d867e102f074b4efc3a6b33dfde3cfb57bef184c873dd33e86d9a240aa8f894390944e8f9b6cbb6281262c965cf1a33924df40a"
+}

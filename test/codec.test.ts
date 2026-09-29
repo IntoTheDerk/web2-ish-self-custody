@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
-import { zeraEd25519Codec } from "../src/chains/zera.js";
+import { kalvoraEd25519Codec } from "../src/chains/kalvora.js";
 import { assertCodecRoundTrip, defineIdentityCodec, type IdentityCodec } from "../src/codec.js";
 import { DerivationError } from "../src/errors.js";
 import { krypticHexCodec, truncatingCodec } from "./support/kryptic-chain.js";
@@ -61,7 +61,7 @@ describe("defineIdentityCodec", () => {
 
 describe("assertCodecRoundTrip", () => {
   it("passes for every codec this repository ships or tests with", () => {
-    for (const codec of [zeraEd25519Codec, krypticHexCodec]) {
+    for (const codec of [kalvoraEd25519Codec, krypticHexCodec]) {
       expect(() => assertCodecRoundTrip(codec, publicKeyBytes)).not.toThrow();
       expect(() => assertCodecRoundTrip(codec, new Uint8Array(32))).not.toThrow();
       expect(() => assertCodecRoundTrip(codec, new Uint8Array(32).fill(0xff))).not.toThrow();
@@ -120,22 +120,22 @@ describe("assertCodecRoundTrip", () => {
   });
 });
 
-describe("the ZERA codec as an IdentityCodec", () => {
+describe("the Kalvora codec as an IdentityCodec", () => {
   it("round-trips its own identifier and rejects everything else", () => {
-    const identifier = zeraEd25519Codec.encodePublicKey(publicKeyBytes);
-    expect(identifier).toBe(`A_${zeraEd25519Codec.encodeAddress(publicKeyBytes)}`);
-    expect(zeraEd25519Codec.decodePublicKey(identifier)).toEqual(publicKeyBytes);
-    expect(zeraEd25519Codec.decodePublicKey(`  ${identifier}  `)).toEqual(publicKeyBytes);
+    const identifier = kalvoraEd25519Codec.encodePublicKey(publicKeyBytes);
+    expect(identifier).toBe(`A_${kalvoraEd25519Codec.encodeAddress(publicKeyBytes)}`);
+    expect(kalvoraEd25519Codec.decodePublicKey(identifier)).toEqual(publicKeyBytes);
+    expect(kalvoraEd25519Codec.decodePublicKey(`  ${identifier}  `)).toEqual(publicKeyBytes);
 
     for (const bad of [
-      zeraEd25519Codec.encodeAddress(publicKeyBytes),
-      `B_${zeraEd25519Codec.encodeAddress(publicKeyBytes)}`,
+      kalvoraEd25519Codec.encodeAddress(publicKeyBytes),
+      `B_${kalvoraEd25519Codec.encodeAddress(publicKeyBytes)}`,
       `A_${"0OIl".repeat(11)}`,
-      `A_${zeraEd25519Codec.encodeAddress(new Uint8Array(31))}`,
+      `A_${kalvoraEd25519Codec.encodeAddress(new Uint8Array(31))}`,
       "A_",
       "",
     ]) {
-      expect(() => zeraEd25519Codec.decodePublicKey(bad), `"${bad}" must be rejected`).toThrowError(
+      expect(() => kalvoraEd25519Codec.decodePublicKey(bad), `"${bad}" must be rejected`).toThrowError(
         expect.objectContaining({ code: "invalid-public-key" }),
       );
     }
@@ -143,10 +143,10 @@ describe("the ZERA codec as an IdentityCodec", () => {
 
   it("does not accept another chain's identifier", () => {
     expect(() =>
-      zeraEd25519Codec.decodePublicKey(krypticHexCodec.encodePublicKey(publicKeyBytes)),
+      kalvoraEd25519Codec.decodePublicKey(krypticHexCodec.encodePublicKey(publicKeyBytes)),
     ).toThrowError(expect.objectContaining({ code: "invalid-public-key" }));
     expect(() =>
-      krypticHexCodec.decodePublicKey(zeraEd25519Codec.encodePublicKey(publicKeyBytes)),
+      krypticHexCodec.decodePublicKey(kalvoraEd25519Codec.encodePublicKey(publicKeyBytes)),
     ).toThrowError(expect.objectContaining({ code: "invalid-public-key" }));
   });
 });

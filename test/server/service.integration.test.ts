@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { normalizeUsername, withDerivedWallet } from "../../src/index.js";
 import type { DerivedWallet } from "../../src/index.js";
 import { CHALLENGE_DOMAIN } from "../../src/server/challenge.js";
@@ -24,11 +24,11 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
 const encoder = new TextEncoder();
-const profile = zeraEd25519ExternalSalt;
+const profile = kalvoraEd25519ExternalSalt;
 const profileId = profile.id;
 const codecId = profile.codec.id;
 const applicationId = "example-app";
-const networkId = "zera-testnet";
+const networkId = "kalvora-testnet";
 
 const derivationTimeoutMs = 120_000;
 
@@ -357,7 +357,7 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     // server does before it enrolls anything.
     expect(published.codecId).toBe(codecId);
     expect(published.curve).toBe("ed25519");
-    expect(published.algorithm).toBe("scrypt-sha512-ed25519-external-32-v1");
+    expect(published.algorithm).toBe("scrypt-sha512-slip10-ed25519-external-32-v1");
     expect(published.applicationId).toBe(applicationId);
     expect(published.networkId).toBe(networkId);
     expect(published.publicSaltHex).toMatch(/^[0-9a-f]{64}$/u);

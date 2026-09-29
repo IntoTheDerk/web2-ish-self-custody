@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { IdentityError } from "../../src/server/errors.js";
 import { createIdentityService } from "../../src/server/service.js";
 import type { SqlDriver, SqlParameter, SqlRow } from "../../src/server/sql.js";
 
 const username = "Jesse@Example.com";
 const publicKeyBytes = new Uint8Array(32).fill(7);
-const codec = zeraEd25519ExternalSalt.codec;
+const codec = kalvoraEd25519ExternalSalt.codec;
 
 type RateLimitCall = Readonly<{
   rule: string;
@@ -53,9 +53,9 @@ describe("identity service rate-limit buckets", () => {
     const calls: RateLimitCall[] = [];
     const service = createIdentityService(rateLimitedDriver(calls), {
       serviceProfileId: "rate-limit-test",
-      profile: zeraEd25519ExternalSalt,
+      profile: kalvoraEd25519ExternalSalt,
       applicationId: "example-app",
-      networkId: "zera-mainnet",
+      networkId: "kalvora-mainnet",
       tablePrefix: "rate_limit_test",
     });
     const contexts = [
@@ -115,9 +115,9 @@ describe("identity service rate-limit buckets", () => {
     const calls: RateLimitCall[] = [];
     const service = createIdentityService(rateLimitedDriver(calls), {
       serviceProfileId: "rate-limit-test",
-      profile: zeraEd25519ExternalSalt,
+      profile: kalvoraEd25519ExternalSalt,
       applicationId: "example-app",
-      networkId: "zera-mainnet",
+      networkId: "kalvora-mainnet",
       tablePrefix: "rate_limit_test",
     });
 

@@ -10,8 +10,8 @@ sessions. It is the only stateful part of this package.
 It is chain-agnostic. The deployment hands it a `DerivationProfile` object, and
 every address and public-key operation runs through that profile's
 `IdentityCodec` — there is no encoding convention hardcoded anywhere in this
-module. The examples below use ZERA because that is the chain that ships in the
-box, not because the service knows what ZERA is.
+module. The examples below use Kalvora because that is the chain that ships in the
+box, not because the service knows what Kalvora is.
 
 `src/server/contract.ts` is the authoritative TypeScript surface and
 `src/server/router.ts` the authoritative wire behavior. This document describes
@@ -84,11 +84,11 @@ CHECK constraint on `<p>_service_profiles`; migration 2 bakes `profile.id` and
 `profile.codec.id` into the binding CHECK on `<p>_account_wallets`. A deployment
 whose configuration has drifted from its database cannot write a row at all.
 
-The bundled ZERA profile, which satisfies the policy:
+The bundled Kalvora profile, which satisfies the policy:
 
 | `profileId` | codec | curve | algorithm | scrypt |
 | --- | --- | --- | --- | --- |
-| `web2ish-zera-ed25519-external-salt-v1` | `zera-ed25519-base58-v1` | ed25519 | `scrypt-sha512-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
+| `web2ish-kalvora-ed25519-external-salt-v1` | `kalvora-ed25519-base58-v1` | ed25519 | `scrypt-sha512-slip10-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
 
 A profile that derives its own salt from the username (the generic
 `derived-from-username` policy) is not serviceable.
@@ -208,12 +208,12 @@ Public. No request body.
 ```json
 {
   "serviceProfileId": "example-app-password-wallet-v1",
-  "profileId": "web2ish-zera-ed25519-external-salt-v1",
-  "codecId": "zera-ed25519-base58-v1",
-  "algorithm": "scrypt-sha512-ed25519-external-32-v1",
+  "profileId": "web2ish-kalvora-ed25519-external-salt-v1",
+  "codecId": "kalvora-ed25519-base58-v1",
+  "algorithm": "scrypt-sha512-slip10-ed25519-external-32-v1",
   "curve": "ed25519",
   "applicationId": "example-app",
-  "networkId": "zera-mainnet",
+  "networkId": "kalvora-mainnet",
   "publicSaltHex": "3f8a…64 hex characters…c1",
   "kdf": { "N": 65536, "r": 8, "p": 1, "dkLen": 32 }
 }
@@ -288,11 +288,11 @@ confirmed, when the deployment sets `requireVerifiedEmail`.
     "id": "6b0e…",
     "accountId": "8d2c…",
     "serviceProfileId": "example-app-password-wallet-v1",
-    "profileId": "web2ish-zera-ed25519-external-salt-v1",
-    "codecId": "zera-ed25519-base58-v1",
+    "profileId": "web2ish-kalvora-ed25519-external-salt-v1",
+    "codecId": "kalvora-ed25519-base58-v1",
     "curve": "ed25519",
     "applicationId": "example-app",
-    "networkId": "zera-mainnet",
+    "networkId": "kalvora-mainnet",
     "address": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
     "addressNormalized": "gmadrppbc7p5arkv8g3djiwp89vz1jlk23v2gbjuaegb",
     "publicKey": "A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
@@ -539,19 +539,19 @@ Field values:
 | --- | --- |
 | `serviceProfileId` | `example-app-password-wallet-v1` |
 | `applicationId` | `example-app` |
-| `networkId` | `zera-mainnet` |
+| `networkId` | `kalvora-mainnet` |
 | `purpose` | `login` |
 | `usernameNormalized` | `ada@example.org` |
 | `nonceHex` | `8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e` |
 | `expiresAt` | `2026-08-07T18:24:05.000Z` |
 
-The exact message, 207 UTF-8 bytes:
+The exact message, 210 UTF-8 bytes:
 
 ```
 web2-ish-self-custody auth challenge v1
 example-app-password-wallet-v1
 example-app
-zera-mainnet
+kalvora-mainnet
 login
 ada@example.org
 8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e
@@ -561,7 +561,7 @@ ada@example.org
 As a JavaScript string literal:
 
 ```
-"web2-ish-self-custody auth challenge v1\nexample-app-password-wallet-v1\nexample-app\nzera-mainnet\nlogin\nada@example.org\n8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e\n2026-08-07T18:24:05.000Z"
+"web2-ish-self-custody auth challenge v1\nexample-app-password-wallet-v1\nexample-app\nkalvora-mainnet\nlogin\nada@example.org\n8f1c2b4d6e0a93571fb2c8d40e5a6719bc3d2e8f04a1b5c69d7e8f0a1b2c3d4e\n2026-08-07T18:24:05.000Z"
 ```
 
 First 48 bytes, hex:
@@ -573,22 +573,22 @@ First 48 bytes, hex:
 `SHA-256` of the full message bytes:
 
 ```
-20256c97f565715a1119a9b7911b7d0090548f84266021a44d7a97f2b63cd4f7
+5c7d93e0e4e3889c59af2b8426d858aa37cf17933051c63e602a4750809eaf8d
 ```
 
 Signed with the synthetic Ed25519 seed of 32 `0x07` bytes — for reproduction
 only, never a real wallet. The address and identifier rows are the
-`zera-ed25519-base58-v1` encoding of that public key; the raw key and the
+`kalvora-ed25519-base58-v1` encoding of that public key; the raw key and the
 signature are codec-independent and are what a deployment on another chain would
 reproduce.
 
 | | |
 | --- | --- |
 | public key (raw hex) | `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c` |
-| address (ZERA codec) | `GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
-| public key identifier (ZERA codec) | `A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
+| address (Kalvora codec) | `GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
+| public key identifier (Kalvora codec) | `A_GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB` |
 | fingerprint | `GMAD RPPB C7P5 ARKV` |
-| signature | `16e36813c73451dd719df46bfbd35256c1c7d97da742e26e6db59a0b5b87d091c4db0414404829d9f14a75e2d4b093fb7edd334224f092aa4c18c57ece468d07` |
+| signature | `e89133e0ca01513b23bc29f76f2fdd3d53796294666541fa63d50193c1ccda550fcd59bc97e9ec0453e03fb33123dbc4a81d45138a61091c160482bde8482105` |
 
 ### Signature conventions
 
@@ -623,7 +623,7 @@ every chain:
 `addressNormalized` is the lowercased address; `codecId` is recorded from the
 codec that produced it.
 
-For the bundled ZERA codec those rules read as: the public key must be
+For the bundled Kalvora codec those rules read as: the public key must be
 `A_<base58>`; the base58 body must decode to exactly 32 bytes; the address is
 the Base58 encoding of those bytes. A deployment on a different chain gets the
 same guarantees with its own encoding, because the rules above never mention
@@ -862,7 +862,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 ```ts
 // app/api/identity/[...path]/route.ts
 import { neon } from "@neondatabase/serverless";
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 import {
   createIdentityRouter,
   createNeonIdentityService,
@@ -873,9 +873,9 @@ const service = createNeonIdentityService({
   connectionString: process.env.DATABASE_URL!,
   config: {
     serviceProfileId: "example-app-password-wallet-v1",
-    profile: zeraEd25519ExternalSalt,
+    profile: kalvoraEd25519ExternalSalt,
     applicationId: "example-app",
-    networkId: "zera-mainnet",
+    networkId: "kalvora-mainnet",
   },
 });
 
@@ -920,7 +920,7 @@ interactive transactions. Consequences an operator must respect:
 ```ts
 import { createServer } from "node:http";
 import { Pool } from "pg";
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 import {
   createIdentityRouter,
   createPgIdentityService,
@@ -931,9 +931,9 @@ const service = createPgIdentityService({
   pool: new Pool({ connectionString: process.env.DATABASE_URL, max: 10 }),
   config: {
     serviceProfileId: "example-app-password-wallet-v1",
-    profile: zeraEd25519ExternalSalt,
+    profile: kalvoraEd25519ExternalSalt,
     applicationId: "example-app",
-    networkId: "zera-mainnet",
+    networkId: "kalvora-mainnet",
   },
 });
 

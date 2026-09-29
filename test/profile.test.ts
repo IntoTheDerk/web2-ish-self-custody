@@ -181,3 +181,24 @@ describe("defineDerivationProfile identity", () => {
     }
   });
 });
+
+describe("defineDerivationProfile key derivation", () => {
+  const step = { id: "probe-step-v1", deriveKey: (seed: Uint8Array) => seed.slice() };
+
+  it("accepts and freezes a key-derivation step", () => {
+    const profile = define({ keyDerivation: step });
+    expect(profile.keyDerivation?.id).toBe("probe-step-v1");
+    expect(Object.isFrozen(profile.keyDerivation)).toBe(true);
+  });
+
+  it("leaves the field absent when no step is given", () => {
+    expect("keyDerivation" in define({})).toBe(false);
+  });
+
+  it("rejects a step without a usable id or deriveKey", () => {
+    expectRejected(() => define({ keyDerivation: null }), "null");
+    expectRejected(() => define({ keyDerivation: { ...step, id: "" } }), "empty id");
+    expectRejected(() => define({ keyDerivation: { ...step, id: "x".repeat(201) } }), "long id");
+    expectRejected(() => define({ keyDerivation: { id: "probe-step-v1" } }), "no deriveKey");
+  });
+});

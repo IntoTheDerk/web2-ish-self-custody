@@ -2,6 +2,8 @@
 
 > **Security warning:** anyone who knows a public identity and its public salt can test password guesses offline. Deterministic password-derived custody is not equivalent to a randomly generated wallet seed. Use only high-entropy, password-manager-generated credentials and complete an independent security review before funded use.
 
+> **Alpha pre-release (`0.10.0-alpha.0`).** The bundled Kalvora chain depends on kalvora.js `0.0.1-alpha.0`, and the Kalvora network is not live. Expect breaking changes between alpha releases.
+
 A small browser-first TypeScript package with two halves:
 
 - a **generic Ed25519 deterministic-custody core** that recreates the same signing
@@ -9,8 +11,12 @@ A small browser-first TypeScript package with two halves:
 - a **portable identity service** that owns the public salt such a derivation
   needs, verifies signatures, and issues sessions.
 
-The core knows nothing about any blockchain. A chain plugs into it. ZERA is the
-first bundled chain and lives at `web2-ish-self-custody/chains/zera`.
+The core knows nothing about any blockchain. A chain plugs into it. Kalvora is
+the bundled chain and lives at `web2-ish-self-custody/chains/kalvora`. It is
+provided by [kalvora.js](https://github.com/IntoTheDerk/kalvora.js), the Kalvora
+SDK: a password wallet here is exactly the wallet kalvora.js derives, via
+standard SLIP-0010 at SLIP-44 coin type 5258 (`m/44'/5258'/0'/0'/0'`). See
+[Kalvora and kalvora.js](docs/INTEGRATION.md#kalvora-and-kalvorajs).
 
 It exists to give the products that adopt it one versioned implementation
 instead of maintaining independent cryptographic copies.
@@ -23,7 +29,7 @@ Three pieces, in order of how much they know:
 | --- | --- | --- |
 | **core** | username/password → 32-byte Ed25519 seed → public identity, inside a callback scope | this package |
 | **`IdentityCodec`** | how a 32-byte public key becomes an address and a wire identifier, and how that identifier decodes back | a chain |
-| **`DerivationProfile`** | one immutable derivation transcript: curve, KDF parameters, salt policy, domain-separation strings, and the codec to encode with | a chain |
+| **`DerivationProfile`** | one immutable derivation transcript: curve, KDF parameters, salt policy, domain-separation strings, an optional key-derivation step (such as HD derivation at the chain's path), and the codec to encode with | a chain |
 
 Nothing in the derivation path or in the identity service contains the words
 base58, bech32, or hex. Those live in a codec. Adding a chain is a new codec and
@@ -84,18 +90,26 @@ immutable, reviewed Git commit — the same form every current consumer uses:
 Pin a full 40-character commit SHA rather than a branch or a tag name. The
 package builds itself through its `prepare` script during the Git install.
 
+To use the Kalvora chain, also install [kalvora.js](https://github.com/IntoTheDerk/kalvora.js)
+at the exact version in this package's `peerDependencies` (currently
+`0.0.1-alpha.0`). It is an optional peer dependency: the core, the vault, and
+the server do not need it.
+
 ## Used by
 
 | consumer | what it uses |
 | --- | --- |
-| [DemocracyOS-web](https://github.com/IntoTheDerk/DemocracyOS-web) | the browser password wallet (`withDerivedWallet` with `zeraEd25519ExternalSalt`) and the wallet-vault workers |
-| [DemocracyOS-backend](https://github.com/IntoTheDerk/DemocracyOS-backend) | the platform salt and server identity configuration: `provisionPlatformSalt` / `readPlatformSalt` from `/server`, configured with `zeraEd25519ExternalSalt` |
+| [DemocracyOS-web](https://github.com/IntoTheDerk/DemocracyOS-web) | the browser password wallet (`withDerivedWallet` with `kalvoraEd25519ExternalSalt`) and the wallet-vault workers |
+| [DemocracyOS-backend](https://github.com/IntoTheDerk/DemocracyOS-backend) | the platform salt and server identity configuration: `provisionPlatformSalt` / `readPlatformSalt` from `/server`, configured with `kalvoraEd25519ExternalSalt` |
 
-Both pin a reviewed release commit by its full SHA (see [Install](#install));
+Both pin v0.9.0 or earlier, on the ZERA profile that this release replaces with
+Kalvora; moving to Kalvora is a new wallet family for them (see the
+[changelog](CHANGELOG.md)). Both pin a reviewed release commit by its full SHA
+(see [Install](#install));
 the Git tags and the [changelog](CHANGELOG.md) name each release. DemocracyOS uses
 `serviceProfileId: "democracyos-password-wallet-v1"` with
 `applicationId: "democracy-os"`. Any other application on the same
-`zeraEd25519ExternalSalt` profile has its own application id and its own public
+`kalvoraEd25519ExternalSalt` profile has its own application id and its own public
 salt, so the same username and password derive a **different** wallet there.
 That is by design — see
 [Two services, one identity format](docs/INTEGRATION.md#two-services-one-identity-format).
@@ -105,24 +119,24 @@ That is by design — see
 A derivation takes a profile **object**, not a profile id. The core has no
 profile registry to look an id up in — the chain package is the registry.
 
-### Service-salted ZERA (the profile the identity server implements)
+### Service-salted Kalvora (the profile the identity server implements)
 
 ```ts
 import { withDerivedWallet } from "web2-ish-self-custody";
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 
 const password = new TextEncoder().encode(userSuppliedPassword);
 try {
   const proof = await withDerivedWallet(
     {
-      profile: zeraEd25519ExternalSalt,
+      profile: kalvoraEd25519ExternalSalt,
       username,
       password,
       // Exactly 32 bytes, published by your own service. Public metadata.
       salt: publicSaltFromYourService,
       context: {
         applicationId: "example-app",
-        networkId: "zera-mainnet",
+        networkId: "kalvora-mainnet",
       },
     },
     (wallet) => ({
@@ -144,11 +158,11 @@ than accepting KDF parameters from a server response.
 ### Random-seed public identity
 
 ```ts
-import { deriveZeraEd25519IdentityFromSeed } from "web2-ish-self-custody/chains/zera";
+import { deriveKalvoraEd25519IdentityFromSeed } from "web2-ish-self-custody/chains/kalvora";
 
 const seed = crypto.getRandomValues(new Uint8Array(32));
 try {
-  const identity = deriveZeraEd25519IdentityFromSeed(seed);
+  const identity = deriveKalvoraEd25519IdentityFromSeed(seed);
   console.log(identity.address, identity.codecId);
 } finally {
   seed.fill(0);
@@ -158,8 +172,8 @@ try {
 This standardizes only public-key derivation and address encoding for a seed the
 application already owns. It does not derive that seed from credentials and does
 not store, encrypt, recover, or sign with it. The generic form is
-`deriveIdentityFromSeed(seed, codec)`; the ZERA helper is that function with
-`zeraEd25519Codec` already applied. To encrypt such a seed, see the wallet vault
+`deriveIdentityFromSeed(seed, codec)`; the Kalvora helper is that function with
+`kalvoraEd25519Codec` already applied. To encrypt such a seed, see the wallet vault
 below.
 
 ### Wallet vault and recovery code
@@ -176,13 +190,13 @@ import {
   parseWalletVault,
   rewrapWalletVaultPassword,
 } from "web2-ish-self-custody";
-import { zeraEd25519Codec, zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519Codec, kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 
 // Enrol the wallet these credentials already derive; its address is preserved.
 // vaultPassword is the UTF-8 encoding of at least 10 characters (at most 1,024
 // bytes) and may differ from the derivation password.
 const { vault, recoveryCode } = await createWalletVaultFromCredentials(
-  { profile: zeraEd25519ExternalSalt, username, password, salt, context },
+  { profile: kalvoraEd25519ExternalSalt, username, password, salt, context },
   vaultPassword,
 );
 // Show recoveryCode to the user once so they can write it down. Store `vault`
@@ -192,7 +206,7 @@ const { vault, recoveryCode } = await createWalletVaultFromCredentials(
 const signature = await openWalletVaultWithPassword(
   parseWalletVault(storedVault),
   vaultPassword,
-  zeraEd25519Codec,
+  kalvoraEd25519Codec,
   (wallet) => wallet.signExactMessageUnsafe(exactTypedMessageBytes),
 );
 
@@ -352,6 +366,13 @@ Pick domain strings that are unique to your chain and profile. They are the only
 thing separating your transcript from every other one, and they are frozen the
 moment a wallet is derived under them.
 
+If your chain derives keys from a master seed, such as HD derivation at its own
+SLIP-44 path, add a `keyDerivation: { id, deriveKey(masterSeed) }` step. The
+core passes it a copy of the 32-byte scrypt output, requires exactly 32 bytes
+back, and zeroes both. Name the scheme and path in `id` and pin the path in your
+chain file. The Kalvora chain is a worked example: its step is kalvora.js's
+SLIP-0010 at `m/44'/5258'/0'/0'/0'`.
+
 ## API surface
 
 `web2-ish-self-custody` exports:
@@ -374,17 +395,19 @@ moment a wallet is derived under them.
 
 Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
 `DerivationCredentials`, `DerivationProfile`, `DerivedIdentity`,
-`DerivedWallet`, `IdentityCodec`, `ProfileDomains`, `SaltPolicy`, `SealedBox`,
+`DerivedWallet`, `IdentityCodec`, `KeyDerivation`, `ProfileDomains`, `SaltPolicy`, `SealedBox`,
 `SeedIdentity`, and `WalletVault`.
 
-`web2-ish-self-custody/chains/zera` exports:
+`web2-ish-self-custody/chains/kalvora` exports:
 
 | export | kind | purpose |
 | --- | --- | --- |
-| `zeraEd25519Codec` | `IdentityCodec` | base58 address, `A_<base58>` public-key identifier |
-| `zeraEd25519ExternalSalt` | `DerivationProfile` | service-salted; takes 32 bytes from the caller |
-| `zeraProfiles` | record | the bundled profile, keyed by id |
-| `deriveZeraEd25519IdentityFromSeed(seed)` | function | ZERA public identity for a random seed |
+| `kalvoraEd25519Codec` | `IdentityCodec` | base58 address, `A_<base58>` public-key identifier |
+| `kalvoraEd25519ExternalSalt` | `DerivationProfile` | service-salted; takes 32 bytes from the caller; SLIP-0010 at `m/44'/5258'/0'/0'/0'` |
+| `kalvoraSlip10Ed25519` | `KeyDerivation` | the profile's SLIP-0010 step, computed by kalvora.js |
+| `kalvoraProfiles` | record | the bundled profile, keyed by id |
+| `deriveKalvoraEd25519IdentityFromSeed(seed)` | function | Kalvora public identity for a random 32-byte key (no HD step) |
+| `KALVORA_SLIP44_COIN_TYPE` / `KALVORA_DERIVATION_PATH` | constants | `5258` and `m/44'/5258'/0'/0'/0'` |
 
 There is no private-key export anywhere in the package.
 
@@ -405,7 +428,7 @@ On Vercel with Neon:
 ```ts
 // app/api/identity/[...path]/route.ts
 import { neon } from "@neondatabase/serverless";
-import { zeraEd25519ExternalSalt } from "web2-ish-self-custody/chains/zera";
+import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
 import {
   createIdentityRouter,
   createNeonIdentityService,
@@ -416,9 +439,9 @@ const service = createNeonIdentityService({
   connectionString: process.env.DATABASE_URL!,
   config: {
     serviceProfileId: "example-app-password-wallet-v1",
-    profile: zeraEd25519ExternalSalt,
+    profile: kalvoraEd25519ExternalSalt,
     applicationId: "example-app",
-    networkId: "zera-mainnet",
+    networkId: "kalvora-mainnet",
   },
 });
 
@@ -469,11 +492,13 @@ strings, salt policy, KDF settings, curve, or codec. Never edit a codec's
 encoding. Any behavioral change requires a new id and a migration plan, because
 a wallet is defined by the profile that produced it.
 
-The bundled ZERA profile is `web2ish-zera-ed25519-external-salt-v1`: Ed25519,
-the `zera-ed25519-base58-v1` codec, and a 32-byte salt the service owns. (The
-self-salting `web2ish-zera-ed25519-v1` profile was removed in v0.9.0; the generic
+The bundled Kalvora profile is `web2ish-kalvora-ed25519-external-salt-v1`:
+Ed25519, a 32-byte salt the service owns, SLIP-0010 at `m/44'/5258'/0'/0'/0'`,
+and the `kalvora-ed25519-base58-v1` codec. The ZERA profiles are retired: the
+self-salting `web2ish-zera-ed25519-v1` was removed in v0.9.0 and
+`web2ish-zera-ed25519-external-salt-v1` in v0.10.0-alpha.0. The generic
 `derived-from-username` salt policy remains available to chains that define
-their own profile.)
+their own profile.
 
 See [the protocol](docs/PROTOCOL.md), [security model](docs/SECURITY_MODEL.md), and [integration guide](docs/INTEGRATION.md).
 

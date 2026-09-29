@@ -78,7 +78,7 @@ export type CanonicalWalletIdentity = Readonly<{
  * non-canonical encoding of one it does.
  *
  * The codec is a parameter rather than a hardcoded convention; that is what
- * lets a non-ZERA deployment use this service unchanged.
+ * lets a non-Kalvora deployment use this service unchanged.
  */
 export function canonicalWalletIdentity(
   codec: IdentityCodec,

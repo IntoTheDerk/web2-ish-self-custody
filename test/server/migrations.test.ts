@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import type { DerivationProfile } from "../../src/profile.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
@@ -8,9 +8,9 @@ import type { ResolvedIdentityServiceConfig } from "../../src/server/types.js";
 
 const config = resolveIdentityServiceConfig({
   serviceProfileId: "acme.identity",
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   applicationId: "example-app",
-  networkId: "zera-mainnet",
+  networkId: "kalvora-mainnet",
   tablePrefix: "acme_id",
 });
 
@@ -38,7 +38,7 @@ function withConfig(
 /** A profile that never passed `defineDerivationProfile`, as a hostile caller's would not. */
 function forgedProfile(overrides: Record<string, unknown>): DerivationProfile {
   return {
-    ...zeraEd25519ExternalSalt,
+    ...kalvoraEd25519ExternalSalt,
     ...overrides,
   } as unknown as DerivationProfile;
 }
@@ -81,7 +81,7 @@ describe("identityMigrations input validation", () => {
       { networkId: injection },
       { serviceProfileId: "" },
       { applicationId: "Example-App" },
-      { networkId: "zera mainnet" },
+      { networkId: "kalvora mainnet" },
       { serviceProfileId: "acme.identity'" },
       { serviceProfileId: `a${"b".repeat(80)}` },
     ];
@@ -99,9 +99,9 @@ describe("identityMigrations input validation", () => {
     const rejected: readonly Record<string, unknown>[] = [
       { id: "x'; DROP TABLE acme_id_accounts; --" },
       { algorithm: "x'; DROP TABLE acme_id_accounts; --" },
-      { codec: { ...zeraEd25519ExternalSalt.codec, id: "x'; DROP TABLE acme_id_accounts; --" } },
+      { codec: { ...kalvoraEd25519ExternalSalt.codec, id: "x'; DROP TABLE acme_id_accounts; --" } },
       { id: "" },
-      { codec: { ...zeraEd25519ExternalSalt.codec, id: "Zera-Ed25519" } },
+      { codec: { ...kalvoraEd25519ExternalSalt.codec, id: "Kalvora-Ed25519" } },
     ];
     for (const overrides of rejected) {
       expectIdentityError(
@@ -218,11 +218,11 @@ describe("generated migration SQL", () => {
   it("pins the service profile row to the configured derivation parameters", () => {
     const table = statementContaining("CREATE TABLE IF NOT EXISTS acme_id_service_profiles");
     expect(table).toContain("service_profile_id = 'acme.identity'");
-    expect(table).toContain("profile_id = 'web2ish-zera-ed25519-external-salt-v1'");
-    expect(table).toContain("algorithm = 'scrypt-sha512-ed25519-external-32-v1'");
+    expect(table).toContain("profile_id = 'web2ish-kalvora-ed25519-external-salt-v1'");
+    expect(table).toContain("algorithm = 'scrypt-sha512-slip10-ed25519-external-32-v1'");
     expect(table).toContain("curve = 'ed25519'");
     expect(table).toContain("application_id = 'example-app'");
-    expect(table).toContain("network_id = 'zera-mainnet'");
+    expect(table).toContain("network_id = 'kalvora-mainnet'");
     expect(table).toContain("octet_length(public_salt) = 32");
     expect(table).toContain("public_salt <> decode(repeat('00', 32), 'hex')");
     expect(table).toContain("kdf_n = 65536");
@@ -237,11 +237,11 @@ describe("generated migration SQL", () => {
     // Without the stored codec id, a deployment that ever changed encodings
     // could not tell which convention produced an existing address.
     expect(table).toContain("codec_id text NOT NULL");
-    expect(table).toContain("codec_id = 'zera-ed25519-base58-v1'");
-    expect(table).toContain("profile_id = 'web2ish-zera-ed25519-external-salt-v1'");
+    expect(table).toContain("codec_id = 'kalvora-ed25519-base58-v1'");
+    expect(table).toContain("profile_id = 'web2ish-kalvora-ed25519-external-salt-v1'");
     expect(table).toContain("curve = 'ed25519'");
     expect(table).toContain("application_id = 'example-app'");
-    expect(table).toContain("network_id = 'zera-mainnet'");
+    expect(table).toContain("network_id = 'kalvora-mainnet'");
     expect(table).toContain("address_normalized = lower(address)");
   });
 

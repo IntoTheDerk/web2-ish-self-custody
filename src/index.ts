@@ -17,7 +17,7 @@ export {
   normalizeUsername,
 } from "./normalization.js";
 export { defineDerivationProfile } from "./profile.js";
-export type { DerivationProfile, ProfileDomains, SaltPolicy } from "./profile.js";
+export type { DerivationProfile, KeyDerivation, ProfileDomains, SaltPolicy } from "./profile.js";
 export { ED25519_SEED_BYTES, deriveIdentityFromSeed } from "./seed.js";
 export type { SeedIdentity } from "./seed.js";
 export type {

@@ -3,13 +3,13 @@
 This document is the wire specification. It has two layers:
 
 1. **The generic transcript** — the rule every profile follows, parameterized
-   over that profile's domain-separation strings, salt policy, and KDF
-   parameters. It contains no chain-specific value.
-2. **The ZERA instance** — the exact literal constants that turn the generic
-   rule into the bundled ZERA profile.
+   over that profile's domain-separation strings, salt policy, KDF parameters,
+   and optional key-derivation step. It contains no chain-specific value.
+2. **The Kalvora instance** — the exact literal constants that turn the generic
+   rule into the bundled Kalvora profile.
 
 Someone should be able to reimplement either layer from this document alone:
-part 1 to support a new chain, part 2 to reproduce the committed ZERA vector
+part 1 to support a new chain, part 2 to reproduce the committed Kalvora vector
 byte for byte. Where this document and the committed source disagree, the source
 and the vectors are the contract.
 
@@ -32,6 +32,7 @@ outside it influences derivation.
 | `domains.passwordHash` | string | prefixed to the raw password bytes |
 | `domains.entropy` | string | first line of the entropy transcript |
 | `domains.salt` | string \| absent | first line of the salt transcript |
+| `keyDerivation` | `{ id, deriveKey }` \| absent | chain-supplied step from the scrypt output to the wallet key |
 | `codec` | `IdentityCodec` | how a public key becomes an address and an identifier |
 
 **Domain strings are part of the wallet definition, not formatting.** Change one
@@ -39,7 +40,7 @@ byte of one of them and the same credentials derive a different key, which is
 indistinguishable from destroying every wallet in that family. A different
 transcript is therefore always a new profile id — never an edit to an existing
 one. The same rule applies to the KDF parameters, the salt policy, the
-normalization rules, and the codec.
+key-derivation step, the normalization rules, and the codec.
 
 ### Profile validation
 
@@ -51,11 +52,14 @@ independent implementation should enforce the same floor:
 - `kdf.N` is an integer power of two and at least 65536.
 - `kdf.r` is an integer at least 8.
 - `kdf.p` is an integer at least 1.
-- `kdf.dkLen` is exactly 32 — the output *is* the Ed25519 seed.
+- `kdf.dkLen` is exactly 32 — the output is the Ed25519 seed, or the master
+  seed of the key-derivation step when the profile has one.
 - `domains.passwordHash` and `domains.entropy` are each 1–200 characters.
 - `saltPolicy: "derived-from-username"` requires `domains.salt`.
 - `saltPolicy: "external-32"` forbids `domains.salt`, because such a profile
   never derives a salt and a stray domain would imply otherwise.
+- `keyDerivation`, when present, has a 1–200 character `id` and a `deriveKey`
+  function.
 
 The KDF floor is deliberate. This construction derives a wallet from a human
 password, so a profile that lowers the work factor is not a configuration
@@ -219,17 +223,35 @@ namespaces; it adds no secrecy.
 ### 4. scrypt
 
 ```
-seed = scrypt(password = walletEntropy, salt = salt,
-              N = kdf.N, r = kdf.r, p = kdf.p, dkLen = kdf.dkLen)
+masterSeed = scrypt(password = walletEntropy, salt = salt,
+                    N = kdf.N, r = kdf.r, p = kdf.p, dkLen = kdf.dkLen)
 ```
 
 The 64-byte `walletEntropy` is the scrypt password input and the 32-byte salt is
-the scrypt salt input. Because `dkLen` is fixed at 32, the result **is** the
-Ed25519 seed; there is no truncation or expansion step. At `N = 65536, r = 8`
+the scrypt salt input. `dkLen` is fixed at 32, so the result is 32 bytes with no
+truncation or expansion. At `N = 65536, r = 8`
 scrypt requires roughly 64 MiB of working memory, so implementations that impose
 a `maxmem` limit must raise it accordingly.
 
-### 5. Identity encoding
+### 5. Key derivation
+
+```
+seed = profile.keyDerivation ? profile.keyDerivation.deriveKey(masterSeed)
+                             : masterSeed
+```
+
+A profile without `keyDerivation` uses the scrypt output as the Ed25519 seed
+directly. A profile with one hands the step its own copy of `masterSeed` and
+requires exactly 32 bytes back; anything else, or a thrown error, fails the
+derivation with `invalid-profile`. The core zeroes `masterSeed` and the copy
+afterwards.
+
+The step is how a chain binds its own key structure into the wallet — the
+bundled Kalvora profile uses it for SLIP-0010 at SLIP-44 coin type 5258. The
+core does not know what the step computes; `keyDerivation.id` names it so it
+can be pinned and reviewed like every other profile field.
+
+### 6. Identity encoding
 
 The 32-byte seed is an Ed25519 private key per RFC 8032. Derive the 32-byte
 encoded public key from it in the standard way, then hand that public key to the
@@ -284,14 +306,23 @@ different one is, and it needs an enrollment step.
 
 ---
 
-# Part 2 — the ZERA instance
+# Part 2 — the Kalvora instance
 
-Everything below is exported from `web2-ish-self-custody/chains/zera`. These are
+Everything below is exported from `web2-ish-self-custody/chains/kalvora`. These are
 fixed wire surface, reproduced here exactly as specified.
 
-## The ZERA codec
+The key-derivation step and address encoding are computed by
+[kalvora.js](https://github.com/IntoTheDerk/kalvora.js) (`kalvora.js/wallet`),
+so the wallets here are the wallets kalvora.js derives. Nothing below depends on
+kalvora.js to be reproduced: every rule is stated in full, and the Python
+verifier implements all of it independently.
 
-`zeraEd25519Codec`, id **`zera-ed25519-base58-v1`**.
+## The Kalvora codec
+
+`kalvoraEd25519Codec`, id **`kalvora-ed25519-base58-v1`**. Encoding calls
+kalvora.js's `generateKalvoraAddress` and `generateKalvoraPublicKeyIdentifier`
+for Ed25519 with no hash types, which produce exactly the values below;
+decoding is local and strict.
 
 | member | rule |
 | --- | --- |
@@ -312,24 +343,52 @@ Base58 has no fixed output length: a public key with leading zero bytes encodes
 shorter. The committed vector's address is 44 characters and the accepted range
 is 32 to 64, so validators should accept a range rather than pin a single length.
 
-## The ZERA profile
+## The Kalvora key derivation
 
-`zeraEd25519ExternalSalt` uses `zeraEd25519Codec`, the Ed25519 curve, and scrypt
-`N = 65536, r = 8, p = 1, dkLen = 32`:
+`kalvoraSlip10Ed25519`, id **`slip10-ed25519:m/44'/5258'/0'/0'/0'`**: standard
+[SLIP-0010](https://github.com/satoshilabs/slips/blob/master/slip-0010.md) for
+Ed25519, with `masterSeed` as the SLIP-0010 seed, at Kalvora's first wallet path
+(SLIP-44 coin type 5258, account 0, change 0, address 0, all hardened):
+
+```
+I = HMAC-SHA512(key = utf8("ed25519 seed"), data = masterSeed)
+k = I[0:32], c = I[32:64]
+for i in (44, 5258, 0, 0, 0):
+    I = HMAC-SHA512(key = c, data = 0x00 ‖ k ‖ ser32BE(i + 2^31))
+    k = I[0:32], c = I[32:64]
+seed = k
+```
+
+It calls kalvora.js's `deriveHDPrivateKey(masterSeed, "m/44'/5258'/0'/0'/0'",
+ed25519)`, so the result is kalvora.js's first Ed25519 wallet for that seed. The
+path is pinned in this package rather than read from kalvora.js, so a kalvora.js
+release cannot move it.
+
+## The Kalvora profile
+
+`kalvoraEd25519ExternalSalt` uses `kalvoraEd25519Codec`, the Ed25519 curve, scrypt
+`N = 65536, r = 8, p = 1, dkLen = 32`, and `kalvoraSlip10Ed25519`:
 
 | field | value |
 | --- | --- |
-| `id` | `web2ish-zera-ed25519-external-salt-v1` |
-| `algorithm` | `scrypt-sha512-ed25519-external-32-v1` |
+| `id` | `web2ish-kalvora-ed25519-external-salt-v1` |
+| `algorithm` | `scrypt-sha512-slip10-ed25519-external-32-v1` |
 | `saltPolicy` | `external-32` |
 | `domains.salt` | *(absent)* |
+| `keyDerivation.id` | `slip10-ed25519:m/44'/5258'/0'/0'/0'` |
 
-Until v0.9.0 the package also bundled a self-salting sibling,
-`web2ish-zera-ed25519-v1` (`derived-from-username`, entropy domain
-`web2-ish-self-custody ZERA Ed25519 entropy v1`, salt domain
-`web2-ish-self-custody public username salt v1`). No consumer imported it, and
-it was removed. Its id and domain strings stay retired: a future profile must not
-reuse them.
+## Retired profiles
+
+These ids and domain strings stay retired: a future profile must not reuse
+them.
+
+- `web2ish-zera-ed25519-external-salt-v1` (ZERA, codec
+  `zera-ed25519-base58-v1`, entropy domain
+  `web2-ish-self-custody ZERA Ed25519 external salt entropy v1`, no
+  key-derivation step). Replaced by the Kalvora profile in v0.10.0-alpha.0.
+- `web2ish-zera-ed25519-v1` (`derived-from-username`, entropy domain
+  `web2-ish-self-custody ZERA Ed25519 entropy v1`, salt domain
+  `web2-ish-self-custody public username salt v1`). Removed in v0.9.0.
 
 ## Exact domain strings
 
@@ -339,7 +398,7 @@ domain is joined into its transcript with explicit `\n` separators.
 | constant | exact value |
 | --- | --- |
 | `D_pw` | `web2-ish-self-custody password hash v1\n` |
-| `D_ent` | `web2-ish-self-custody ZERA Ed25519 external salt entropy v1` |
+| `D_ent` | `web2-ish-self-custody Kalvora Ed25519 external salt entropy v1` |
 
 The password-hash domain is 39 bytes including its trailing LF (U+000A).
 
@@ -348,11 +407,12 @@ The password-hash domain is 39 bytes including its trailing LF (U+000A).
 ```
 passwordHash  = SHA-512( utf8("web2-ish-self-custody password hash v1\n") ‖ passwordBytes )
 walletEntropy = SHA-512( utf8(
-                  "web2-ish-self-custody ZERA Ed25519 external salt entropy v1" ‖ "\n" ‖
+                  "web2-ish-self-custody Kalvora Ed25519 external salt entropy v1" ‖ "\n" ‖
                   applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖
                   normalizedUsername ‖ "\n" ‖ hex(passwordHash) ) )
 salt          = the caller's exact 32 bytes
-seed          = scrypt(walletEntropy, salt, N=65536, r=8, p=1, dkLen=32)
+masterSeed    = scrypt(walletEntropy, salt, N=65536, r=8, p=1, dkLen=32)
+seed          = SLIP-0010 Ed25519 key of masterSeed at m/44'/5258'/0'/0'/0'
 publicKey     = Ed25519 public key of seed
 address       = base58(publicKey)
 identifier    = "A_" ‖ address
@@ -365,36 +425,31 @@ from these values.** It uses the password `correct horse battery staple lantern
 orbit` (42 characters, 42 UTF-8 bytes) and the username `JESSE@example.COM`,
 which normalizes to `jesse@example.com`.
 
-`vectors/zera-ed25519-external-salt-v1.json`,
-`web2ish-zera-ed25519-external-salt-v1`, with
-`applicationId = example-app` and `networkId = zera-mainnet`:
+`vectors/kalvora-ed25519-external-salt-v1.json`,
+`web2ish-kalvora-ed25519-external-salt-v1`, with
+`applicationId = example-app` and `networkId = kalvora-mainnet`:
 
 | field | value |
 | --- | --- |
 | supplied salt | `c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a` |
-| public key | `f3523423a7b13060341239d864994d1e574378a9230d4a9dd9ce972af94e06c3` |
-| address | `HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A` |
-| public key identifier | `A_HNpmmfVGzjYW4Lgn2DrsurntY96ELEEjVQEh96DurV6A` |
-| message | `fixture-governance-intent-external-salt-v1` |
-| signature | `be7f8f5ac3ba40f304194ba01d74bf1bbc5bbc195ea76e80f76bcfa0d8c66ac8f2ad9f5e423cc6dcb6f139b843c87f4cb266878c9031b5b9d9cc437294dac705` |
-
-The fixture's application id changed to the neutral `example-app` in v0.9.0.
-That is a change of input, not of derivation: the v0.8.0 and v0.9.0
-implementations and the independent Python verifier all produce the values above
-from the new input, and all three reproduce the previous vector from the previous
-input.
+| public key | `a2fadca05e2179c65826d89c7598256a36d43801fe4d089e3389a4b2aff2812f` |
+| address | `ByCuowLiVTKHn7b9GbiEw4iRNWE4zRzo6bCxQQSXcDQJ` |
+| public key identifier | `A_ByCuowLiVTKHn7b9GbiEw4iRNWE4zRzo6bCxQQSXcDQJ` |
+| message | `fixture-governance-intent-kalvora-external-salt-v1` |
+| signature | `abcb6d7755da6604f732d97b9d867e102f074b4efc3a6b33dfde3cfb57bef184c873dd33e86d9a240aa8f894390944e8f9b6cbb6281262c965cf1a33924df40a` |
 
 A refactor that changes these values is wrong. The vector is not updated to
 match an implementation; the implementation is corrected to match the vector.
 
 ## Independent vector verification
 
-`scripts/verify_zera_external_salt_vector.py` reconstructs the committed vector
+`scripts/verify_kalvora_external_salt_vector.py` reconstructs the committed vector
 from the fixture using Python's standard-library `hashlib` and the separately
 maintained `cryptography` package. It does not import or execute the TypeScript
 implementation. It checks username normalization, context canonicalization, the
 password bounds, the domain-separated transcript, the supplied salt, the scrypt
-result, the public key, the Base58 identity encoding, the deterministic
+result, the SLIP-0010 step (its own implementation, first checked against the
+SLIP-0010 specification's test vector 1), the public key, the Base58 identity encoding, the deterministic
 signature, and signature verification, and it fails on missing, unexpected,
 duplicate, incorrectly typed, or incorrectly encoded fixture fields.
 

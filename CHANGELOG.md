@@ -5,6 +5,67 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## v0.10.0-alpha.0 — unreleased (alpha pre-release)
+
+**Alpha.** This release depends on kalvora.js `0.0.1-alpha.0`, and neither it
+nor the Kalvora network is live. Any `0.10.0-alpha.x` release may change the
+Kalvora surface; do not derive funded wallets under it.
+
+Kalvora replaces ZERA as the bundled chain, provided by kalvora.js, with the
+wallet key derived by standard SLIP-0010 at SLIP-44 coin type 5258.
+
+### Breaking changes
+
+- **ZERA removed; Kalvora added.** `web2-ish-self-custody/chains/zera` is gone,
+  and `web2-ish-self-custody/chains/kalvora` replaces it: `kalvoraEd25519Codec`
+  (`kalvora-ed25519-base58-v1`), `kalvoraEd25519ExternalSalt`
+  (`web2ish-kalvora-ed25519-external-salt-v1`), `kalvoraProfiles`,
+  `deriveKalvoraEd25519IdentityFromSeed`, `kalvoraSlip10Ed25519`,
+  `KALVORA_SLIP44_COIN_TYPE` (5258), and `KALVORA_DERIVATION_PATH`
+  (`m/44'/5258'/0'/0'/0'`). The Kalvora profile is a **new wallet family**:
+  the same credentials derive a different address than under the ZERA profile,
+  because its entropy domain differs and its key is the SLIP-0010 node of the
+  scrypt output rather than the scrypt output itself. Its algorithm label is
+  `scrypt-sha512-slip10-ed25519-external-32-v1`, so an identity-service
+  database provisioned for the ZERA profile refuses the new one instead of
+  mixing wallets. The ZERA ids and domain strings are retired (see
+  `docs/PROTOCOL.md`).
+- **kalvora.js is an optional peer dependency** (`0.0.1-alpha.0`), required
+  only by `chains/kalvora`. Its `kalvora.js/wallet` entry computes the
+  SLIP-0010 step and the address encoding, so a password wallet here is
+  exactly kalvora.js's first Ed25519 wallet for the scrypt output; that entry
+  has no network or protobuf code.
+
+### Migrating from v0.9.0
+
+- Replace `chains/zera` imports with `chains/kalvora` and each `zera*` export
+  with its `kalvora*` counterpart, and add `kalvora.js@0.0.1-alpha.0` as a
+  dependency.
+- Treat the switch as new wallets, not a rename: re-enroll users, and give the
+  identity service a new `serviceProfileId` (or a fresh database) for the
+  Kalvora profile.
+- Fixtures that copied `vectors/zera-ed25519-external-salt-v1.json` use
+  `vectors/kalvora-ed25519-external-salt-v1.json`, whose `networkId` is
+  `kalvora-mainnet`.
+
+### Other changes
+
+- **`DerivationProfile.keyDerivation`**: an optional, chain-supplied step from
+  the 32-byte scrypt output to the 32-byte wallet key, typed `KeyDerivation`
+  (`{ id, deriveKey }`). The core gives it a copy of the scrypt output,
+  requires exactly 32 bytes back, reports a failure as `invalid-profile`
+  without its message, and zeroes both buffers. Profiles without it derive
+  exactly as before.
+- The Python verifier is now `scripts/verify_kalvora_external_salt_vector.py`.
+  It implements SLIP-0010 itself, checks that implementation against the
+  specification's test vector 1, and reproduces the committed Kalvora vector
+  without kalvora.js or this package.
+- The suite checks the Kalvora profile against kalvora.js directly: the same
+  seed gives the same key and address as kalvora.js's `createWallet`, and the
+  pinned path and coin type agree with kalvora.js's constants.
+- The challenge worked example in `docs/SERVER_API.md` is recomputed for
+  `networkId = kalvora-mainnet`.
+
 ## v0.9.0 — 2026-09-27
 
 A normal password floor, and the legacy surface removed. Derivation is

@@ -1,6 +1,6 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { afterAll, describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { runIdentityMigrations } from "../../src/server/migrations.js";
 import {
@@ -21,9 +21,9 @@ declare const process: { readonly env: Readonly<Record<string, string | undefine
  */
 const connectionString = process.env["W2SC_TEST_DATABASE_URL"];
 
-const profile = zeraEd25519ExternalSalt;
+const profile = kalvoraEd25519ExternalSalt;
 const applicationId = "existing-service";
-const networkId = "zera-testnet";
+const networkId = "kalvora-testnet";
 
 type PgLikeClient = Readonly<{
   query: (

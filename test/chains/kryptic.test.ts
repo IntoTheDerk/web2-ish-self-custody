@@ -1,8 +1,8 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
-import zeraVector from "../../vectors/zera-ed25519-external-salt-v1.json" with { type: "json" };
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import kalvoraVector from "../../vectors/kalvora-ed25519-external-salt-v1.json" with { type: "json" };
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { derivePublicIdentity, withDerivedWallet } from "../../src/index.js";
 import {
   buildChallengeMessage,
@@ -15,7 +15,7 @@ import {
   krypticExternalSalt,
   krypticHexCodec,
   krypticStateless,
-  krypticZeraTranscript,
+  krypticKalvoraTranscript,
 } from "../support/kryptic-chain.js";
 
 /**
@@ -23,17 +23,17 @@ import {
  *
  * Everything below runs the throwaway `kryptic` chain — hex addresses behind a
  * `k_` tag — through the same derivation, challenge, and identity-service code
- * ZERA uses, with no branch anywhere that knows either chain's name. If the
- * core ever grows a ZERA-shaped assumption, these fail and the ZERA suites do
+ * Kalvora uses, with no branch anywhere that knows either chain's name. If the
+ * core ever grows a Kalvora-shaped assumption, these fail and the Kalvora suites do
  * not, which is precisely the signal that would otherwise be missed.
  */
 
 const encoder = new TextEncoder();
-const password = encoder.encode(zeraVector.passwordUtf8);
-const salt = hexToBytes(zeraVector.saltHex);
+const password = encoder.encode(kalvoraVector.passwordUtf8);
+const salt = hexToBytes(kalvoraVector.saltHex);
 const context = {
-  applicationId: zeraVector.applicationId,
-  networkId: zeraVector.networkId,
+  applicationId: kalvoraVector.applicationId,
+  networkId: kalvoraVector.networkId,
 };
 
 /** scrypt at N=65536 costs ~200ms per call, so each derivation is memoized. */
@@ -66,7 +66,7 @@ function krypticFixture(): Promise<WalletFixture> {
   return (krypticFixturePromise ??= withDerivedWallet(
     {
       profile: krypticExternalSalt,
-      username: zeraVector.username,
+      username: kalvoraVector.username,
       password,
       context,
       salt,
@@ -97,10 +97,10 @@ describe("a second chain on the same core", () => {
       expect(wallet.address).toBe(wallet.publicKeyHex);
       expect(wallet.publicKey).toBe(`k_${wallet.publicKeyHex}`);
 
-      // Nothing about the ZERA convention leaks into it.
+      // Nothing about the Kalvora convention leaks into it.
       expect(wallet.publicKey.startsWith("A_")).toBe(false);
-      expect(wallet.address).not.toBe(zeraVector.address);
-      expect(wallet.publicKeyHex).not.toBe(zeraVector.publicKeyHex);
+      expect(wallet.address).not.toBe(kalvoraVector.address);
+      expect(wallet.publicKeyHex).not.toBe(kalvoraVector.publicKeyHex);
     },
     derivationTimeoutMs,
   );
@@ -155,14 +155,14 @@ describe("a second chain on the same core", () => {
       expect(() =>
         canonicalWalletIdentity(krypticHexCodec, {
           publicKey: wallet.publicKey,
-          address: zeraVector.address,
+          address: kalvoraVector.address,
         }),
       ).toThrowError(expect.objectContaining({ code: "invalid-address" }));
 
       expect(() =>
         canonicalWalletIdentity(krypticHexCodec, {
-          publicKey: zeraVector.publicKeyIdentifier,
-          address: zeraVector.address,
+          publicKey: kalvoraVector.publicKeyIdentifier,
+          address: kalvoraVector.address,
         }),
       ).toThrowError(expect.objectContaining({ code: "invalid-public-key" }));
     },
@@ -174,7 +174,7 @@ describe("a second chain on the same core", () => {
     async () => {
       const stateless = await derivePublicIdentity({
         profile: krypticStateless,
-        username: zeraVector.username,
+        username: kalvoraVector.username,
         password,
         context,
       });
@@ -191,28 +191,28 @@ describe("a second chain on the same core", () => {
 
 describe("the codec is a presentation seam, not a derivation input", () => {
   it(
-    "reproduces the committed ZERA key bytes under a different address encoding",
+    "reproduces the committed Kalvora key bytes under a different address encoding",
     async () => {
       // Same transcript domains, same KDF, same credentials, same salt — only
       // the codec and the profile id differ, and the profile id is not signed.
       const mirrored = await derivePublicIdentity({
-        profile: krypticZeraTranscript,
-        username: zeraVector.username,
+        profile: krypticKalvoraTranscript,
+        username: kalvoraVector.username,
         password,
         context,
         salt,
       });
 
-      expect(bytesToHex(mirrored.publicKeyBytes)).toBe(zeraVector.publicKeyHex);
-      expect(mirrored.address).toBe(zeraVector.publicKeyHex);
-      expect(mirrored.publicKey).toBe(`k_${zeraVector.publicKeyHex}`);
+      expect(bytesToHex(mirrored.publicKeyBytes)).toBe(kalvoraVector.publicKeyHex);
+      expect(mirrored.address).toBe(kalvoraVector.publicKeyHex);
+      expect(mirrored.publicKey).toBe(`k_${kalvoraVector.publicKeyHex}`);
       expect(mirrored.codecId).toBe("kryptic-hex-v1");
-      expect(mirrored.profileId).toBe("kryptic-zera-transcript-v1");
+      expect(mirrored.profileId).toBe("kryptic-kalvora-transcript-v1");
 
       // The transcript is copied from the real profile rather than retyped, so
       // this stays a statement about the core rather than about a duplicate.
-      expect(krypticZeraTranscript.domains).toEqual(zeraEd25519ExternalSalt.domains);
-      expect(krypticZeraTranscript.kdf).toEqual(zeraEd25519ExternalSalt.kdf);
+      expect(krypticKalvoraTranscript.domains).toEqual(kalvoraEd25519ExternalSalt.domains);
+      expect(krypticKalvoraTranscript.kdf).toEqual(kalvoraEd25519ExternalSalt.kdf);
     },
     derivationTimeoutMs,
   );
@@ -241,8 +241,8 @@ describe("the identity service accepts a second chain unchanged", () => {
     expect(sql).toContain("codec_id = 'kryptic-hex-v1'");
     expect(sql).toContain("profile_id = 'kryptic-ed25519-external-salt-v1'");
     expect(sql).toContain("algorithm = 'scrypt-sha512-ed25519-external-32-v1'");
-    // No ZERA identifier may reach a non-ZERA deployment's schema.
-    expect(sql).not.toContain("zera-ed25519-base58-v1");
-    expect(sql).not.toContain("web2ish-zera");
+    // No Kalvora identifier may reach a non-Kalvora deployment's schema.
+    expect(sql).not.toContain("kalvora-ed25519-base58-v1");
+    expect(sql).not.toContain("web2ish-kalvora");
   });
 });

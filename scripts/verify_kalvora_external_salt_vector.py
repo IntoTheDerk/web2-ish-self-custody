@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Independently verify the external-salt ZERA Ed25519 profile vector."""
+"""Independently verify the external-salt Kalvora Ed25519 profile vector.
+
+This reimplements the whole derivation, including SLIP-0010, from the standard
+library and `cryptography` alone. It shares no code with kalvora.js or this
+package, so agreement is evidence that both follow the specification.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import sys
@@ -16,8 +22,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_PATH = ROOT / "vectors" / "zera-ed25519-external-salt-v1.json"
-PROFILE = "web2ish-zera-ed25519-external-salt-v1"
+FIXTURE_PATH = ROOT / "vectors" / "kalvora-ed25519-external-salt-v1.json"
+PROFILE = "web2ish-kalvora-ed25519-external-salt-v1"
+# SLIP-44 coin type 5258: account 0, change 0, address 0, all hardened.
+KALVORA_PATH = (44, 5258, 0, 0, 0)
+HARDENED = 0x8000_0000
 WARNING = "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET."
 EXPECTED_KEYS = frozenset(
     {
@@ -132,6 +141,26 @@ def base58_encode(value: bytes) -> str:
     return (BASE58_ALPHABET[:1] * leading_zeroes + encoded).decode("ascii")
 
 
+def slip10_ed25519(seed: bytes, path: tuple[int, ...]) -> bytes:
+    """SLIP-0010 private-key derivation for ed25519, hardened segments only."""
+    node = hmac.new(b"ed25519 seed", seed, hashlib.sha512).digest()
+    for index in path:
+        data = b"\x00" + node[:32] + (index + HARDENED).to_bytes(4, "big")
+        node = hmac.new(node[32:], data, hashlib.sha512).digest()
+    return node[:32]
+
+
+def check_slip10_reference() -> None:
+    """Pin the SLIP-0010 implementation to the specification's test vector 1."""
+    key = slip10_ed25519(
+        bytes.fromhex("000102030405060708090a0b0c0d0e0f"), (0, 1, 2, 2, 1_000_000_000)
+    )
+    if key.hex() != (
+        "8f94d394a8e8fd6b1bc2f3f49f5c47e385281d5c17e65324b0f62483e37e8793"
+    ):
+        fail("SLIP-0010 implementation does not reproduce the specification vector")
+
+
 def verify_vector(fixture: dict[str, str]) -> None:
     normalized_username = normalize_username(fixture["username"])
     if normalized_username != fixture["normalizedUsername"]:
@@ -153,7 +182,7 @@ def verify_vector(fixture: dict[str, str]) -> None:
     ).digest()
     entropy_transcript = "\n".join(
         (
-            "web2-ish-self-custody ZERA Ed25519 external salt entropy v1",
+            "web2-ish-self-custody Kalvora Ed25519 external salt entropy v1",
             application_id,
             network_id,
             normalized_username,
@@ -161,7 +190,7 @@ def verify_vector(fixture: dict[str, str]) -> None:
         )
     ).encode("utf-8")
     wallet_entropy = hashlib.sha512(entropy_transcript).digest()
-    seed = hashlib.scrypt(
+    master_seed = hashlib.scrypt(
         wallet_entropy,
         salt=bytes.fromhex(fixture["saltHex"]),
         n=65_536,
@@ -170,6 +199,7 @@ def verify_vector(fixture: dict[str, str]) -> None:
         dklen=32,
         maxmem=128 * 1_024 * 1_024,
     )
+    seed = slip10_ed25519(master_seed, KALVORA_PATH)
     private_key = Ed25519PrivateKey.from_private_bytes(seed)
     public_key = private_key.public_key()
     public_key_bytes = public_key.public_bytes(
@@ -199,6 +229,7 @@ def verify_vector(fixture: dict[str, str]) -> None:
 
 def main() -> int:
     try:
+        check_slip10_reference()
         verify_vector(load_fixture())
     except VerificationError as error:
         print(f"External-salt vector verification failed: {error}", file=sys.stderr)
@@ -210,9 +241,10 @@ def main() -> int:
         )
         return 1
     print(
-        "Independent Python verification passed for the external-salt ZERA "
+        "Independent Python verification passed for the external-salt Kalvora "
         "Ed25519 profile: strict fixture shape, normalization, context-bound "
-        "transcript, external salt, scrypt KDF, identity, address and signature."
+        "transcript, external salt, scrypt KDF, SLIP-0010 at m/44'/5258'/0'/0'/0', "
+        "identity, address and signature."
     )
     return 0
 

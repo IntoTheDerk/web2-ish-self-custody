@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { zeraEd25519ExternalSalt } from "../../src/chains/zera.js";
+import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { identityMigrations } from "../../src/server/migrations.js";
 import {
@@ -10,9 +10,9 @@ import { krypticStateless } from "../support/kryptic-chain.js";
 
 const config: PlatformSaltConfig = {
   serviceProfileId: "acme.identity",
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   applicationId: "example-app",
-  networkId: "zera-mainnet",
+  networkId: "kalvora-mainnet",
   tablePrefix: "acme_id",
 };
 
@@ -42,7 +42,7 @@ describe("platform salt migration", () => {
     expect(sql).toContain("restore its original public salt from backup");
     // The namespace is pinned to this platform.
     expect(sql).toContain("application_id = 'example-app'");
-    expect(sql).toContain("network_id = 'zera-mainnet'");
+    expect(sql).toContain("network_id = 'kalvora-mainnet'");
   });
 
   it("mints the salt in the database and refuses the removed adoption option", () => {

@@ -1,7 +1,7 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { derivePublicIdentity } from "../src/index.js";
-import { zeraEd25519Codec, zeraEd25519ExternalSalt } from "../src/chains/zera.js";
+import { kalvoraEd25519Codec, kalvoraEd25519ExternalSalt } from "../src/chains/kalvora.js";
 import {
   WALLET_VAULT_FORMAT,
   createWalletVault,
@@ -21,10 +21,10 @@ const walletPassword = encoder.encode("correct horse battery staple etc");
 const vaultPassword = encoder.encode("vault unlock passphrase, long enough");
 const newVaultPassword = encoder.encode("a different vault passphrase entirely");
 const salt = new Uint8Array(32).fill(9);
-const context = { applicationId: "democracy-os", networkId: "zera-mainnet" } as const;
+const context = { applicationId: "democracy-os", networkId: "kalvora-mainnet" } as const;
 
 const credentials = {
-  profile: zeraEd25519ExternalSalt,
+  profile: kalvoraEd25519ExternalSalt,
   username,
   password: walletPassword,
   context,
@@ -85,8 +85,8 @@ describe("vault round trip", () => {
   it("preserves the address the credentials already derived", () => {
     expect(vault.address).toBe(derivedAddress);
     expect(vault.format).toBe(WALLET_VAULT_FORMAT);
-    expect(vault.profileId).toBe(zeraEd25519ExternalSalt.id);
-    expect(vault.codecId).toBe(zeraEd25519Codec.id);
+    expect(vault.profileId).toBe(kalvoraEd25519ExternalSalt.id);
+    expect(vault.codecId).toBe(kalvoraEd25519Codec.id);
   });
 
   it("stores no plaintext secret", () => {
@@ -101,7 +101,7 @@ describe("vault round trip", () => {
     const result = await openWalletVaultWithPassword(
       vault,
       vaultPassword,
-      zeraEd25519Codec,
+      kalvoraEd25519Codec,
       (wallet) => ({
         address: wallet.identity.address,
         publicKeyBytes: wallet.identity.publicKeyBytes,
@@ -116,7 +116,7 @@ describe("vault round trip", () => {
     const address = await openWalletVaultWithRecoveryCode(
       vault,
       recoveryCode,
-      zeraEd25519Codec,
+      kalvoraEd25519Codec,
       (wallet) => wallet.identity.address,
     );
     expect(address).toBe(derivedAddress);
@@ -124,7 +124,7 @@ describe("vault round trip", () => {
 
   it("closes the wallet scope when the callback returns", async () => {
     let escaped: { signExactMessageUnsafe: (m: Uint8Array) => Uint8Array } | undefined;
-    await openWalletVaultWithRecoveryCode(vault, recoveryCode, zeraEd25519Codec, (wallet) => {
+    await openWalletVaultWithRecoveryCode(vault, recoveryCode, kalvoraEd25519Codec, (wallet) => {
       escaped = wallet;
       return null;
     });
@@ -140,13 +140,13 @@ describe("vault rejects the wrong secret or a tampered envelope", () => {
       openWalletVaultWithPassword(
         vault,
         encoder.encode("not the vault passphrase at all!!"),
-        zeraEd25519Codec,
+        kalvoraEd25519Codec,
         () => null,
       ),
     ).rejects.toThrowError(expect.objectContaining({ code: "vault-authentication-failed" }));
 
     await expect(
-      openWalletVaultWithRecoveryCode(vault, generateRecoveryCode(), zeraEd25519Codec, () => null),
+      openWalletVaultWithRecoveryCode(vault, generateRecoveryCode(), kalvoraEd25519Codec, () => null),
     ).rejects.toThrowError(expect.objectContaining({ code: "vault-authentication-failed" }));
   }, 120_000);
 
@@ -157,7 +157,7 @@ describe("vault rejects the wrong secret or a tampered envelope", () => {
         openWalletVaultWithRecoveryCode(
           tampered as WalletVault,
           recoveryCode,
-          zeraEd25519Codec,
+          kalvoraEd25519Codec,
           () => null,
         ),
       ).rejects.toThrowError(expect.objectContaining({ code: "vault-authentication-failed" }));
@@ -171,7 +171,7 @@ describe("vault rejects the wrong secret or a tampered envelope", () => {
       recovery: { ...vault.recovery, ciphertextHex: flip(vault.recovery.ciphertextHex) },
     };
     await expect(
-      openWalletVaultWithRecoveryCode(tampered, recoveryCode, zeraEd25519Codec, () => null),
+      openWalletVaultWithRecoveryCode(tampered, recoveryCode, kalvoraEd25519Codec, () => null),
     ).rejects.toThrowError(expect.objectContaining({ code: "vault-authentication-failed" }));
   }, 120_000);
 
@@ -204,7 +204,7 @@ describe("changing the password keeps the wallet", () => {
       await openWalletVaultWithPassword(
         rotated,
         newVaultPassword,
-        zeraEd25519Codec,
+        kalvoraEd25519Codec,
         (w) => w.identity.address,
       ),
     ).toBe(derivedAddress);
@@ -215,13 +215,13 @@ describe("changing the password keeps the wallet", () => {
       await openWalletVaultWithRecoveryCode(
         rotated,
         recoveryCode,
-        zeraEd25519Codec,
+        kalvoraEd25519Codec,
         (w) => w.identity.address,
       ),
     ).toBe(derivedAddress);
 
     await expect(
-      openWalletVaultWithPassword(rotated, vaultPassword, zeraEd25519Codec, () => null),
+      openWalletVaultWithPassword(rotated, vaultPassword, kalvoraEd25519Codec, () => null),
     ).rejects.toThrowError(expect.objectContaining({ code: "vault-authentication-failed" }));
   }, 180_000);
 
@@ -237,7 +237,7 @@ describe("changing the password keeps the wallet", () => {
       await openWalletVaultWithPassword(
         rotated,
         newVaultPassword,
-        zeraEd25519Codec,
+        kalvoraEd25519Codec,
         (w) => w.identity.address,
       ),
     ).toBe(derivedAddress);
@@ -250,7 +250,7 @@ describe("createWalletVault input validation", () => {
     for (const shortPassword of [encoder.encode("too-short"), encoder.encode("🔐".repeat(9))]) {
       await expect(
         createWalletVault({
-          profile: zeraEd25519ExternalSalt,
+          profile: kalvoraEd25519ExternalSalt,
           context,
           username,
           password: shortPassword,
@@ -266,7 +266,7 @@ describe("createWalletVault input validation", () => {
   it("requires a 32-byte seed", async () => {
     await expect(
       createWalletVault({
-        profile: zeraEd25519ExternalSalt,
+        profile: kalvoraEd25519ExternalSalt,
         context,
         username,
         password: vaultPassword,

@@ -29,6 +29,21 @@ export type ProfileDomains = Readonly<{
   salt?: string;
 }>;
 
+/**
+ * How a chain turns the scrypt output into its wallet key.
+ *
+ * The core treats this as opaque: it hands `deriveKey` the scrypt output as a
+ * master seed, zeroes that seed afterwards, and requires exactly 32 bytes
+ * back. `id` names the step (for example the scheme and path) so it can be
+ * recorded and pinned; like every other profile field, changing the step is a
+ * new profile, never an edit.
+ */
+export type KeyDerivation = Readonly<{
+  id: string;
+  /** Must not retain or mutate `masterSeed`. The result is the core's to zero. */
+  deriveKey(masterSeed: Uint8Array): Uint8Array;
+}>;
+
 export type DerivationProfile = Readonly<{
   id: string;
   curve: "ed25519";
@@ -37,6 +52,12 @@ export type DerivationProfile = Readonly<{
   saltPolicy: SaltPolicy;
   kdf: Readonly<{ N: number; r: number; p: number; dkLen: 32 }>;
   domains: ProfileDomains;
+  /**
+   * Optional chain-supplied step from the 32-byte scrypt output to the 32-byte
+   * Ed25519 private key, such as HD derivation at the chain's own path. When
+   * absent, the scrypt output is the private key.
+   */
+  keyDerivation?: KeyDerivation;
   codec: IdentityCodec;
 }>;
 
@@ -112,8 +133,28 @@ export function defineDerivationProfile(profile: DerivationProfile): DerivationP
     throw new DerivationError("Unknown salt policy.", "invalid-profile");
   }
 
+  if (profile.keyDerivation !== undefined) {
+    const { keyDerivation } = profile;
+    if (
+      typeof keyDerivation !== "object" ||
+      keyDerivation === null ||
+      typeof keyDerivation.id !== "string" ||
+      keyDerivation.id.length === 0 ||
+      keyDerivation.id.length > 200 ||
+      typeof keyDerivation.deriveKey !== "function"
+    ) {
+      throw new DerivationError(
+        "Profile keyDerivation must have a 1-200 character id and a deriveKey function.",
+        "invalid-profile",
+      );
+    }
+  }
+
   return Object.freeze({
     ...profile,
+    ...(profile.keyDerivation === undefined
+      ? {}
+      : { keyDerivation: Object.freeze({ ...profile.keyDerivation }) }),
     kdf: Object.freeze({ ...profile.kdf }),
     domains: Object.freeze({ ...profile.domains }),
   });

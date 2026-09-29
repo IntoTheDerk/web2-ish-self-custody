@@ -1,6 +1,6 @@
 {
   "name": "web2-ish-self-custody",
-  "version": "0.9.0",
+  "version": "0.10.0-alpha.0",
   "description": "Generic deterministic Ed25519 wallet derivation and a portable identity service, with pluggable per-chain address codecs.",
   "repository": {
     "type": "git",
@@ -17,9 +17,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./chains/zera": {
-      "types": "./dist/chains/zera.d.ts",
-      "import": "./dist/chains/zera.js"
+    "./chains/kalvora": {
+      "types": "./dist/chains/kalvora.d.ts",
+      "import": "./dist/chains/kalvora.js"
     },
     "./server": {
       "types": "./dist/server/index.d.ts",
@@ -38,7 +38,7 @@
     "dist",
     "docs",
     "scripts/requirements-vector-verifier-ci.txt",
-    "scripts/verify_zera_external_salt_vector.py",
+    "scripts/verify_kalvora_external_salt_vector.py",
     "vectors",
     "README.md",
     "SECURITY.md",
@@ -50,7 +50,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:server:integration": "vitest run test/server/service.integration.test.ts",
-    "verify:vectors:python": "python3 scripts/verify_zera_external_salt_vector.py",
+    "verify:vectors:python": "python3 scripts/verify_kalvora_external_salt_vector.py",
     "prepare": "npm run build",
     "prepack": "npm run verify",
     "verify": "npm run typecheck && npm test && npm run verify:vectors:python && npm run build",
@@ -62,7 +62,7 @@
     "deterministic",
     "scrypt",
     "ed25519",
-    "zera",
+    "kalvora",
     "browser"
   ],
   "license": "MIT",
@@ -74,8 +74,17 @@
     "@noble/hashes": "2.0.1",
     "bs58": "6.0.0"
   },
+  "peerDependencies": {
+    "kalvora.js": "0.0.1-alpha.0"
+  },
+  "peerDependenciesMeta": {
+    "kalvora.js": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/pg": "8.21.0",
+    "kalvora.js": "file:vendor/kalvora.js-0.0.1-alpha.0.tgz",
     "pg": "8.22.0",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
