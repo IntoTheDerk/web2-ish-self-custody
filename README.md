@@ -44,7 +44,9 @@ Choose `walletMode: "per-account-deterministic"` to recreate a signing identity
 from credentials and a saved account salt, or `"random-vault"` to encrypt a random
 key and preserve it through password changes. These identities can be used
 without holding funds; the platform handles fee sponsorship separately.
-See the [complete enrollment, password-change, and recovery guide](docs/WALLET_MODES.md).
+The SDK supports password changes only for vaults. Platforms using deterministic
+wallets implement their own password-change and account-recovery workflows.
+See the [account wallet modes guide](docs/WALLET_MODES.md).
 
 - **Client-side keys.** Passwords, plaintext seeds, and recovery codes stay on
   the client. Signers exist only while a callback runs.
@@ -342,8 +344,9 @@ Limits worth stating plainly:
   deterministic wallet. A strong vault password still matters.
 - The vault header (username, address, public key, application, network) is
   readable by whoever stores it. Only the seed and data key are encrypted.
-- The package does not persist, transmit, or back up vaults. Storage, access
-  control, and delivery of the recovery code to the user are the host's job.
+- Client helpers return vaults without persisting or transmitting them. The
+  optional identity service stores encrypted vaults in `random-vault` mode;
+  the host supplies access authorization, backups, and recovery-code delivery.
 
 See [Encrypted-vault integrations](docs/INTEGRATION.md#encrypted-vault-integrations).
 
@@ -752,6 +755,8 @@ holds public identity material and, in vault mode, encrypted vaults.
   password; the only recovery path is the recovery code of a wallet vault
   created *before* the password was lost.
 - Recover a vault whose password and recovery code are both lost.
+- Manage deterministic password changes, key reassignment, or account recovery.
+  Integrating platforms implement those workflows themselves.
 - Preserve a derived wallet when the username, password, context, salt, or
   profile changes. (A vault preserves the seed across password changes, but
   re-deriving from new credentials still yields a different wallet.)

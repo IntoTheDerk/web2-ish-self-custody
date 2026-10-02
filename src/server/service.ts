@@ -4,7 +4,6 @@ import { fingerprint, utf8 } from "../encoding.js";
 import { normalizeUsername as normalizeSdkUsername } from "../normalization.js";
 import {
   buildChallengeMessage,
-  buildWalletReplacementMessage,
   canonicalWalletIdentity,
   verifyChallengeSignature,
 } from "./challenge.js";
@@ -474,7 +473,6 @@ export function createIdentityService(
     action: string,
     metadata: Readonly<Record<string, string | number | boolean | null>>,
     context: RequestContext | undefined,
-    generation: number,
   ): Promise<IssuedSession> => {
     const token = generateSessionToken();
     const rows = await sql.query(
@@ -482,18 +480,17 @@ export function createIdentityService(
             new_session AS (
               INSERT INTO ${p}_sessions (
                 account_id, token_hash, issued_at, expires_at, last_seen_at,
-                ip_hash, user_agent_hash, wallet_generation
+                ip_hash, user_agent_hash
               )
               SELECT $2::uuid, $3::text, clock.at,
                      date_trunc('milliseconds', clock.at + (interval '1 second' * $4::double precision)),
-                     clock.at, $5::text, $6::text, a.wallet_generation
-              FROM clock, ${p}_accounts a
-              WHERE a.id = $2::uuid AND a.wallet_generation = $9 AND a.status = 'active'
+                     clock.at, $5::text, $6::text
+              FROM clock
               RETURNING id, account_id, issued_at, expires_at, last_seen_at
             ),
             logged AS (
               INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-              SELECT new_session.account_id, $7::text, $8::jsonb, clock.at FROM new_session, clock
+              SELECT $2::uuid, $7::text, $8::jsonb, clock.at FROM clock
               RETURNING 1
             )
        SELECT id, account_id, issued_at, expires_at, last_seen_at FROM new_session`,
@@ -506,7 +503,6 @@ export function createIdentityService(
         sanitizeContextHash(context?.userAgentHash),
         action,
         metadataJson(metadata),
-        generation,
       ],
     );
     const row = requireSingleRow(
@@ -544,7 +540,7 @@ export function createIdentityService(
               w.address_normalized, w.public_key, w.fingerprint, w.is_primary,
               w.created_at
          FROM ${p}_accounts a
-         LEFT JOIN ${p}_account_wallets w ON w.account_id = a.id AND w.revoked_at IS NULL
+         LEFT JOIN ${p}_account_wallets w ON w.account_id = a.id
         WHERE a.id = $1::uuid AND a.service_profile_id = $2::text
         ORDER BY w.is_primary DESC NULLS LAST, w.created_at ASC`,
       [id, serviceProfileId],
@@ -992,11 +988,10 @@ export function createIdentityService(
                 a.status AS account_status,
                 a.created_at AS account_created_at,
                 a.updated_at AS account_updated_at,
-                a.wallet_generation AS wallet_generation,
                 w.public_key AS wallet_public_key,
                 w.address AS wallet_address
            FROM ${p}_accounts a
-           LEFT JOIN ${p}_account_wallets w ON w.account_id = a.id AND w.revoked_at IS NULL
+           LEFT JOIN ${p}_account_wallets w ON w.account_id = a.id
           WHERE a.service_profile_id = $1::text AND a.username_normalized = $2::text
           ORDER BY w.is_primary DESC NULLS LAST, w.created_at ASC`,
         [serviceProfileId, usernameNormalized],
@@ -1051,7 +1046,6 @@ export function createIdentityService(
         "account.login",
         { profileId: resolved.profile.id, challengePurpose: challenge.purpose },
         context,
-        integerColumn(first, "wallet_generation"),
       );
       return Object.freeze({ account, session });
     },
@@ -1072,7 +1066,7 @@ export function createIdentityService(
             WHERE token_hash = $1::text
               AND revoked_at IS NULL
               AND expires_at > COALESCE($2::timestamptz, now())
-            RETURNING id, account_id, issued_at, expires_at, last_seen_at, wallet_generation
+            RETURNING id, account_id, issued_at, expires_at, last_seen_at
          )
          SELECT t.id AS session_id,
                 t.account_id AS session_account_id,
@@ -1090,8 +1084,7 @@ export function createIdentityService(
                 a.updated_at AS account_updated_at
            FROM touched t
            JOIN ${p}_accounts a
-             ON a.id = t.account_id AND a.service_profile_id = $3::text
-                AND a.wallet_generation = t.wallet_generation`,
+             ON a.id = t.account_id AND a.service_profile_id = $3::text`,
         [tokenHash, nowParam, serviceProfileId],
       );
       const row = optionalRow(rows);
@@ -1215,34 +1208,6 @@ export function createIdentityService(
     async updateWalletVault(token, vault, expectedRevision, context) {
       await service.authenticate(token, context);
       return accountWallets.updateVault(token, vault, expectedRevision, requestNow(context));
-    },
-
-    async createWalletReplacementChallenge(username, wallet, context) {
-      if (resolved.walletMode !== "per-account-deterministic") {
-        throw new IdentityError("Wallet replacement requires per-account deterministic mode.", "invalid-request");
-      }
-      const target = canonicalWalletIdentity(resolved.profile.codec, wallet);
-      const challenge = await service.createChallenge(username, "rotation", context);
-      return Object.freeze({ ...challenge, message: buildWalletReplacementMessage(challenge.message, target) });
-    },
-
-    async replaceWallet(input, context) {
-      const username = normalizeUsername(input.username);
-      const challenge = await consumeChallenge(input.challengeId, "rotation", context);
-      if (challenge.usernameNormalized !== username) {
-        throw new IdentityError("Challenge belongs to a different account.", "invalid-signature");
-      }
-      return mapWallet(await accountWallets.replace({ ...input, username }, challengeMessageFor(challenge), requestNow(context)), "");
-    },
-
-    async replaceWalletAfterRecovery(input, context) {
-      const account = await loadAccount(input.accountId);
-      const challenge = await consumeChallenge(input.challengeId, "rotation", context);
-      if (challenge.usernameNormalized !== account.usernameNormalized) {
-        throw new IdentityError("Challenge belongs to a different account.", "invalid-signature");
-      }
-      return mapWallet(await accountWallets.replace({ ...input, username: account.usernameNormalized },
-        challengeMessageFor(challenge), requestNow(context), account.id), "");
     },
 
     async updateAccount(

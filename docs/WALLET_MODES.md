@@ -9,7 +9,7 @@ Choose one mode per identity-service namespace:
 
 | `walletMode` | Key creation | Password change | What the platform saves |
 | --- | --- | --- | --- |
-| `per-account-deterministic` | Password, username, context, and a random account salt | Enroll a new wallet; account UUID stays the same | Public account setup and enrolled public keys |
+| `per-account-deterministic` | Password, username, context, and a random account salt | Platform implements its own flow; a different password derives a different wallet | Public account setup and enrolled public keys |
 | `random-vault` | Random 32-byte Ed25519 seed generated on the client | Re-encrypt the same wallet | Public account setup and encrypted vault |
 
 Omitting `walletMode` preserves the older `service-deterministic` behavior.
@@ -87,55 +87,20 @@ run expensive derivation in a dedicated worker as described in
 Another device obtains the same setup from a fresh challenge and repeats this
 flow. There is no encrypted key file to synchronize in deterministic mode.
 
-### Password change and replacement
+### Platform-owned password changes and recovery
 
-1. Derive the proposed identity with the **new** password and existing setup.
-2. Call `createWalletReplacementChallenge(username, newIdentity)` or
-   `POST /identity/wallet-replacement-challenges` with `{ username, address,
-   publicKey }`.
-3. Check the returned replacement message against the intended new identity.
-   Sign its exact UTF-8 bytes using both the old and new wallets, in separate
-   synchronous callbacks.
-4. Call `replaceWallet` / `POST /identity/wallet-replacements` with `{ username,
-   address, publicKey, challengeId, currentSignature, signature }`.
-   `currentSignature` is from the old key; `signature` is from the new key.
-5. Sign in again with the new wallet. Discard the old password only after a
-   successful server response, or check which key is active after a lost response.
+The SDK provides no password-change, wallet-replacement, or account-recovery
+workflow for deterministic mode. Calling `withAccountWallet` with a different
+password derives a different wallet; it does not update the enrolled account
+or authorize that new key to sign in.
 
-The replacement message binds the new address and public key. It is single-use.
-The SQL mutation retires all old active keys, enrolls the new primary key,
-increments the account's wallet generation, revokes sessions, and records an
-audit event atomically. An overlapping login using the previous generation
-cannot create a usable session. Retired keys remain in the database for audit
-but disappear from `listWallets` and cannot authorize new sessions. Re-enrolling
-an address already recorded in this service is rejected.
-
-The platform must update any other permissions that refer to the old key,
-including on-chain authorization where applicable. Retiring a key in this
-identity service does not revoke it on a blockchain or move assets.
-
-### Forgotten password
-
-The platform verifies recovery through its own account-recovery process. Once
-authorized, trusted server code calls:
-
-```ts
-await service.replaceWalletAfterRecovery({
-  accountId: verifiedAccount.id,
-  address: newIdentity.address,
-  publicKey: newIdentity.publicKey,
-  challengeId: replacementChallenge.id,
-  signature: newWalletSignature,
-});
-```
-
-This requires the new wallet's proof and a matching account challenge. It has
-**no HTTP route**. Never expose it using an account ID or email verification
-claim supplied by the requester without independently checking ownership. In
-particular, the existing registration-email verification endpoint is not an
-account-recovery grant. This operation replaces the lost wallet; it does not
-recover the old key. Platform authority to reassign signing identities is an
-explicit part of this mode's trust model.
+A platform that wants these features implements its own ownership checks,
+account-to-key reassignment, session handling, and updates to any permissions
+that reference the old key, including on-chain authorization where applicable.
+The platform may keep its own account UUID while assigning a new signing key.
+A forgotten password cannot be reconstructed by the SDK, and assigning a new
+key does not recover the old one. The SDK's password-change and recovery-code
+helpers apply only to encrypted vaults.
 
 ## Random wallet and encrypted vault
 

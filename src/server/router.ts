@@ -724,30 +724,11 @@ async function handleUpdateVault(ctx: RouterContext, request: Request): Promise<
   return jsonResponse(await ctx.service.updateWalletVault(token, readVault(body["vault"]), body["expectedRevision"], requestContext(ctx, request)));
 }
 
-async function handleReplacementChallenge(ctx: RouterContext, request: Request): Promise<Response> {
-  const body = await readJsonObject(request, ["username", "address", "publicKey"]);
-  return jsonResponse(await ctx.service.createWalletReplacementChallenge(requireString(body, "username"), {
-    address: requireString(body, "address"), publicKey: requireString(body, "publicKey"),
-  }, requestContext(ctx, request)));
-}
-
-async function handleReplaceWallet(ctx: RouterContext, request: Request): Promise<Response> {
-  const body = await readJsonObject(request, ["username", "address", "publicKey", "challengeId", "signature", "currentSignature"]);
-  const wallet = await ctx.service.replaceWallet({
-    username: requireString(body, "username"), address: requireString(body, "address"),
-    publicKey: requireString(body, "publicKey"), challengeId: requireString(body, "challengeId"),
-    signature: requireString(body, "signature"), currentSignature: requireString(body, "currentSignature"),
-  }, requestContext(ctx, request));
-  return jsonResponse({ wallet }, 200, ctx.useCookies ? { "Set-Cookie": clearSessionCookie(ctx) } : {});
-}
-
 const routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
   string,
   ReadonlyMap<string, RouteHandler>
 >([
   ["/wallet-vault", new Map<string, RouteHandler>([["POST", handleReadVault], ["PUT", handleUpdateVault]])],
-  ["/wallet-replacement-challenges", new Map<string, RouteHandler>([["POST", handleReplacementChallenge]])],
-  ["/wallet-replacements", new Map<string, RouteHandler>([["POST", handleReplaceWallet]])],
   ["/profile", new Map<string, RouteHandler>([["GET", handleProfile]])],
   ["/challenges", new Map<string, RouteHandler>([["POST", handleCreateChallenge]])],
   ["/accounts", new Map<string, RouteHandler>([["POST", handleRegister]])],

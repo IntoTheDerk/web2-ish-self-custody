@@ -22,8 +22,6 @@ export type {
 export {
   CHALLENGE_DOMAIN,
   buildChallengeMessage,
-  buildWalletReplacementMessage,
-  WALLET_REPLACEMENT_DOMAIN,
   canonicalWalletIdentity,
   verifyChallengeSignature,
 } from "./challenge.js";
@@ -118,5 +116,4 @@ export type {
   ResolvedIdentityServiceConfig,
   ServiceWalletMode,
   StoredWalletVault,
-  WalletReplacementInput,
 } from "./types.js";

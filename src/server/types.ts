@@ -4,17 +4,6 @@ import type { WalletVault } from "../vault.js";
 
 export type ServiceWalletMode = AccountWalletMode | "service-deterministic";
 export type StoredWalletVault = Readonly<{ vault: WalletVault; revision: number }>;
-export type WalletReplacementInput = Readonly<{
-  username: string;
-  address: string;
-  publicKey: string;
-  challengeId: string;
-  /** Proof by the proposed new wallet, over the bound replacement message. */
-  signature: string;
-  /** Proof by the currently enrolled wallet, over the same message. */
-  currentSignature: string;
-}>;
-
 export type ChallengePurpose = "registration" | "login" | "rotation";
 
 export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([

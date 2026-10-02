@@ -10,9 +10,11 @@ sessions. It is the only stateful part of this package.
 That is the legacy default. New deployments can select
 `walletMode: "per-account-deterministic"` or `"random-vault"`. See
 [Account wallet modes](WALLET_MODES.md) for configuration, new client helpers,
-authorized vault download/update routes, signed wallet replacement, and the
-server-only recovery method. `/profile` reports `walletMode`; in either new mode
-use `/challenges`'s `walletSetup`, not the service salt, to create the wallet.
+authorized vault download/update routes, and vault password changes and recovery.
+Deterministic password changes, key reassignment, and account recovery are the
+integrating platform's responsibility; this service provides no such workflow.
+`/profile` reports `walletMode`; in either new mode use `/challenges`'s
+`walletSetup`, not the service salt, to create the wallet.
 
 It is chain-agnostic. The deployment hands it a `DerivationProfile` object, and
 every address and public-key operation runs through that profile's

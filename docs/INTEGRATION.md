@@ -151,8 +151,9 @@ password-plus-recovery-code envelope. The profile there supplies the codec, the
 profile id recorded in the envelope, and the scrypt cost used for the password
 wrapper; the seed itself is not derived from anything.
 
-**Your users have credential-derived wallets and need password changes or a
-recovery path.** Enrol each wallet with `createWalletVaultFromCredentials` while
+**Your users have credential-derived wallets and choose vault storage to keep
+the same key through password changes.** Enrol each wallet with
+`createWalletVaultFromCredentials` while
 the user can still derive it. The seed is derived, sealed, and zeroed inside
 that call, and the address the user already has is preserved. From then on the
 vault, not re-derivation, is the source of the seed: sign through
@@ -160,6 +161,10 @@ vault, not re-derivation, is the source of the seed: sign through
 the password with `rewrapWalletVaultPassword`. Once a vault password has been
 changed, deriving from the new credentials produces a *different* wallet, so the
 client must open the vault instead.
+
+This adopts vault storage for that wallet. An integration that stays with
+deterministic derivation implements its own password-change, key-reassignment,
+and account-recovery workflows; the SDK does not provide them.
 
 In both cases:
 
@@ -170,8 +175,9 @@ In both cases:
   (username, address, public key, application, network, profile and codec ids)
   is readable and whose seed and data key are not. Run `parseWalletVault` on
   anything read back from storage before using it. The host never needs the
-  vault password or the recovery code, and the identity server module in
-  `web2-ish-self-custody/server` does not store vaults.
+  vault password or the recovery code. The optional identity server in
+  `web2-ish-self-custody/server` can store encrypted vaults in `random-vault`
+  mode; see [Account wallet modes](WALLET_MODES.md) for its authorized routes.
 - Show the recovery code to the user once, at creation. The vault does not keep
   it, and `rewrapWalletVaultPassword` re-seals with whichever code it is given,
   so pass the user's existing code on a password change to keep their kit valid.
@@ -230,7 +236,7 @@ verification, and opaque sessions. It is the only part of this package that
 touches a database. It never receives a plaintext password or seed; the optional
 random-vault mode also stores encrypted vaults. New deployments should choose a
 mode using [the account-wallet integration guide](WALLET_MODES.md), which covers
-per-account salts, password changes, multi-device access, and recovery.
+per-account salts, multi-device access, and vault password changes and recovery.
 
 Configuration takes the profile object, not an id:
 

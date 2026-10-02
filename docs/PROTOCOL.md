@@ -455,35 +455,14 @@ and seals it using the existing wallet-vault-v1 envelope. The profile supplies
 the codec and wrapper KDF parameters. Its deterministic entropy transcript and
 optional key-derivation step are not applied to this random seed.
 
-### Wallet replacement message v1
+Password changes are supported through vault rewrapping, which preserves the
+encrypted seed and its identity. Deterministic derivation with a different
+password produces a different wallet; the SDK defines no protocol for
+reassigning an account to that key or recovering a deterministic account.
+Those workflows belong to the integrating platform.
 
-`buildWalletReplacementMessage(baseChallenge, canonicalNewWallet)` emits these
-UTF-8 lines without a final newline:
-
-```text
-web2-ish-self-custody wallet replacement v1
-web2-ish-self-custody auth challenge v1
-<serviceProfileId>
-<applicationId>
-<networkId>
-rotation
-<normalizedUsername>
-<nonceHex>
-<expiresAt ISO string>
-<canonical new address>
-<canonical new public-key identifier>
-```
-
-The last ten lines consist of the existing eight-line challenge plus the two
-target fields. Both the current and proposed keys sign the whole eleven-line
-message using Ed25519. The service consumes only a `rotation` challenge and
-reconstructs the target binding before verification. A normal replacement
-requires both proofs. The server-only recovery operation permits independently
-authorized platform recovery in place of the old-key proof, while still
-requiring the new-key proof. No existing challenge transcript is redefined.
-
-See [WALLET_MODES.md](WALLET_MODES.md) for account/session retirement, storage,
-multi-device access, and the platform's authorization responsibilities.
+See [WALLET_MODES.md](WALLET_MODES.md) for storage, multi-device access, vault
+password changes, and the platform's authorization responsibilities.
 
 ## Independent vector verification
 

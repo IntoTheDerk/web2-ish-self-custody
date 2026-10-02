@@ -409,11 +409,8 @@ export function identityMigrations(
           `BEFORE UPDATE OR DELETE ON ${p}_wallet_setups FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`),
         createTriggerOnce(`${p}_wallet_setups_no_truncate`,
           `BEFORE TRUNCATE ON ${p}_wallet_setups FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`),
-        `ALTER TABLE ${p}_account_wallets ADD COLUMN IF NOT EXISTS revoked_at timestamptz,
-           ADD COLUMN IF NOT EXISTS vault jsonb,
+        `ALTER TABLE ${p}_account_wallets ADD COLUMN IF NOT EXISTS vault jsonb,
            ADD COLUMN IF NOT EXISTS vault_revision integer NOT NULL DEFAULT 1`,
-        `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS wallet_generation integer NOT NULL DEFAULT 0`,
-        `ALTER TABLE ${p}_sessions ADD COLUMN IF NOT EXISTS wallet_generation integer NOT NULL DEFAULT 0`,
       ]),
     }),
   ]);

@@ -13,7 +13,6 @@ import type {
   RequestContext,
   ResolvedIdentityServiceConfig,
   StoredWalletVault,
-  WalletReplacementInput,
 } from "./types.js";
 import type { WalletVault } from "../vault.js";
 
@@ -37,14 +36,6 @@ export interface IdentityService {
 
   /** Authenticated compare-and-swap: prevents overwriting a newer password change. */
   updateWalletVault(token: string, vault: WalletVault, expectedRevision: number, context?: RequestContext): Promise<StoredWalletVault>;
-
-  createWalletReplacementChallenge(username: string, wallet: Readonly<{ address: string; publicKey: string }>, context?: RequestContext): Promise<IdentityChallenge>;
-
-  /** Retires the old signing key and sessions, while preserving the platform account. */
-  replaceWallet(input: WalletReplacementInput, context?: RequestContext): Promise<IdentityWallet>;
-
-  /** Server-only. Call ONLY after the platform has independently authorized recovery of accountId. */
-  replaceWalletAfterRecovery(input: Omit<WalletReplacementInput, "username" | "currentSignature"> & { accountId: string }, context?: RequestContext): Promise<IdentityWallet>;
 
   /**
    * Issues a single-use challenge. Returns a challenge for unknown usernames
@@ -83,7 +74,6 @@ export interface IdentityService {
     context?: RequestContext,
   ): Promise<IdentityAccount>;
 
-  /** Active wallets only; retired keys remain in the database for audit. */
   listWallets(accountId: string): Promise<readonly IdentityWallet[]>;
 
   /**

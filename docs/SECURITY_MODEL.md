@@ -6,9 +6,10 @@ The SDK permits a client to recreate a signing identity from credentials without
 
 Alternatively, random-vault mode encrypts a randomly generated seed. See
 [Wallet modes](WALLET_MODES.md) for its storage and access-control requirements.
-For signing-only accounts, deterministic key replacement preserves the platform
-account and retires the old key; it does not recover that key. The platform's
-authority to authorize account recovery is part of the trust model.
+Password changes and recovery-code unlocking are vault features. Deterministic
+mode has no SDK-managed password-change, key-replacement, or account-recovery
+flow. A platform that reassigns an account to a new key owns that authorization
+and the retirement of the old key; reassignment does not recover the old key.
 
 ## Fundamental tradeoff
 
@@ -36,7 +37,7 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
 - Lost vault password and lost recovery code: permanent wallet loss.
-- Password or username change: different wallet identity.
+- Password or username change during deterministic derivation: different wallet identity; no automatic account update.
 - Profile/context change: different wallet identity.
 - External salt loss, rotation, or substitution: different wallet identity.
 - Weak password: feasible offline wallet recovery by an attacker.

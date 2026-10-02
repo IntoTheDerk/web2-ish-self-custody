@@ -2,7 +2,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRandomAccountWallet, withAccountWallet, openWalletVaultWithPassword, rewrapWalletVaultPassword, type AccountWalletSetup } from "../../src/index.js";
 import { kalvoraEd25519ExternalSalt as profile } from "../../src/chains/kalvora.js";
-import { createIdentityService, createIdentityRouter, pgDriver, type IdentityService, type SqlDriver, type SqlRow, type SqlParameter, type ServiceWalletMode } from "../../src/server/index.js";
+import { createIdentityService, createIdentityRouter, pgDriver, type IdentityService, type SqlDriver, type SqlRow, type ServiceWalletMode } from "../../src/server/index.js";
 
 declare const process: { readonly env: Readonly<Record<string, string | undefined>> };
 const url = process.env["W2SC_TEST_DATABASE_URL"];
@@ -79,93 +79,27 @@ describe.skipIf(!url)("account wallet modes on PostgreSQL", () => {
     expect((await client.query(`SELECT id FROM ${prefixes[0]}_wallet_setups WHERE username_normalized = $1`, ["unprovisioned-user"])).rows).toEqual([]);
   });
 
-  it("binds replacement to the new key, revokes old sessions and keys, and preserves the account", async () => {
-    const { setup, registered, identity } = await register("rotate-user");
+  it("does not reassign a deterministic account when its password input changes", async () => {
+    const { setup, registered, identity } = await register("unchanged-user");
     const next = await withAccountWallet(setup, profile, nextPassword, w => w.identity);
-    const challenge = await deterministic.createWalletReplacementChallenge("rotate-user", next);
-    const input = { username: "rotate-user", address: next.address, publicKey: next.publicKey, challengeId: challenge.id,
-      signature: await sign(setup, challenge.message, nextPassword), currentSignature: await sign(setup, challenge.message) };
-    // A different target cannot reuse either proof. Failure consumes that challenge.
-    await expect(deterministic.replaceWallet({ ...input, address: identity.address, publicKey: identity.publicKey })).rejects.toMatchObject({ code: "invalid-signature" });
-    const retry = await deterministic.createWalletReplacementChallenge("rotate-user", next);
-    const rotated = await deterministic.replaceWallet({ ...input, challengeId: retry.id,
-      signature: await sign(setup, retry.message, nextPassword), currentSignature: await sign(setup, retry.message) });
-    expect(rotated.accountId).toBe(registered.account.id);
-    expect((await deterministic.listWallets(registered.account.id)).map(w => w.address)).toEqual([next.address]);
-    await expect(deterministic.authenticate(registered.session.token)).rejects.toMatchObject({ code: "session-not-found" });
-    const oldLogin = await deterministic.createChallenge("rotate-user", "login");
-    await expect(deterministic.login({ username: "rotate-user", challengeId: oldLogin.id, signature: await sign(setup, oldLogin.message) })).rejects.toMatchObject({ code: "invalid-signature" });
-    const login = await deterministic.createChallenge("rotate-user", "login");
-    const loggedIn = await deterministic.login({ username: "rotate-user", challengeId: login.id, signature: await sign(setup, login.message, nextPassword) });
-    expect((await deterministic.authenticate(loggedIn.session.token)).account.id).toBe(registered.account.id);
-    await expect(deterministic.replaceWallet({ ...input, challengeId: retry.id })).rejects.toMatchObject({ code: "challenge-consumed" });
-  });
+    expect(next.address).not.toBe(identity.address);
+    const login = await deterministic.createChallenge("unchanged-user", "login");
+    await expect(deterministic.login({ username: "unchanged-user", challengeId: login.id,
+      signature: await sign(setup, login.message, nextPassword),
+    })).rejects.toMatchObject({ code: "invalid-signature" });
+    expect((await deterministic.listWallets(registered.account.id)).map(w => w.address)).toEqual([identity.address]);
+    const originalLogin = await deterministic.createChallenge("unchanged-user", "login");
+    expect((await deterministic.login({ username: "unchanged-user", challengeId: originalLogin.id,
+      signature: await sign(setup, originalLogin.message),
+    })).account.id).toBe(registered.account.id);
 
-  it("allows platform-authorized recovery with new-key proof but never exposes it as a route", async () => {
-    const { setup, registered } = await register("recover-user");
-    const next = await withAccountWallet(setup, profile, nextPassword, w => w.identity);
-    const challenge = await deterministic.createWalletReplacementChallenge("recover-user", next);
-    const input = { accountId: registered.account.id, address: next.address, publicKey: next.publicKey,
-      challengeId: challenge.id, signature: await sign(setup, challenge.message, nextPassword) };
     const router = createIdentityRouter(deterministic, { useCookies: false });
-    const response = await router(new Request("https://example.test/identity/wallet-replacements/recovery", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
-    }));
-    expect(response.status).toBe(404);
-    expect((await deterministic.replaceWalletAfterRecovery(input)).accountId).toBe(registered.account.id);
+    for (const path of ["wallet-replacement-challenges", "wallet-replacements", "wallet-replacements/recovery"]) {
+      expect((await router(new Request(`https://example.test/identity/${path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      }))).status).toBe(404);
+    }
   });
-
-  it("requires current-wallet proof over HTTP and only permits one concurrent replacement", async () => {
-    const { setup, registered } = await register("race-user");
-    const next = await withAccountWallet(setup, profile, nextPassword, w => w.identity);
-    const router = createIdentityRouter(deterministic, { useCookies: false });
-    const post = (path: string, body: unknown) => router(new Request(`https://example.test/identity/${path}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }));
-    const response = await post("wallet-replacement-challenges", { username: "race-user", address: next.address, publicKey: next.publicKey });
-    expect(response.status).toBe(200);
-    const challenge = await response.json() as { id: string; message: string };
-    const base = { username: "race-user", address: next.address, publicKey: next.publicKey };
-    expect((await post("wallet-replacements", { ...base, challengeId: challenge.id,
-      signature: await sign(setup, challenge.message, nextPassword), currentSignature: "00".repeat(64),
-    })).status).toBe(401);
-    const challenges = await Promise.all([deterministic.createWalletReplacementChallenge("race-user", next), deterministic.createWalletReplacementChallenge("race-user", next)]);
-    const inputs = await Promise.all(challenges.map(async c => ({ ...base, challengeId: c.id,
-      signature: await sign(setup, c.message, nextPassword), currentSignature: await sign(setup, c.message),
-    })));
-    const outcomes = await Promise.all(inputs.map(input => post("wallet-replacements", input)));
-    expect(outcomes.filter(r => r.status === 200)).toHaveLength(1);
-    expect(outcomes.filter(r => r.status === 409 || r.status === 401)).toHaveLength(1);
-    expect((await deterministic.listWallets(registered.account.id)).map(w => w.address)).toEqual([next.address]);
-  }, 20_000);
-
-  it("does not issue a usable old-key session when login overlaps replacement", async () => {
-    const { setup } = await register("overlap-user");
-    let entered!: () => void;
-    let release!: () => void;
-    const atInsert = new Promise<void>(resolve => { entered = resolve; });
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const delayed: SqlDriver = {
-      kind: sql.kind,
-      async query<T extends SqlRow>(text: string, params?: readonly SqlParameter[]): Promise<T[]> {
-        if (params?.includes("account.login")) { entered(); await gate; }
-        return sql.query<T>(text, params);
-      },
-    };
-    const service = createIdentityService(delayed, config(prefixes[0]!, "per-account-deterministic"));
-    const login = await deterministic.createChallenge("overlap-user", "login");
-    const pending = service.login({ username: "overlap-user", challengeId: login.id, signature: await sign(setup, login.message) })
-      .then(result => ({ result }), error => ({ error }));
-    try {
-      await atInsert;
-      const next = await withAccountWallet(setup, profile, nextPassword, w => w.identity);
-      const c = await deterministic.createWalletReplacementChallenge("overlap-user", next);
-      await deterministic.replaceWallet({ username: "overlap-user", address: next.address, publicKey: next.publicKey,
-        challengeId: c.id, signature: await sign(setup, c.message, nextPassword), currentSignature: await sign(setup, c.message),
-      });
-    } finally { release(); }
-    expect(await pending).toMatchObject({ error: { code: "account-not-found" } });
-  }, 20_000);
 
   it("stores vaults, authorizes downloads, and updates the password without changing the signing identity", async () => {
     const challenge = await vaultService.createChallenge("vault-user", "registration");
