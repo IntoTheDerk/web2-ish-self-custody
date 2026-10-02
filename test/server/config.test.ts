@@ -49,6 +49,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationTtlSeconds: 900,
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
+      walletMode: "service-deterministic",
     });
     // The very object, not a copy: the codec identity has to survive resolution
     // or the service would encode addresses with something else.
@@ -76,6 +77,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationTtlSeconds: 900,
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
+      walletMode: "service-deterministic",
     });
     expect(Object.isFrozen(identityServiceDefaults)).toBe(true);
   });
@@ -107,6 +109,13 @@ describe("resolveIdentityServiceConfig defaults", () => {
 });
 
 describe("resolveIdentityServiceConfig profile validation", () => {
+  it("accepts both new modes and refuses unknown modes", () => {
+    for (const walletMode of ["per-account-deterministic", "random-vault"] as const) {
+      expect(resolveIdentityServiceConfig(withOverride({ walletMode })).walletMode).toBe(walletMode);
+    }
+    expectIdentityError(() => resolveIdentityServiceConfig(withOverride({ walletMode: "typo" as never })), "invalid-service-profile");
+  });
+
   it("accepts any external-salt profile, from any chain", () => {
     for (const profile of [kalvoraEd25519ExternalSalt, krypticExternalSalt]) {
       expect(resolveIdentityServiceConfig(withOverride({ profile })).profile).toBe(profile);

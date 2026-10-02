@@ -441,6 +441,50 @@ which normalizes to `jesse@example.com`.
 A refactor that changes these values is wrong. The vector is not updated to
 match an implementation; the implementation is corrected to match the vector.
 
+## Account wallet modes
+
+Account mode changes ownership of the external salt, not the derivation
+transcript. In `per-account-deterministic` mode, the service assigns an immutable
+UUIDv4 account ID and an independent CSPRNG-generated 32-byte public salt before
+enrollment. `walletSetup.publicSaltHex` supplies the exact existing `external-32`
+salt input. The UUID is metadata, not an additional derivation input. Existing
+profile IDs, domain strings, and vectors retain their original meanings.
+
+`random-vault` mode generates a fresh 32-byte Ed25519 seed with secure randomness
+and seals it using the existing wallet-vault-v1 envelope. The profile supplies
+the codec and wrapper KDF parameters. Its deterministic entropy transcript and
+optional key-derivation step are not applied to this random seed.
+
+### Wallet replacement message v1
+
+`buildWalletReplacementMessage(baseChallenge, canonicalNewWallet)` emits these
+UTF-8 lines without a final newline:
+
+```text
+web2-ish-self-custody wallet replacement v1
+web2-ish-self-custody auth challenge v1
+<serviceProfileId>
+<applicationId>
+<networkId>
+rotation
+<normalizedUsername>
+<nonceHex>
+<expiresAt ISO string>
+<canonical new address>
+<canonical new public-key identifier>
+```
+
+The last ten lines consist of the existing eight-line challenge plus the two
+target fields. Both the current and proposed keys sign the whole eleven-line
+message using Ed25519. The service consumes only a `rotation` challenge and
+reconstructs the target binding before verification. A normal replacement
+requires both proofs. The server-only recovery operation permits independently
+authorized platform recovery in place of the old-key proof, while still
+requiring the new-key proof. No existing challenge transcript is redefined.
+
+See [WALLET_MODES.md](WALLET_MODES.md) for account/session retirement, storage,
+multi-device access, and the platform's authorization responsibilities.
+
 ## Independent vector verification
 
 `scripts/verify_kalvora_external_salt_vector.py` reconstructs the committed vector

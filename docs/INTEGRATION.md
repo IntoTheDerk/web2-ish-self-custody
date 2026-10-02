@@ -227,7 +227,10 @@ of the three.
 `web2-ish-self-custody/server` is the supported implementation of the server half
 of any `external-32` profile: salt custody, challenge issuance, signature
 verification, and opaque sessions. It is the only part of this package that
-touches a database, and it never receives a password, a seed, or a ciphertext.
+touches a database. It never receives a plaintext password or seed; the optional
+random-vault mode also stores encrypted vaults. New deployments should choose a
+mode using [the account-wallet integration guide](WALLET_MODES.md), which covers
+per-account salts, password changes, multi-device access, and recovery.
 
 Configuration takes the profile object, not an id:
 

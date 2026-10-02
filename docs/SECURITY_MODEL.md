@@ -4,6 +4,12 @@
 
 The SDK permits a client to recreate a signing identity from credentials without persistent wallet-secret storage. It attempts to keep derived secret material within one short callback scope and to erase SDK-owned buffers afterward.
 
+Alternatively, random-vault mode encrypts a randomly generated seed. See
+[Wallet modes](WALLET_MODES.md) for its storage and access-control requirements.
+For signing-only accounts, deterministic key replacement preserves the platform
+account and retires the old key; it does not recover that key. The platform's
+authority to authorize account recovery is part of the trust model.
+
 ## Fundamental tradeoff
 
 The public key or wallet address is a password-verification oracle. An attacker can derive candidate identities offline until one matches. Scrypt increases the cost of each guess; it does not add entropy to a human password.
@@ -41,6 +47,10 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 ## Server boundary
 
-A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, or encrypted vault.
+A deterministic service stores public identity, profile ID, public salt, session
+records, and one-use challenges. Random-vault mode additionally stores encrypted
+vaults, retrievable only after platform authorization. A stolen vault permits
+offline password guessing. Neither mode sends a plaintext seed, private key,
+wallet password, or recovery code to the server.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.

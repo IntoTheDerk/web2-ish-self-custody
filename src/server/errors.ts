@@ -21,6 +21,7 @@ export type IdentityErrorCode =
   | "session-expired"
   | "session-not-found"
   | "wallet-mismatch"
+  | "wallet-conflict"
   | "wallet-registered";
 
 const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze({
@@ -46,6 +47,7 @@ const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze(
   "session-expired": 401,
   "session-not-found": 401,
   "wallet-mismatch": 409,
+  "wallet-conflict": 409,
   "wallet-registered": 409,
 });
 

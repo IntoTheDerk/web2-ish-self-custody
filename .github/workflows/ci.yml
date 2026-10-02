@@ -14,6 +14,22 @@ jobs:
       matrix:
         node-version: [22, 24]
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: w2sc_test
+          POSTGRES_PASSWORD: local-ci-only
+          POSTGRES_DB: w2sc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U w2sc_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      W2SC_TEST_DATABASE_URL: postgresql://w2sc_test:local-ci-only@localhost:5432/w2sc_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

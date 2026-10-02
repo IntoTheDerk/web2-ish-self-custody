@@ -382,6 +382,40 @@ export function identityMigrations(
         `ALTER TABLE ${p}_accounts ALTER COLUMN display_name DROP NOT NULL`,
       ]),
     }),
+    Object.freeze({
+      version: 5,
+      name: "account-wallet-modes",
+      statements: Object.freeze([
+        `CREATE TABLE IF NOT EXISTS ${p}_wallet_policy (
+           service_profile_id text PRIMARY KEY REFERENCES ${p}_service_profiles(service_profile_id),
+           mode text NOT NULL CHECK (mode IN ('service-deterministic', 'per-account-deterministic', 'random-vault'))
+         )`,
+        `INSERT INTO ${p}_wallet_policy (service_profile_id, mode)
+         VALUES ('${serviceProfileId}', CASE WHEN EXISTS (SELECT 1 FROM ${p}_accounts)
+           THEN 'service-deterministic' ELSE '${assertLiteral(config.walletMode, "walletMode")}' END)
+         ON CONFLICT DO NOTHING`,
+        createTriggerOnce(`${p}_wallet_policy_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_wallet_policy FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`),
+        createTriggerOnce(`${p}_wallet_policy_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_wallet_policy FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`),
+        `CREATE TABLE IF NOT EXISTS ${p}_wallet_setups (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           service_profile_id text NOT NULL REFERENCES ${p}_service_profiles(service_profile_id),
+           username_normalized text NOT NULL,
+           public_salt bytea NOT NULL DEFAULT gen_random_bytes(32) CHECK (octet_length(public_salt) = 32),
+           UNIQUE (service_profile_id, username_normalized)
+         )`,
+        createTriggerOnce(`${p}_wallet_setups_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_wallet_setups FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`),
+        createTriggerOnce(`${p}_wallet_setups_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_wallet_setups FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`),
+        `ALTER TABLE ${p}_account_wallets ADD COLUMN IF NOT EXISTS revoked_at timestamptz,
+           ADD COLUMN IF NOT EXISTS vault jsonb,
+           ADD COLUMN IF NOT EXISTS vault_revision integer NOT NULL DEFAULT 1`,
+        `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS wallet_generation integer NOT NULL DEFAULT 0`,
+        `ALTER TABLE ${p}_sessions ADD COLUMN IF NOT EXISTS wallet_generation integer NOT NULL DEFAULT 0`,
+      ]),
+    }),
   ]);
 }
 

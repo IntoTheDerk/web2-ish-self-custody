@@ -7,6 +7,14 @@ import { IdentityError } from "./errors.js";
 import type { ChallengePurpose } from "./types.js";
 
 export const CHALLENGE_DOMAIN = "web2-ish-self-custody auth challenge v1";
+export const WALLET_REPLACEMENT_DOMAIN = "web2-ish-self-custody wallet replacement v1";
+
+/** Both old and new keys sign the target, so a transport cannot substitute it. */
+export function buildWalletReplacementMessage(challenge: string, wallet: WalletIdentityInput): string {
+  return [WALLET_REPLACEMENT_DOMAIN, challenge,
+    assertNoLineBreak(wallet.address, "address"),
+    assertNoLineBreak(wallet.publicKey, "publicKey")].join("\n");
+}
 
 const hex64 = /^[0-9a-f]{64}$/u;
 const hex128 = /^[0-9a-f]{128}$/u;

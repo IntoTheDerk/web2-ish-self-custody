@@ -9,6 +9,8 @@
 export { assertCodecRoundTrip, defineIdentityCodec } from "./codec.js";
 export type { IdentityCodec } from "./codec.js";
 export { derivePublicIdentity, withDerivedWallet } from "./derive.js";
+export { createRandomAccountWallet, withAccountWallet } from "./accountWallet.js";
+export type { AccountWalletMode, AccountWalletSetup } from "./accountWallet.js";
 export { DerivationError } from "./errors.js";
 export type { DerivationErrorCode } from "./errors.js";
 export {

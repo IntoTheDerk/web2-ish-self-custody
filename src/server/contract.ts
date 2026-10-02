@@ -12,15 +12,16 @@ import type {
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
+  StoredWalletVault,
+  WalletReplacementInput,
 } from "./types.js";
+import type { WalletVault } from "../vault.js";
 
 /**
  * The complete server-side identity surface.
  *
- * Deliberately absent: anything that could recover a wallet. The service never
- * receives a password, a seed, or a ciphertext, and holds no material from
- * which a wallet could be reconstructed. Its only cryptographic role is
- * verifying signatures against public keys the client enrolled.
+ * Passwords, plaintext seeds, and recovery codes stay on the client. In vault
+ * mode the service stores ciphertext and supports retrieval on another device.
  */
 export interface IdentityService {
   readonly config: ResolvedIdentityServiceConfig;
@@ -30,6 +31,20 @@ export interface IdentityService {
 
   /** Public derivation parameters, including this service's 32-byte salt. */
   derivationProfile(): Promise<PublishedDerivationProfile>;
+
+  /** Server-only: authorize platform access to accountId before calling. */
+  getWalletVault(accountId: string, context?: RequestContext): Promise<StoredWalletVault>;
+
+  /** Authenticated compare-and-swap: prevents overwriting a newer password change. */
+  updateWalletVault(token: string, vault: WalletVault, expectedRevision: number, context?: RequestContext): Promise<StoredWalletVault>;
+
+  createWalletReplacementChallenge(username: string, wallet: Readonly<{ address: string; publicKey: string }>, context?: RequestContext): Promise<IdentityChallenge>;
+
+  /** Retires the old signing key and sessions, while preserving the platform account. */
+  replaceWallet(input: WalletReplacementInput, context?: RequestContext): Promise<IdentityWallet>;
+
+  /** Server-only. Call ONLY after the platform has independently authorized recovery of accountId. */
+  replaceWalletAfterRecovery(input: Omit<WalletReplacementInput, "username" | "currentSignature"> & { accountId: string }, context?: RequestContext): Promise<IdentityWallet>;
 
   /**
    * Issues a single-use challenge. Returns a challenge for unknown usernames
@@ -68,6 +83,7 @@ export interface IdentityService {
     context?: RequestContext,
   ): Promise<IdentityAccount>;
 
+  /** Active wallets only; retired keys remain in the database for audit. */
   listWallets(accountId: string): Promise<readonly IdentityWallet[]>;
 
   /**
