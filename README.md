@@ -1,8 +1,8 @@
 # web2-ish-self-custody
 
 **Sign in with a username and password. Hold your own keys.**
-Deterministic Ed25519 wallets derived in the browser, plus a portable identity
-service that never holds a secret.
+Ed25519 signing identities created in the browser, with a choice of per-account
+deterministic keys or random keys protected by an encrypted vault.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#versioning-and-releases)
@@ -19,6 +19,7 @@ service that never holds a secret.
 - [The model](#the-model)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Account wallet modes](docs/WALLET_MODES.md)
 - [Wallet vault and recovery code](#wallet-vault-and-recovery-code)
 - [Random-seed identity](#random-seed-identity)
 - [Identity server](#identity-server)
@@ -39,16 +40,18 @@ People know how to sign in with a username and a password. Self-custody usually
 asks them to do something else entirely: write down a seed phrase, install an
 extension, or trust a custodian with their keys.
 
-This package keeps the web2 experience and drops the custodian. The same
-username and password recreate the same Ed25519 signing identity on any device,
-inside the browser, every time:
+Choose `walletMode: "per-account-deterministic"` to recreate a signing identity
+from credentials and a saved account salt, or `"random-vault"` to encrypt a random
+key and preserve it through password changes. These identities can be used
+without holding funds; the platform handles fee sponsorship separately.
+The SDK supports password changes only for vaults. Platforms using deterministic
+wallets implement their own password-change and account-recovery workflows.
+See the [account wallet modes guide](docs/WALLET_MODES.md).
 
-- **No stored secrets.** There is no seed, private key, password, password hash,
-  or encrypted key blob on any server. The wallet exists only while a callback
-  runs.
-- **No custodian.** The identity service holds only public material: a public
-  salt, public keys, addresses, and session hashes. A full database dump does
-  not yield a wallet.
+- **Client-side keys.** Passwords, plaintext seeds, and recovery codes stay on
+  the client. Signers exist only while a callback runs.
+- **Explicit storage.** Deterministic mode stores public wallet metadata;
+  vault mode also stores encrypted key material. Both depend on strong passwords.
 - **One implementation.** Products that adopt it share one versioned,
   vector-tested implementation instead of each maintaining its own
   cryptographic copy.
@@ -341,8 +344,9 @@ Limits worth stating plainly:
   deterministic wallet. A strong vault password still matters.
 - The vault header (username, address, public key, application, network) is
   readable by whoever stores it. Only the seed and data key are encrypted.
-- The package does not persist, transmit, or back up vaults. Storage, access
-  control, and delivery of the recovery code to the user are the host's job.
+- Client helpers return vaults without persisting or transmitting them. The
+  optional identity service stores encrypted vaults in `random-vault` mode;
+  the host supplies access authorization, backups, and recovery-code delivery.
 
 See [Encrypted-vault integrations](docs/INTEGRATION.md#encrypted-vault-integrations).
 
@@ -380,13 +384,15 @@ than a convention hardcoded in the server.
 
 | the server holds | the server never holds |
 | --- | --- |
-| the per-service 32-byte public salt and the pinned scrypt parameters | a password, or any hash, transform, or verifier derived from one |
+| service/account public salts and pinned scrypt parameters | a plaintext password or recovery code |
 | normalized usernames, display names, optional emails and verification state | a wallet seed, private key, or secret scalar |
-| public wallet material: address, encoded public key, codec id, fingerprint | a ciphertext, encrypted vault, or key-escrow blob |
+| public wallet material: address, encoded public key, codec id, fingerprint | |
+| encrypted vault and revision, only in random-vault mode | |
 | single-use challenge nonces, SHA-256 hashes of session tokens and email codes, append-only audit rows | |
 
-There is no password column and no recovery table. A stolen database gives an
-attacker exactly what any holder of a public address already has.
+There is no plaintext password or key column. Stolen public derivation metadata
+or vault ciphertext can support offline password guessing. Configure vault
+download authorization and follow [the wallet modes guide](docs/WALLET_MODES.md).
 
 ### The challenge flow
 
@@ -645,6 +651,8 @@ before defining either.
 | --- | --- | --- |
 | `withDerivedWallet(credentials, useWallet)` | function | derives a wallet, scopes it to a synchronous callback, zeroes the key on exit |
 | `derivePublicIdentity(credentials)` | function | the same derivation, returning only public identity material |
+| `withAccountWallet(setup, profile, password, useWallet)` | function | reconstructs a deterministic account wallet from its saved setup |
+| `createRandomAccountWallet(setup, profile, password)` | function | generates a random wallet and returns its encrypted vault and recovery code |
 | `defineDerivationProfile(profile)` | function | validates and freezes a profile |
 | `defineIdentityCodec(codec)` | function | validates and freezes a codec |
 | `assertCodecRoundTrip(codec, publicKeyBytes)` | function | throws unless `decodePublicKey` inverts `encodePublicKey` |
@@ -657,7 +665,7 @@ before defining either.
 | `generateRecoveryCode` / `normalizeRecoveryCode` | functions | vault recovery codes |
 | `WALLET_VAULT_FORMAT` | constant | `"web2-ish-self-custody-wallet-vault-v1"` |
 
-Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
+Exported types: `AccountWalletMode`, `AccountWalletSetup`, `CreateWalletVaultOptions`, `DerivationContext`,
 `DerivationCredentials`, `DerivationProfile`, `DerivedIdentity`,
 `DerivedWallet`, `IdentityCodec`, `KeyDerivation`, `ProfileDomains`,
 `SaltPolicy`, `SealedBox`, `SeedIdentity`, and `WalletVault`.
@@ -741,12 +749,14 @@ and failure modes.
 
 These describe the client-side entry points (derivation and the wallet vault).
 The server module is the one part of this package that holds state, and it
-holds only public identity material.
+holds public identity material and, in vault mode, encrypted vaults.
 
 - Recover a forgotten password. A deterministic wallet is a function of its
   password; the only recovery path is the recovery code of a wallet vault
   created *before* the password was lost.
 - Recover a vault whose password and recovery code are both lost.
+- Manage deterministic password changes, key reassignment, or account recovery.
+  Integrating platforms implement those workflows themselves.
 - Preserve a derived wallet when the username, password, context, salt, or
   profile changes. (A vault preserves the seed across password changes, but
   re-deriving from new credentials still yields a different wallet.)

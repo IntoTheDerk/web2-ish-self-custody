@@ -114,4 +114,6 @@ export type {
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
+  ServiceWalletMode,
+  StoredWalletVault,
 } from "./types.js";

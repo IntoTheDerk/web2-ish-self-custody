@@ -29,6 +29,7 @@ import {
   type RegistrationInput,
   type RequestContext,
 } from "./types.js";
+import { parseWalletVault } from "../vault.js";
 
 export type IdentityRouterOptions = Readonly<{
   /** Path all routes hang off. Default `/identity`. */
@@ -52,6 +53,10 @@ export type IdentityRouterOptions = Readonly<{
    * host that calls `service.startEmailVerification` itself.
    */
   emailVerification?: EmailVerificationDelivery;
+  /** Verify a platform login/recovery grant and return its account UUID, or null.
+   * Never trust an account ID supplied in the request without verifying ownership.
+   * Without this hook, pre-login vault downloads are disabled. */
+  authorizeVaultRead?: (request: Request) => Promise<string | null>;
 }>;
 
 /** 64 KiB. Every accepted body here is a handful of short strings. */
@@ -70,6 +75,7 @@ type RouterContext = Readonly<{
   trustedOrigins: ReadonlySet<string> | null;
   hashRequestIp: ((request: Request) => string | undefined) | null;
   emailVerification: EmailVerificationDelivery | null;
+  authorizeVaultRead: IdentityRouterOptions["authorizeVaultRead"];
 }>;
 
 type RouteHandler = (ctx: RouterContext, request: Request) => Promise<Response>;
@@ -135,6 +141,7 @@ export function createIdentityRouter(
         : new Set(options.trustedOrigins.map(normalizeOrigin)),
     hashRequestIp: options.hashRequestIp ?? null,
     emailVerification: options.emailVerification ?? null,
+    authorizeVaultRead: options.authorizeVaultRead,
   });
 
   return async function handleIdentityRequest(request: Request): Promise<Response> {
@@ -500,6 +507,7 @@ const registrationFields: readonly string[] = [
   "publicKey",
   "challengeId",
   "signature",
+  "vault",
 ];
 
 async function handleProfile(ctx: RouterContext, _request: Request): Promise<Response> {
@@ -531,6 +539,7 @@ async function handleRegister(ctx: RouterContext, request: Request): Promise<Res
     signature: requireString(body, "signature"),
     ...(displayName !== undefined ? { displayName } : {}),
     ...(email !== undefined ? { email } : {}),
+    ...(body["vault"] !== undefined ? { vault: readVault(body["vault"]) } : {}),
   };
   const result = await ctx.service.register(input, requestContext(ctx, request));
   return sessionResponse(
@@ -691,10 +700,35 @@ async function handleConfirmEmailVerification(
   return jsonResponse(result);
 }
 
+function readVault(value: unknown) {
+  try { return parseWalletVault(value); } catch {
+    throw new IdentityError("Invalid wallet vault.", "invalid-request");
+  }
+}
+
+async function handleReadVault(ctx: RouterContext, request: Request): Promise<Response> {
+  const accountId = await ctx.authorizeVaultRead?.(request);
+  if (accountId === undefined || accountId === null) {
+    throw new IdentityError("Platform authorization is required to download a vault.", "invalid-signature");
+  }
+  return jsonResponse(await ctx.service.getWalletVault(accountId, requestContext(ctx, request)));
+}
+
+async function handleUpdateVault(ctx: RouterContext, request: Request): Promise<Response> {
+  const token = tokenFromRequest(ctx, request);
+  if (token === null) throw new IdentityError("Session token is missing.", "session-not-found");
+  const body = await readJsonObject(request, ["vault", "expectedRevision"]);
+  if (typeof body["expectedRevision"] !== "number") {
+    throw new IdentityError("expectedRevision must be a number.", "invalid-request");
+  }
+  return jsonResponse(await ctx.service.updateWalletVault(token, readVault(body["vault"]), body["expectedRevision"], requestContext(ctx, request)));
+}
+
 const routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
   string,
   ReadonlyMap<string, RouteHandler>
 >([
+  ["/wallet-vault", new Map<string, RouteHandler>([["POST", handleReadVault], ["PUT", handleUpdateVault]])],
   ["/profile", new Map<string, RouteHandler>([["GET", handleProfile]])],
   ["/challenges", new Map<string, RouteHandler>([["POST", handleCreateChallenge]])],
   ["/accounts", new Map<string, RouteHandler>([["POST", handleRegister]])],

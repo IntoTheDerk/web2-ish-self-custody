@@ -8,6 +8,7 @@ import {
   verifyChallengeSignature,
 } from "./challenge.js";
 import { resolveIdentityServiceConfig } from "./config.js";
+import { accountWalletOperations } from "./accountWallets.js";
 import type { IdentityService } from "./contract.js";
 import { IdentityError } from "./errors.js";
 import { runIdentityMigrations } from "./migrations.js";
@@ -80,6 +81,8 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
   challenge: Object.freeze({ id: "challenge", limit: 20, windowSeconds: 300 }),
   register: Object.freeze({ id: "register", limit: 10, windowSeconds: 3_600 }),
   login: Object.freeze({ id: "login", limit: 15, windowSeconds: 300 }),
+  walletRead: Object.freeze({ id: "wallet-read", limit: 20, windowSeconds: 300 }),
+  walletIp: Object.freeze({ id: "wallet-ip", limit: 100, windowSeconds: 300 }),
   emailVerification: Object.freeze({
     id: "email-verification",
     limit: 5,
@@ -295,6 +298,7 @@ export function createIdentityService(
     resolveIdentityServiceConfig(config);
   const p = assertTablePrefix(resolved.tablePrefix);
   const serviceProfileId = resolved.serviceProfileId;
+  const accountWallets = accountWalletOperations(sql, resolved);
 
   const normalizeUsername = (username: string): string => {
     let normalized: string;
@@ -617,14 +621,17 @@ export function createIdentityService(
 
   let cachedDerivationProfile: PublishedDerivationProfile | null = null;
 
-  return Object.freeze({
+  const service: IdentityService = Object.freeze<IdentityService>({
     config: resolved,
 
     async migrate(): Promise<readonly number[]> {
-      return runIdentityMigrations(sql, resolved);
+      const versions = await runIdentityMigrations(sql, resolved);
+      await accountWallets.checkPolicy();
+      return versions;
     },
 
     async derivationProfile(): Promise<PublishedDerivationProfile> {
+      await accountWallets.checkPolicy();
       if (cachedDerivationProfile !== null) {
         return cachedDerivationProfile;
       }
@@ -645,6 +652,7 @@ export function createIdentityService(
           ),
       );
       const profile: PublishedDerivationProfile = Object.freeze({
+        walletMode: resolved.walletMode,
         serviceProfileId: textColumn(row, "service_profile_id"),
         profileId: textColumn(row, "profile_id"),
         codecId: resolved.profile.codec.id,
@@ -689,8 +697,12 @@ export function createIdentityService(
         context,
       );
 
-      // Deliberately no account lookup: an unknown username must produce a
-      // challenge indistinguishable from a known one.
+      if (resolved.walletMode !== "service-deterministic") {
+        await enforceRateLimit(requireRule("walletIp"), [rateLimitIpHash(context)], context);
+      }
+      const walletSetup = await accountWallets.prepare(usernameNormalized);
+
+      // Both known and unknown usernames receive the same challenge shape.
       const nonceHex = randomNonceHex();
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($5::timestamptz, now()) AS at)
@@ -731,6 +743,7 @@ export function createIdentityService(
           expiresAt,
         }),
         expiresAt,
+        ...(walletSetup === undefined ? {} : { walletSetup }),
       });
     },
 
@@ -759,6 +772,13 @@ export function createIdentityService(
         [rateLimitIpHash(context), usernameNormalized],
         context,
       );
+
+      const vault = resolved.walletMode === "random-vault"
+        ? accountWallets.validateVault(input.vault, usernameNormalized, wallet)
+        : null;
+      if (resolved.walletMode !== "random-vault" && input.vault !== undefined) {
+        throw new IdentityError("This wallet mode does not accept a vault.", "invalid-request");
+      }
 
       const emailVerifiedAt =
         email === null
@@ -795,6 +815,9 @@ export function createIdentityService(
         );
       }
 
+      // Invalid registration attempts must not allocate durable salt records.
+      // A valid challenge already provisioned this setup; preserve it exactly.
+      const walletSetup = await accountWallets.prepare(usernameNormalized);
       const token = generateSessionToken();
       const parameters: readonly SqlParameter[] = [
         nowParam,
@@ -823,6 +846,8 @@ export function createIdentityService(
           emailProvided: email !== null,
           emailVerified: emailVerifiedAt !== null,
         }),
+        walletSetup?.accountId ?? null,
+        vault === null ? null : JSON.stringify(vault),
       ];
 
       // Account, primary wallet, session, and audit row land in ONE statement:
@@ -834,10 +859,10 @@ export function createIdentityService(
           `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
                 new_account AS (
                   INSERT INTO ${p}_accounts (
-                    service_profile_id, username_normalized, display_name, email,
+                    id, service_profile_id, username_normalized, display_name, email,
                     email_verified_at, created_at, updated_at
                   )
-                  SELECT $2::text, $3::text, $4::text, $5::text, $6::timestamptz,
+                  SELECT COALESCE($21::uuid, gen_random_uuid()), $2::text, $3::text, $4::text, $5::text, $6::timestamptz,
                          clock.at, clock.at
                   FROM clock
                   RETURNING id, service_profile_id, username_normalized, display_name,
@@ -847,11 +872,11 @@ export function createIdentityService(
                   INSERT INTO ${p}_account_wallets (
                     account_id, service_profile_id, profile_id, codec_id, curve,
                     application_id, network_id, address, address_normalized,
-                    public_key, fingerprint, is_primary, created_at
+                    public_key, fingerprint, is_primary, created_at, vault
                   )
                   SELECT new_account.id, $2::text, $7::text, $8::text, $9::text,
                          $10::text, $11::text, $12::text, $13::text, $14::text,
-                         $15::text, true, clock.at
+                         $15::text, true, clock.at, $22::jsonb
                   FROM new_account, clock
                   RETURNING id, account_id, service_profile_id, profile_id, codec_id,
                             curve, application_id, network_id, address,
@@ -1173,6 +1198,18 @@ export function createIdentityService(
       return loadAccount(accountId);
     },
 
+    async getWalletVault(accountId, context) {
+      const id = assertUuid(accountId, "account-not-found");
+      await enforceRateLimit(requireRule("walletRead"), [rateLimitIpHash(context), id], context);
+      await enforceRateLimit(requireRule("walletIp"), [rateLimitIpHash(context)], context);
+      return accountWallets.getVault(id);
+    },
+
+    async updateWalletVault(token, vault, expectedRevision, context) {
+      await service.authenticate(token, context);
+      return accountWallets.updateVault(token, vault, expectedRevision, requestNow(context));
+    },
+
     async updateAccount(
       accountId: string,
       changes: Readonly<{ displayName?: string | null; email?: string }>,
@@ -1489,4 +1526,5 @@ export function createIdentityService(
       };
     },
   });
+  return service;
 }

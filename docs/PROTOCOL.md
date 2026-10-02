@@ -441,6 +441,29 @@ which normalizes to `jesse@example.com`.
 A refactor that changes these values is wrong. The vector is not updated to
 match an implementation; the implementation is corrected to match the vector.
 
+## Account wallet modes
+
+Account mode changes ownership of the external salt, not the derivation
+transcript. In `per-account-deterministic` mode, the service assigns an immutable
+UUIDv4 account ID and an independent CSPRNG-generated 32-byte public salt before
+enrollment. `walletSetup.publicSaltHex` supplies the exact existing `external-32`
+salt input. The UUID is metadata, not an additional derivation input. Existing
+profile IDs, domain strings, and vectors retain their original meanings.
+
+`random-vault` mode generates a fresh 32-byte Ed25519 seed with secure randomness
+and seals it using the existing wallet-vault-v1 envelope. The profile supplies
+the codec and wrapper KDF parameters. Its deterministic entropy transcript and
+optional key-derivation step are not applied to this random seed.
+
+Password changes are supported through vault rewrapping, which preserves the
+encrypted seed and its identity. Deterministic derivation with a different
+password produces a different wallet; the SDK defines no protocol for
+reassigning an account to that key or recovering a deterministic account.
+Those workflows belong to the integrating platform.
+
+See [WALLET_MODES.md](WALLET_MODES.md) for storage, multi-device access, vault
+password changes, and the platform's authorization responsibilities.
+
 ## Independent vector verification
 
 `scripts/verify_kalvora_external_salt_vector.py` reconstructs the committed vector
