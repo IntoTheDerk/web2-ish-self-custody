@@ -13,6 +13,7 @@ const defaults = Object.freeze({
   emailVerificationTtlSeconds: 900,
   emailVerificationMaxAttempts: 5,
   requireVerifiedEmail: false,
+  walletMode: "service-deterministic" as const,
 });
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
@@ -79,7 +80,12 @@ export function resolveIdentityServiceConfig(
   config: IdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
   assertNoRemovedOptions(config);
+  const walletMode = config.walletMode ?? defaults.walletMode;
+  if (!["service-deterministic", "per-account-deterministic", "random-vault"].includes(walletMode)) {
+    throw new IdentityError("Unknown wallet mode.", "invalid-service-profile");
+  }
   return Object.freeze({
+    walletMode,
     serviceProfileId: config.serviceProfileId,
     profile: assertServiceableProfile(config.profile),
     applicationId: config.applicationId,

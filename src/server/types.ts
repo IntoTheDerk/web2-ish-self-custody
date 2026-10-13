@@ -1,5 +1,9 @@
 import type { DerivationProfile } from "../profile.js";
+import type { AccountWalletMode, AccountWalletSetup } from "../accountWallet.js";
+import type { WalletVault } from "../vault.js";
 
+export type ServiceWalletMode = AccountWalletMode | "service-deterministic";
+export type StoredWalletVault = Readonly<{ vault: WalletVault; revision: number }>;
 export type ChallengePurpose = "registration" | "login" | "rotation";
 
 export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([
@@ -34,6 +38,8 @@ export type IdentityServiceConfig = Readonly<{
   emailVerificationMaxAttempts?: number;
   /** Requires a verified email before `POST /accounts` succeeds. */
   requireVerifiedEmail?: boolean;
+  /** Choose explicitly for new deployments. Omitted preserves existing wallets. */
+  walletMode?: ServiceWalletMode;
 }>;
 
 export type ResolvedIdentityServiceConfig = Readonly<{
@@ -47,11 +53,12 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   emailVerificationTtlSeconds: number;
   emailVerificationMaxAttempts: number;
   requireVerifiedEmail: boolean;
+  walletMode: ServiceWalletMode;
 }>;
 
 /**
- * Everything a client needs to derive its wallet. All of it is public by
- * design: the salt is not a secret, it is a namespace separator.
+ * Deployment metadata. The service salt is used only in legacy mode; new
+ * modes obtain their account setup from the challenge response.
  */
 export type PublishedDerivationProfile = Readonly<{
   serviceProfileId: string;
@@ -63,6 +70,7 @@ export type PublishedDerivationProfile = Readonly<{
   applicationId: string;
   networkId: string;
   publicSaltHex: string;
+  walletMode?: ServiceWalletMode;
   kdf: Readonly<{ N: number; r: number; p: number; dkLen: number }>;
 }>;
 
@@ -108,6 +116,8 @@ export type IdentityChallenge = Readonly<{
   /** The exact bytes the client must sign, as UTF-8 text. */
   message: string;
   expiresAt: Date;
+  /** Present for the two account wallet modes; save and reuse across devices. */
+  walletSetup?: AccountWalletSetup;
 }>;
 
 export type IdentitySession = Readonly<{
@@ -138,6 +148,8 @@ export type RegistrationInput = Readonly<{
   publicKey: string;
   challengeId: string;
   signature: string;
+  /** Required only in random-vault mode. Never send the plaintext seed or secrets. */
+  vault?: WalletVault;
 }>;
 
 export type LoginInput = Readonly<{

@@ -121,6 +121,8 @@ afterAll(async () => {
   }
   for (const prefix of createdPrefixes) {
     for (const table of [
+      "wallet_setups",
+      "wallet_policy",
       "audit_events",
       "rate_limits",
       "email_verifications",
@@ -152,7 +154,7 @@ describe.skipIf(client === null)("provisioning the public salt", () => {
     const minted = await storedSaltHex(sql, prefix);
     const second = await runIdentityMigrations(sql, config);
 
-    expect(first).toEqual([1, 2, 3, 4]);
+    expect(first).toEqual([1, 2, 3, 4, 5]);
     expect(second).toEqual([]);
     expect(minted).toMatch(/^[0-9a-f]{64}$/u);
     expect(minted).not.toBe("0".repeat(64));

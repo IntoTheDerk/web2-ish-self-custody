@@ -5,6 +5,17 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased
+
+- Add opt-in per-account deterministic and random-vault modes, with persistent
+  random account UUIDs/salts and client helpers. Existing derivation profiles,
+  codecs, vectors, and legacy service mode are unchanged.
+- Limit SDK password changes to encrypted vaults. Deterministic password
+  changes, wallet reassignment, and account recovery remain platform-owned.
+- Store vault ciphertext at enrollment, authorize multi-device downloads through
+  a host hook, and use revision checks for password-wrapper updates.
+- Add PostgreSQL migration 5, integration tests, and a wallet-modes guide.
+
 ## v0.10.0-alpha.1 — 2026-09-29 (alpha pre-release)
 
 - **kalvora.js `0.0.1-alpha.1`.** The optional peer dependency moves from

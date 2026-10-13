@@ -4,6 +4,13 @@
 
 The SDK permits a client to recreate a signing identity from credentials without persistent wallet-secret storage. It attempts to keep derived secret material within one short callback scope and to erase SDK-owned buffers afterward.
 
+Alternatively, random-vault mode encrypts a randomly generated seed. See
+[Wallet modes](WALLET_MODES.md) for its storage and access-control requirements.
+Password changes and recovery-code unlocking are vault features. Deterministic
+mode has no SDK-managed password-change, key-replacement, or account-recovery
+flow. A platform that reassigns an account to a new key owns that authorization
+and the retirement of the old key; reassignment does not recover the old key.
+
 ## Fundamental tradeoff
 
 The public key or wallet address is a password-verification oracle. An attacker can derive candidate identities offline until one matches. Scrypt increases the cost of each guess; it does not add entropy to a human password.
@@ -30,7 +37,7 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
 - Lost vault password and lost recovery code: permanent wallet loss.
-- Password or username change: different wallet identity.
+- Password or username change during deterministic derivation: different wallet identity; no automatic account update.
 - Profile/context change: different wallet identity.
 - External salt loss, rotation, or substitution: different wallet identity.
 - Weak password: feasible offline wallet recovery by an attacker.
@@ -41,6 +48,10 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 ## Server boundary
 
-A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, or encrypted vault.
+A deterministic service stores public identity, profile ID, public salt, session
+records, and one-use challenges. Random-vault mode additionally stores encrypted
+vaults, retrievable only after platform authorization. A stolen vault permits
+offline password guessing. Neither mode sends a plaintext seed, private key,
+wallet password, or recovery code to the server.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.

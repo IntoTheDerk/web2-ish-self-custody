@@ -7,6 +7,15 @@ one immutable 32-byte public salt per service, publishes the pinned KDF
 parameters, verifies signatures over single-use challenges, and issues opaque
 sessions. It is the only stateful part of this package.
 
+That is the legacy default. New deployments can select
+`walletMode: "per-account-deterministic"` or `"random-vault"`. See
+[Account wallet modes](WALLET_MODES.md) for configuration, new client helpers,
+authorized vault download/update routes, and vault password changes and recovery.
+Deterministic password changes, key reassignment, and account recovery are the
+integrating platform's responsibility; this service provides no such workflow.
+`/profile` reports `walletMode`; in either new mode use `/challenges`'s
+`walletSetup`, not the service salt, to create the wallet.
+
 It is chain-agnostic. The deployment hands it a `DerivationProfile` object, and
 every address and public-key operation runs through that profile's
 `IdentityCodec` — there is no encoding convention hardcoded anywhere in this
@@ -28,16 +37,16 @@ both.
 - SHA-256 hashes of session tokens and of email verification codes
 - a SHA-256 hash of the user agent, and a caller-computed IP hash
 - append-only audit rows
+- immutable account UUID/salt setup and wallet policy (migration 5)
+- encrypted vaults and revisions, only when `walletMode` is `random-vault`
 
 ### What the server never holds
 
-- a password, or any hash, transform, or verifier derived from one
+- a plaintext wallet password or recovery code
 - a wallet seed, private key, or secret scalar
-- a ciphertext, encrypted vault, or key-escrow blob
-
-There is no password column. There is no recovery table. No input to any method
-in `IdentityService` carries secret wallet material, so there is no code path in
-which the service could store it even by mistake.
+Vault mode accepts encrypted wallet material, never a plaintext key. Vault
+ciphertext can verify password guesses offline and must be access-controlled.
+The discussion below about public-only storage describes deterministic modes.
 
 ### Why a stolen database yields no wallet
 
