@@ -27,8 +27,9 @@
 #     gate, loudly, if there is none). Pass --pip on a matching Linux host to
 #     run CI's exact command in a throwaway venv.
 #   * The real-PostgreSQL server suites. vitest skips them unless
-#     W2SC_TEST_DATABASE_URL is set, and CI does not set it either. Pass --pg
-#     with that variable exported to run them.
+#     W2SC_TEST_DATABASE_URL is set. CI supplies it using a PostgreSQL 15
+#     service for both Node versions. Pass --pg with that variable exported
+#     to run an explicit local integration gate.
 #
 # Usage:
 #   scripts/verify-ci.sh          # every gate that can run locally
@@ -198,7 +199,7 @@ if [ "$want_pg" = true ]; then
   run "server integration tests (real PostgreSQL)" npx vitest run test/server
 else
   skip "server integration tests (real PostgreSQL)" \
-    "W2SC_TEST_DATABASE_URL not set; vitest skips them, as CI does. Use --pg to run"
+    "no explicit local integration gate requested; CI runs it with PostgreSQL 15. Use --pg to run"
 fi
 
 echo

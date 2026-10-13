@@ -70,12 +70,14 @@ database. Its boundary is deliberately narrow.
 
 The server never receives, and therefore cannot store or leak:
 
-- a password, or any hash or transform of one — there is no password column
-- a wallet seed, private key, or secret scalar
-- a ciphertext, encrypted vault, or key-escrow blob of any kind
+- a plaintext wallet password or recovery code
+- a plaintext wallet seed, private key, or secret scalar
 
-There is no recovery path for wallet material, by design. A request to add one
-is a design change, not a bug fix.
+Deterministic modes store public wallet metadata. `random-vault` mode also
+stores encrypted vaults and revisions. Vault downloads require platform
+authorization; clients decrypt locally with a password or recovery code.
+The server cannot reset or recover either secret. Deterministic password
+changes and account recovery remain the integrating platform's responsibility.
 
 The public salt is public but integrity-critical. It is a namespace separator,
 not a secret: publishing it is required for clients to derive at all, and
@@ -100,16 +102,16 @@ browser-facing deployment must set it. See
 
 What database access does yield: normalized usernames, display names, emails
 and their verification state, wallet addresses, public keys, codec ids,
-fingerprints, the public salt, hashed session tokens, hashed IP and user-agent
-values supplied by the caller, and audit rows. An operator with write access can suspend accounts,
+fingerprints, service/account public salts, hashed session tokens, hashed IP and
+user-agent values supplied by the caller, and audit rows. In `random-vault` mode
+it also yields encrypted vaults and revisions. An operator with write access can suspend accounts,
 delete sessions, and enroll an attacker-controlled public key against an
 existing account — so wallet enrollment records deserve the same monitoring as
-any other privileged write. What that operator cannot do is recover, derive, or
-sign with any user's wallet, because no material capable of producing one is
-present. Their remaining path to a specific wallet is an offline guessing
-attack against a known public identity, which is the same attack any holder of
-the public identity already has, and is bounded by password entropy and the
-profile's scrypt cost rather than by any server-side control.
+any other privileged write. Database access alone does not provide a usable
+signing key. Offline password guessing remains possible against a known public
+identity in deterministic mode or encrypted vaults in `random-vault` mode.
+That attack is bounded by password entropy and the profile's scrypt cost
+rather than by any server-side control.
 
 ## Reporting
 
