@@ -13,17 +13,31 @@ every address and public-key operation runs through that profile's
 module. The examples below use Kalvora because that is the chain that ships in the
 box, not because the service knows what Kalvora is.
 
+The profile is the profile of the key that signs in. Under a chain wallet
+profile, such as the Kalvora profile, the enrolled key is the user's wallet.
+Under the chain-neutral sign-in profile (`signInEd25519ExternalSalt`) it is a
+sign-in key that is not a key on any chain, and the user's wallet, if the
+application has one, never reaches the service. The tables, the wire field
+`wallets` and the `IdentityWallet` type keep their names either way: they hold
+the enrolled key, which is a wallet only when the profile is a chain wallet
+profile.
+
 `src/server/contract.ts` is the authoritative TypeScript surface and
 `src/server/router.ts` the authoritative wire behavior. This document describes
 both.
 
 ## Custody model
 
+What the server holds depends on the configured profile: the lists below hold
+for both, and the enrolled key is a wallet only under a chain wallet profile.
+
 ### What the server holds
 
 - the per-service 32-byte public salt and the pinned scrypt parameters
 - normalized usernames, display names, optional emails and verification state
-- public wallet material: address, encoded public key, codec id, fingerprint
+- the enrolled key's public material: address, encoded public key, codec id,
+  fingerprint. Under a chain wallet profile that is the user's wallet; under
+  the sign-in profile it is the sign-in key, and the server holds no chain key
 - single-use challenge nonces with their expiry and consumption state
 - SHA-256 hashes of session tokens and of email verification codes
 - a SHA-256 hash of the user agent, and a caller-computed IP hash
@@ -31,9 +45,12 @@ both.
 
 ### What the server never holds
 
-- a password, or any hash, transform, or verifier derived from one
-- a wallet seed, private key, or secret scalar
+- a password, or any hash or transform of one; the enrolled public key itself
+  is the one password verifier it holds (see below)
+- a seed, private key, or secret scalar, or an application secret
 - a ciphertext, encrypted vault, or key-escrow blob
+- under the sign-in profile, anything about the user's wallet: no wallet
+  address, public key or signature reaches it, unless the application sends one
 
 There is no password column. There is no recovery table. No input to any method
 in `IdentityService` carries secret wallet material, so there is no code path in
@@ -41,21 +58,37 @@ which the service could store it even by mistake.
 
 ### Why a stolen database yields no wallet
 
-A wallet is `scrypt(entropy, publicSalt, N, r, p, dkLen)`, where `entropy` is a
-domain-separated SHA-512 transcript over the normalized username and the user's
-password bytes. The database holds the salt and the parameters. It does not hold
-the password, and the password is the only high-entropy input.
+Every enrolled key comes from `scrypt(entropy, publicSalt, N, r, p, dkLen)`,
+where `entropy` is a domain-separated SHA-512 transcript over the normalized
+username and the user's password bytes, followed by the profile's key step. The
+database holds the salt, the parameters and the enrolled public key. It does not
+hold the password, and the password is the only high-entropy input.
 
-An attacker with a full dump therefore has exactly what any holder of a public
-identity already has: the ability to run an offline guessing attack against a
-known public key. Stealing the database does not improve that attack, because
-the salt is not a secret and was already published to every client that ever
-derived.
+- **Under a chain wallet profile** the enrolled key is the wallet. An attacker
+  with a full dump has exactly what any holder of the public address already
+  has: the ability to run an offline guessing attack against a known public key.
+- **Under the sign-in profile** the enrolled key is a sign-in key, and the
+  database holds nothing about the wallet. The wallet's master seed is an
+  application secret of the same scrypt output under a different HKDF domain
+  ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)), so neither the sign-in public
+  key nor any number of its signatures yields it. The offline attack remains:
+  the sign-in public key is a password oracle at scrypt cost, and a correct
+  guess gives the password, from which the public transcript and salt give the
+  wallet. So does a published wallet address, to anyone who also knows the
+  username, with no database at all.
+
+Under a chain wallet profile, stealing the database does not improve the
+guessing attack: the salt is not a secret and was already published to every
+client that ever derived, and the public key is the address the user shares.
+Under the sign-in profile it does give the attacker one thing that may not be
+public otherwise: an oracle for every account, including accounts whose wallet
+address was never published. The work per guess is the same.
 
 The corollary is the uncomfortable one and must not be softened: a weak password
-is recoverable by anyone who learns a public address, and this module cannot
-detect or prevent that. Deterministic password-derived custody is not equivalent
-to a random wallet seed. See [the security model](SECURITY_MODEL.md).
+is recoverable by anyone who learns a public address or an enrolled public key,
+and this module cannot detect or prevent that. Deterministic password-derived
+custody is not equivalent to a random wallet seed. See
+[the security model](SECURITY_MODEL.md).
 
 ### Serviceable profiles
 
@@ -84,11 +117,15 @@ CHECK constraint on `<p>_service_profiles`; migration 2 bakes `profile.id` and
 `profile.codec.id` into the binding CHECK on `<p>_account_wallets`. A deployment
 whose configuration has drifted from its database cannot write a row at all.
 
-The bundled Kalvora profile, which satisfies the policy:
+The bundled profiles, which satisfy the policy:
 
-| `profileId` | codec | curve | algorithm | scrypt |
-| --- | --- | --- | --- | --- |
-| `web2ish-kalvora-ed25519-external-salt-v1` | `kalvora-ed25519-base58-v1` | ed25519 | `scrypt-sha512-slip10-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 |
+| `profileId` | codec | curve | algorithm | scrypt | enrolled key |
+| --- | --- | --- | --- | --- | --- |
+| `web2ish-kalvora-ed25519-external-salt-v1` | `kalvora-ed25519-base58-v1` | ed25519 | `scrypt-sha512-slip10-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 | the Kalvora wallet (`A_…`) |
+| `web2ish-sign-in-ed25519-external-salt-v1` | `web2ish-sign-in-ed25519-hex-v1` | ed25519 | `scrypt-sha512-hkdf-sha256-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 | a sign-in key (`S_…`), not a wallet |
+
+A service configured with the sign-in profile refuses a Kalvora key at
+registration (`invalid-public-key`): the codec decodes only `S_` identifiers.
 
 A profile that derives its own salt from the username (the generic
 `derived-from-username` policy) is not serviceable.
@@ -1165,8 +1202,9 @@ limitation, not an oversight.
 
 ### What an operator with database access can and cannot do
 
-**Can:** read every username, display name, email, verification state, wallet
-address, public key, fingerprint, and the public salt; read hashed session
+**Can:** read every username, display name, email, verification state, enrolled
+address, public key and fingerprint (a wallet's only under a chain wallet
+profile), and the public salt; read hashed session
 tokens, hashed IPs, hashed user agents, and audit rows; suspend accounts; delete
 sessions; and — with write access — enroll an attacker-controlled public key
 against an existing account. That last one is the real insider risk in this
@@ -1174,10 +1212,12 @@ design and deserves the same monitoring as any other privileged write. Alert on
 inserts into `<p>_account_wallets`.
 
 **Cannot:** recover, derive, reconstruct, decrypt, or sign with any user's
-wallet. No material capable of producing one is present, and no amount of
-database access creates it. Nor can they mint a usable session token from the
+enrolled key or wallet. No material capable of producing one is present, and no
+amount of database access creates it. Under the sign-in profile the database
+does not even say which wallet a user has. Nor can they mint a usable session token from the
 stored hashes, or read a plaintext email verification code.
 
 Their remaining path to a specific wallet is the offline guessing attack that
-every holder of a public address already has. It is bounded by password entropy
-and scrypt cost — the two things a server can neither improve nor weaken.
+every holder of a public address already has; under the sign-in profile the
+oracle is the enrolled sign-in public key. It is bounded by password entropy and
+scrypt cost — the two things a server can neither improve nor weaken.

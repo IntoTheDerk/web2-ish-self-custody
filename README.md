@@ -49,6 +49,10 @@ inside the browser, every time:
 - **No custodian.** The identity service holds only public material: a public
   salt, public keys, addresses, and session hashes. A full database dump does
   not yield a wallet.
+- **A sign-in key apart from the wallet, when you need one.** Under the
+  chain-neutral [sign-in profile](#a-sign-in-key-separate-from-the-wallet) the
+  key the service enrolls is not a wallet, and the wallet is an application
+  secret of the same password entry that the service never sees.
 - **One implementation.** Products that adopt it share one versioned,
   vector-tested implementation instead of each maintaining its own
   cryptographic copy.
@@ -189,8 +193,8 @@ server do not need it.
 
 | entry point | contents |
 | --- | --- |
-| `web2-ish-self-custody` | the chain-agnostic core and the wallet vault |
-| `web2-ish-self-custody/chains/kalvora` | the Kalvora codec, profile, and key derivation (needs kalvora.js) |
+| `web2-ish-self-custody` | the chain-agnostic core, the sign-in profile, and the wallet vault |
+| `web2-ish-self-custody/chains/kalvora` | the Kalvora codec, profile, key derivation, and the wallet of a master seed (needs kalvora.js) |
 | `web2-ish-self-custody/server` | the identity service, router, email delivery, and migrations |
 | `web2-ish-self-custody/server/adapters/neon` | `createNeonIdentityService` on its own |
 | `web2-ish-self-custody/server/adapters/node` | `createPgIdentityService` and `nodeRequestListener` on their own |
@@ -272,6 +276,42 @@ that returns the scrypt output unchanged, refuses them (`secret-unavailable`);
 the core cannot check that any other step is one-way. A password change gives
 every label a new secret.
 See [the protocol](docs/PROTOCOL.md#application-secrets).
+
+### A sign-in key separate from the wallet
+
+Under the Kalvora profile the key that signs in to your identity service is the
+user's wallet. To keep them apart, derive under the chain-neutral sign-in
+profile, whose key (`S_` and hex) is what the service enrolls, and open the
+wallet from an application secret of the same run:
+
+```ts
+import { signInEd25519ExternalSalt, withDerivedWallet } from "web2-ish-self-custody";
+import { withKalvoraWalletFromMasterSeed } from "web2-ish-self-custody/chains/kalvora";
+
+const signed = await withDerivedWallet(
+  { profile: signInEd25519ExternalSalt, username, password, salt, context },
+  (signIn, secrets) => {
+    // Check the password first: the wallet has no check value of its own.
+    if (signIn.identity.publicKey !== enrolledSignInPublicKey) throw new Error("wrong password");
+    return withKalvoraWalletFromMasterSeed(secrets.get("example-wallet-seed-v1")!, (wallet) =>
+      wallet.signExactMessageUnsafe(exactTypedMessageBytes),
+    );
+  },
+  { applicationSecrets: ["example-wallet-seed-v1"] },
+);
+```
+
+`withKalvoraWalletFromMasterSeed` is synchronous, takes exactly 32 bytes in a
+plain `Uint8Array` (not a Buffer or other subclass) and refuses an all-zero
+seed, which is what a secret holds after its `withDerivedWallet` scope has
+ended (`invalid-seed`). It works on its own copy and zeroes the wallet key when
+its callback returns. Open the wallet inside the `withDerivedWallet` callback,
+as above. The service then holds the sign-in key and nothing
+about the wallet, but the sign-in public key is still a password oracle, and so
+is the wallet's address once it is public. A password change gives a new
+wallet unless the application keeps its own encrypted backup of the master
+seed. See [the pattern](docs/INTEGRATION.md#a-sign-in-key-separate-from-the-wallet)
+and [the protocol](docs/PROTOCOL.md#part-3--the-sign-in-profile).
 
 ### The signer is deliberately named unsafe
 
@@ -413,13 +453,18 @@ than a convention hardcoded in the server.
 
 | the server holds | the server never holds |
 | --- | --- |
-| the per-service 32-byte public salt and the pinned scrypt parameters | a password, or any hash, transform, or verifier derived from one |
-| normalized usernames, display names, optional emails and verification state | a wallet seed, private key, or secret scalar |
-| public wallet material: address, encoded public key, codec id, fingerprint | a ciphertext, encrypted vault, or key-escrow blob |
+| the per-service 32-byte public salt and the pinned scrypt parameters | a password, or any hash or transform of one other than the enrolled public key |
+| normalized usernames, display names, optional emails and verification state | a seed, private key, secret scalar, or application secret |
+| the enrolled key's public material: address, encoded public key, codec id, fingerprint (a wallet only under a chain wallet profile; a sign-in key under the sign-in profile) | a ciphertext, encrypted vault, or key-escrow blob |
 | single-use challenge nonces, SHA-256 hashes of session tokens and email codes, append-only audit rows | |
 
-There is no password column and no recovery table. A stolen database gives an
-attacker exactly what any holder of a public address already has.
+There is no password column and no recovery table. Under a chain wallet
+profile a stolen database gives an attacker exactly what any holder of a public
+address already has. Under the sign-in profile it also gives an offline
+password oracle, the enrolled sign-in public key, for every account, including
+accounts whose wallet address was never published. The work per guess is the
+same scrypt cost either way; see
+[the server API](docs/SERVER_API.md#why-a-stolen-database-yields-no-wallet).
 
 ### The challenge flow
 
@@ -569,7 +614,9 @@ and [Rate limits](docs/SERVER_API.md#rate-limits) before exposing the route.
 Serviceability is a policy, not a list: any profile whose `saltPolicy` is
 `external-32` and whose codec round-trips can be configured. A profile that
 derives its own salt has nothing for a server to own, and the service rejects it
-at construction with `invalid-service-profile`.
+at construction with `invalid-service-profile`. Both bundled profiles qualify:
+the Kalvora profile, whose enrolled key is the wallet, and the sign-in profile,
+whose enrolled key is not, and which refuses a Kalvora key at registration.
 
 ## Adding a chain
 
@@ -683,6 +730,10 @@ before defining either.
 | `assertCodecRoundTrip(codec, publicKeyBytes)` | function | throws unless `decodePublicKey` inverts `encodePublicKey` |
 | `deriveIdentityFromSeed(seed, codec)` | function | public identity for an existing 32-byte Ed25519 seed |
 | `normalizeUsername(username)` | function | the exact username normalization derivation applies |
+| `signInEd25519ExternalSalt` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v1`: service-salted sign-in key, not a wallet ([sign-in profile](#a-sign-in-key-separate-from-the-wallet)) |
+| `signInEd25519Codec` | `IdentityCodec` | `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits, decoded strictly |
+| `signInHkdfEd25519` | `KeyDerivation` | `hkdf-sha256-sign-in-key-v1`: the sign-in profile's HKDF-SHA256 step |
+| `SIGN_IN_KEY_DOMAIN` | constant | `"web2-ish-self-custody sign-in key v1"`, that step's salt and info |
 | `ED25519_SEED_BYTES` | constant | `32` |
 | `MINIMUM_PASSWORD_CHARACTERS` / `MAXIMUM_PASSWORD_BYTES` | constants | 10 characters (Unicode code points) and 1,024 UTF-8 bytes |
 | `DerivationError` / `DerivationErrorCode` | class / type | every failure the client side throws |
@@ -704,6 +755,7 @@ Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
 | `kalvoraSlip10Ed25519` | `KeyDerivation` | the profile's SLIP-0010 step, computed by kalvora.js |
 | `kalvoraProfiles` | record | the bundled profiles, keyed by id |
 | `deriveKalvoraEd25519IdentityFromSeed(seed)` | function | Kalvora public identity for a random 32-byte key (no HD step) |
+| `withKalvoraWalletFromMasterSeed(masterSeed, useWallet)` | function | the Kalvora wallet (SLIP-0010 at `m/44'/5258'/0'/0'/0'`) of a 32-byte master seed, scoped to a synchronous callback; type `KalvoraMasterSeedWallet` |
 | `KALVORA_SLIP44_COIN_TYPE` / `KALVORA_DERIVATION_PATH` | constants | `5258` and `m/44'/5258'/0'/0'/0'` |
 
 There is no private-key export anywhere in the package.
@@ -738,7 +790,10 @@ The bundled Kalvora profile is `web2ish-kalvora-ed25519-external-salt-v1`:
 Ed25519, a 32-byte salt the service owns, SLIP-0010 at `m/44'/5258'/0'/0'/0'`,
 and the `kalvora-ed25519-base58-v1` codec. Its test vector is committed in
 [`vectors/`](vectors/kalvora-ed25519-external-salt-v1.json); a refactor that
-changes it is wrong. Retired profile ids are listed in
+changes it is wrong. The chain-neutral sign-in profile,
+`web2ish-sign-in-ed25519-external-salt-v1`, has its own vector,
+[`vectors/sign-in-ed25519-external-salt-v1.json`](vectors/sign-in-ed25519-external-salt-v1.json),
+under the same rule. Retired profile ids are listed in
 [the protocol](docs/PROTOCOL.md#retired-profiles). The generic
 `derived-from-username` salt policy remains available to chains that define
 their own profile.
@@ -754,6 +809,9 @@ their own profile.
   strength policy where a password is created or changed, and should not
   re-apply a stricter one at sign-in.
 - **The username is context, not a secret.** It must not be counted as entropy.
+- **A sign-in key is still an oracle.** Under the sign-in profile the service
+  holds no wallet, but the enrolled sign-in public key tests password guesses
+  just as a wallet address does, and a correct guess gives the wallet too.
 - **Pin the profile in source.** A client that accepts a profile id, codec id,
   or KDF parameters from a server has handed that server a downgrade lever.
 - **Isolate derivation.** Run it in a fresh dedicated worker, one derivation at
@@ -837,7 +895,8 @@ suites) print SKIP with a reason; pass `--pip` or `--pg` (with
 
 **Python vector verifier.** `npm run verify:vectors:python` runs
 `scripts/verify_kalvora_external_salt_vector.py`, an independent reproduction of
-the committed Kalvora vector and its application-secret vector using Python's
+the committed Kalvora vector, its application-secret vector and the sign-in
+vector using Python's
 `hashlib` and `hmac`, the `cryptography` package, and its own SLIP-0010 and
 HKDF implementations; it does not execute the TypeScript code. Local development therefore requires Python 3.12 and
 `cryptography==46.0.3`; CI installs it from exact, hash-pinned wheels

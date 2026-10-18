@@ -21,6 +21,11 @@ export type DerivationCredentials = Readonly<{
   onProgress?: (progress: number) => void;
 }>;
 
+/**
+ * The public identity of a derived key. It is a chain wallet when the profile
+ * is a chain wallet profile, such as the Kalvora profile, and a sign-in key
+ * under the sign-in profile; the names keep "wallet" either way.
+ */
 export type DerivedIdentity = Readonly<{
   profileId: string;
   codecId: string;
@@ -32,6 +37,10 @@ export type DerivedIdentity = Readonly<{
   fingerprint: string;
 }>;
 
+/**
+ * A derived key inside `withDerivedWallet`'s callback scope: a wallet under a
+ * chain wallet profile, a sign-in key under the sign-in profile.
+ */
 export type DerivedWallet = Readonly<{
   identity: DerivedIdentity;
   /**

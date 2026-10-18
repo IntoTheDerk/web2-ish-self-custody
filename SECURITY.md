@@ -107,9 +107,13 @@ existing account — so wallet enrollment records deserve the same monitoring as
 any other privileged write. What that operator cannot do is recover, derive, or
 sign with any user's wallet, because no material capable of producing one is
 present. Their remaining path to a specific wallet is an offline guessing
-attack against a known public identity, which is the same attack any holder of
-the public identity already has, and is bounded by password entropy and the
-profile's scrypt cost rather than by any server-side control.
+attack against a known public identity. Under a chain wallet profile that is
+the same attack any holder of the public address already has. Under the
+sign-in profile the enrolled sign-in public key is an oracle that may not be
+public otherwise, so the database adds one for every account, including
+accounts whose wallet address was never published. Either way the attack is
+bounded by password entropy and the profile's scrypt cost rather than by any
+server-side control.
 
 ## Reporting
 

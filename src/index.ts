@@ -20,6 +20,12 @@ export { defineDerivationProfile } from "./profile.js";
 export type { DerivationProfile, KeyDerivation, ProfileDomains, SaltPolicy } from "./profile.js";
 export { ED25519_SEED_BYTES, deriveIdentityFromSeed } from "./seed.js";
 export type { SeedIdentity } from "./seed.js";
+export {
+  SIGN_IN_KEY_DOMAIN,
+  signInEd25519Codec,
+  signInEd25519ExternalSalt,
+  signInHkdfEd25519,
+} from "./signIn.js";
 export type {
   DerivationContext,
   DerivationCredentials,
