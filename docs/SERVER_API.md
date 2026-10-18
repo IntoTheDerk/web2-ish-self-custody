@@ -108,16 +108,19 @@ hold the password, and the password is the only high-entropy input.
   oracle at that cost, and a correct guess opens it and gives the wallet. It is
   not published, so stealing the database adds it.
 
-Under a chain wallet profile, stealing the database does not improve the
-guessing attack: the salt is not a secret and was already published to every
-client that ever derived, and the public key is the address the user shares.
-Under the sign-in profile it does give the attacker one thing that may not be
-public otherwise: an oracle for every account, including accounts whose wallet
-address was never published. The work per guess is the same.
+In the deterministic modes, under a chain wallet profile, stealing the
+database does not improve the guessing attack: the salt is not a secret and was
+already published to every client that ever derived, and the public key is the
+address the user shares. Under the sign-in profile it does give the attacker one
+thing that may not be public otherwise: an oracle for every account, including
+accounts whose wallet address was never published. In `random-vault` mode it
+gives the attacker each account's vault, the oracle that mode otherwise keeps
+unpublished. The work per guess is the same.
 
 The corollary is the uncomfortable one and must not be softened: a weak password
-is recoverable by anyone who learns a public address or an enrolled public key,
-and this module cannot detect or prevent that. Deterministic password-derived
+is recoverable by anyone who learns a public address or an enrolled public key
+in the deterministic modes, or who obtains a stored vault in `random-vault`
+mode, and this module cannot detect or prevent that. Deterministic password-derived
 custody is not equivalent to a random wallet seed. See
 [the security model](SECURITY_MODEL.md).
 
@@ -1241,7 +1244,9 @@ limitation, not an oversight.
 
 **Can:** read every username, display name, email, verification state, enrolled
 address, public key and fingerprint (a wallet's only under a chain wallet
-profile), and the public salt; read hashed session
+profile), and the public salt (per account in `per-account-deterministic`
+mode); in `random-vault` mode, every account's encrypted vault and its
+revisions; read hashed session
 tokens, hashed IPs, hashed user agents, and audit rows; suspend accounts; delete
 sessions; and — with write access — enroll an attacker-controlled public key
 against an existing account. That last one is the real insider risk in this
@@ -1249,12 +1254,15 @@ design and deserves the same monitoring as any other privileged write. Alert on
 inserts into `<p>_account_wallets`.
 
 **Cannot:** recover, derive, reconstruct, decrypt, or sign with any user's
-enrolled key or wallet. No material capable of producing one is present, and no
-amount of database access creates it. Under the sign-in profile the database
+enrolled key or wallet without that user's password or, in `random-vault` mode,
+recovery code. No material capable of producing one without them is present, and
+no amount of database access creates it. Under the sign-in profile the database
 does not even say which wallet a user has. Nor can they mint a usable session token from the
 stored hashes, or read a plaintext email verification code.
 
-Their remaining path to a specific wallet is the offline guessing attack that
-every holder of a public address already has; under the sign-in profile the
-oracle is the enrolled sign-in public key. It is bounded by password entropy and
+Their remaining path to a specific wallet is an offline guessing attack. In the
+deterministic modes it is the one every holder of a public address already has;
+under the sign-in profile the oracle is the enrolled sign-in public key. In
+`random-vault` mode the oracle is the stored vault, which is not public
+otherwise. It is bounded by password entropy and
 scrypt cost — the two things a server can neither improve nor weaken.
