@@ -28,6 +28,8 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 ## Failure modes
 
+The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which the application's own account recovery must replace; the SDK has none. A sign-in key holds no funds.
+
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
 - Lost vault password and lost recovery code: permanent wallet loss.
 - Password or username change: different wallet identity.
@@ -51,8 +53,22 @@ The strength policy therefore belongs to the application at the moment a passwor
 | Bounded lifetime | The intermediate key is zeroed before the callback runs and the secrets when it returns or throws, and the core keeps no other copy of a secret. A callback that returns a secret's bytes rather than a copy fails (`wallet-scope-closed`). A copy kept beyond the callback is the application's to protect and zero. The vault path never computes them. |
 | Tied to the credentials | A password, username, salt, context or profile-id change gives every label a different secret, so whatever an application sealed under a secret must be re-protected before the old password is gone. |
 
+## Sign-in profile
+
+`signInEd25519ExternalSalt` derives a sign-in key: an Ed25519 key whose `S_` identifier no chain accepts, for an identity service to enroll in place of a wallet. An application that also needs a wallet derives its master seed as an application secret of the same run and opens it with `withKalvoraWalletFromMasterSeed` ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)).
+
+| property | consequence |
+| --- | --- |
+| Not a wallet | The service stores the sign-in key's public key and receives its signatures, and nothing about the wallet. A sign-in key holds no funds, but it is lost exactly when the credentials are, and a wallet derived from an application secret of the same run is lost with it unless the application keeps its own encrypted backup of the master seed. |
+| Still a password oracle | The sign-in public key is a password verifier at scrypt cost, like a wallet public key. Anyone holding the service's database can guess offline, and a correct guess gives the password, and with it every key of the run: the sign-in key, every application secret, and the wallet derived from one. |
+| A published wallet address is an oracle too | Once a wallet's address is public, anyone who also knows the username and the public salt can guess offline with no service data at all, and a hit gives the sign-in key as well as the wallet. Only high-entropy, password-manager-generated passwords resist either attack. |
+| Independent branches | The sign-in key and the application secrets are HKDF-SHA256 outputs of the same scrypt output under different public domain strings. Neither the sign-in key nor its signatures give a secret, and a secret does not give the sign-in key. |
+| No check value for the wallet | A mistyped password derives a different wallet without any error. The application compares the run's sign-in public key with the enrolled one before it uses or shows the wallet. |
+| Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Released sign-in profiles therefore stay exported after they are retired. |
+| Bounded lifetime | `withKalvoraWalletFromMasterSeed` works on its own copy of the master seed and zeroes it, and zeroes the wallet key when its synchronous callback returns or throws. The master seed passed in stays the caller's: an application secret's own array is zeroed by `withDerivedWallet` when its callback returns, and any copy the caller made is the caller's to zero. |
+
 ## Server boundary
 
-A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, application secret, or encrypted vault.
+A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, application secret, or encrypted vault. Under the sign-in profile the public identity it stores is the sign-in key's, and it needs nothing about the user's wallet.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.

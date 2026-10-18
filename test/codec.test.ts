@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { kalvoraEd25519Codec } from "../src/chains/kalvora.js";
 import { assertCodecRoundTrip, defineIdentityCodec, type IdentityCodec } from "../src/codec.js";
 import { DerivationError } from "../src/errors.js";
+import { signInEd25519Codec } from "../src/signIn.js";
 import { krypticHexCodec, truncatingCodec } from "./support/kryptic-chain.js";
 
 const publicKeyBytes = Uint8Array.from({ length: 32 }, (_, index) => index * 7);
@@ -61,7 +62,7 @@ describe("defineIdentityCodec", () => {
 
 describe("assertCodecRoundTrip", () => {
   it("passes for every codec this repository ships or tests with", () => {
-    for (const codec of [kalvoraEd25519Codec, krypticHexCodec]) {
+    for (const codec of [kalvoraEd25519Codec, signInEd25519Codec, krypticHexCodec]) {
       expect(() => assertCodecRoundTrip(codec, publicKeyBytes)).not.toThrow();
       expect(() => assertCodecRoundTrip(codec, new Uint8Array(32))).not.toThrow();
       expect(() => assertCodecRoundTrip(codec, new Uint8Array(32).fill(0xff))).not.toThrow();

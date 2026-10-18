@@ -1,17 +1,20 @@
 # Protocol
 
-This document is the wire specification. It has two layers:
+This document is the wire specification. It has three parts:
 
 1. **The generic transcript** — the rule every profile follows, parameterized
    over that profile's domain-separation strings, salt policy, KDF parameters,
    and optional key-derivation step. It contains no chain-specific value.
 2. **The Kalvora instance** — the exact literal constants that turn the generic
-   rule into the bundled Kalvora profile.
+   rule into the bundled Kalvora profile, and the Kalvora wallet opened from a
+   master seed.
+3. **The sign-in profile** — the chain-neutral profile whose key signs in to an
+   identity service and is not a wallet on any chain.
 
-Someone should be able to reimplement either layer from this document alone:
-part 1 to support a new chain, part 2 to reproduce the committed Kalvora vector
-byte for byte. Where this document and the committed source disagree, the source
-and the vectors are the contract.
+Someone should be able to reimplement any part from this document alone: part 1
+to support a new chain, parts 2 and 3 to reproduce the committed vectors byte
+for byte. Where this document and the committed source disagree, the source and
+the vectors are the contract.
 
 ---
 
@@ -420,7 +423,11 @@ destroys every wallet derived under it.
 Application secrets are versioned by `D_app`, not by the profile. Changing
 `D_app`, the `info` layout, the hash, or the output length is a new domain
 string (`… v2`) with its own vector, never an edit, and leaves every wallet and
-profile id unchanged.
+profile id unchanged. The other direction does not hold: `profile.id` is in
+`info`, so a new profile id gives every label a new secret, and so does any
+change that needs one. An application that derives a key of lasting value from
+a secret, such as the wallet of [Part 3](#part-3--the-sign-in-profile), inherits
+the profile's versioning.
 
 Adding a profile or a chain is not a migration. Moving an existing user onto a
 different one is, and it needs an enrollment step.
@@ -497,6 +504,66 @@ release cannot move it.
 | `saltPolicy` | `external-32` |
 | `domains.salt` | *(absent)* |
 | `keyDerivation.id` | `slip10-ed25519:m/44'/5258'/0'/0'/0'` |
+
+## Kalvora wallet from a master seed
+
+`withKalvoraWalletFromMasterSeed(masterSeed, useWallet)` opens the Kalvora
+wallet of a 32-byte SLIP-0010 master seed the caller already holds. No password
+derivation runs. It is for an application whose wallet master seed is an
+[application secret](#application-secrets), such as one of the
+[sign-in profile](#part-3--the-sign-in-profile), or that secret restored from
+the application's own encrypted backup.
+
+```
+walletKey  = SLIP-0010 Ed25519 key of masterSeed at m/44'/5258'/0'/0'/0'     kalvoraSlip10Ed25519
+publicKey  = Ed25519 public key of walletKey
+address    = base58(publicKey)                                               kalvoraEd25519Codec
+identifier = "A_" ‖ address
+```
+
+The key step and the codec are the Kalvora profile's, so this is the key the
+Kalvora profile would derive if its scrypt output were `masterSeed`, and
+kalvora.js's first wallet for that seed. It is not the Kalvora password wallet
+of any credentials: that wallet's master seed is the Kalvora profile's scrypt
+output, which is never an application secret.
+
+The callback receives a wallet whose identity has these fields:
+
+| field | value |
+| --- | --- |
+| `derivation` | `kalvoraSlip10Ed25519.id`, `slip10-ed25519:m/44'/5258'/0'/0'/0'` |
+| `codecId` | `kalvora-ed25519-base58-v1` |
+| `curve` | `ed25519` |
+| `address`, `publicKey`, `publicKeyBytes` | as above |
+| `fingerprint` | the core's [fingerprint](#6-identity-encoding) of `address` |
+
+There is no profile id and no username: neither is an input.
+
+- **Input.** `masterSeed` must be a plain `Uint8Array` of exactly 32 bytes,
+  not all zero; anything else throws `invalid-seed` before anything is derived.
+  - *Plain* means the exact typed-array tag, as `deriveIdentityFromSeed`
+    requires, and a prototype that is a realm's `Uint8Array.prototype`. A
+    genuine Uint8Array from another realm is accepted; a Buffer or any other
+    subclass is refused.
+  - The length and the bytes are read from the array's internal slots, never
+    through a `byteLength` property or an iterator, which a subclass or an own
+    property could replace.
+  - *Not all zero*: 32 zero bytes are what an application secret holds once its
+    `withDerivedWallet` scope has ended, and that seed's wallet key is public
+    knowledge. An honest secret is all-zero with probability 2^-256.
+
+  The caller keeps ownership of `masterSeed` and zeroes it. The helper works
+  on an internal copy and zeroes that copy once the key exists.
+- **Scope.** The call is synchronous, so it can run inside a `withDerivedWallet`
+  callback, and the callback must be synchronous too: a thenable result throws
+  `async-wallet-scope`. The node key is zeroed when the callback returns or
+  throws, and the signer then throws `wallet-scope-closed`.
+- **Signing.** As in [Signing](#signing): Ed25519 over the exact bytes, 1 to
+  1,048,576 of them, `invalid-message` otherwise.
+- **Versioning.** Nothing here is new wire surface: the path, the key step and
+  the codec are the Kalvora profile's and change only under new ids. Which
+  master seed an application feeds it is the application's own versioned
+  choice (for an application secret, its label).
 
 ## Retired profiles
 
@@ -607,7 +674,215 @@ standard library's `hmac`, first checked against RFC 5869 test case 1. It then
 checks `PRK`, every label against the label rule and for uniqueness, every
 `info` string, and every secret.
 
+It loads the [sign-in vector](#sign-in-test-vector) as a third fixture, by its
+explicit path and with the same strict shape checks, nested objects included;
+see [its verification](#independent-verification-of-the-sign-in-vector).
+
 This is cross-implementation regression evidence for the committed vector. It
 is not a cryptographic audit, does not prove browser or deployment safety, does
 not assess credential entropy, and does not replace additional vectors and
 external review before funded use.
+
+---
+
+# Part 3 — the sign-in profile
+
+Everything below is exported from the core entry `web2-ish-self-custody`, which
+imports no chain SDK. These values are fixed wire surface, reproduced here
+exactly as specified.
+
+## Why a sign-in profile
+
+An identity service enrolls the key that signs its challenges and stores that
+key's public key. Under a chain wallet profile, such as the Kalvora profile, that
+key **is** the user's wallet: the service stores a wallet address for every
+account and receives a wallet signature at every sign-in.
+
+Under the sign-in profile the enrolled key is a **sign-in key**: an Ed25519 key
+whose identifier, `S_` and hex, no chain accepts. An application that also needs
+a wallet derives its master seed as an [application secret](#application-secrets)
+of the same run and opens it with
+[`withKalvoraWalletFromMasterSeed`](#kalvora-wallet-from-a-master-seed). That
+costs one password stretch per entry, and the service holds nothing derived
+from the wallet.
+
+## The sign-in codec
+
+`signInEd25519Codec`, id **`web2ish-sign-in-ed25519-hex-v1`**.
+
+| member | rule |
+| --- | --- |
+| `encodeAddress(k)` | the literal `S_` followed by the raw 32 bytes as 64 lowercase hex digits |
+| `encodePublicKey(k)` | the same string |
+| `decodePublicKey(s)` | accepts exactly `^S_[0-9a-f]{64}$` and returns the 32 bytes |
+
+- Decoding does not trim and does not fold case. Surrounding whitespace, a
+  trailing newline, uppercase hex, any other tag, and 63 or 65 digits each throw
+  `invalid-public-key`, as does a non-string.
+- Encoding requires exactly 32 bytes, and throws `invalid-public-key` otherwise.
+- `_` is outside the base58 alphabet and the tag is not Kalvora's `A_`, so no
+  Kalvora parser accepts a sign-in identifier, and the Kalvora codec's decoder
+  refuses one. The sign-in decoder refuses every Kalvora identifier.
+- The identifier is 66 characters. Its [fingerprint](#6-identity-encoding) is
+  `S` followed by 15 uppercase hex digits, grouped by four. Both fit the
+  identity service's schema checks.
+
+## The sign-in key derivation
+
+`signInHkdfEd25519`, id **`hkdf-sha256-sign-in-key-v1`**: HKDF-SHA256 (RFC 5869)
+of the scrypt output, with one domain string `D_s` as both the salt and the
+`info`, and L = 32.
+
+```
+PRK_s  = HMAC-SHA256( key = utf8(D_s), data = masterSeed )               HKDF-Extract, salt = utf8(D_s)
+seed_s = HKDF-Expand-SHA256( PRK_s, info = utf8(D_s), L = 32 )
+       = HMAC-SHA256( PRK_s, utf8(D_s) ‖ 0x01 )                          its single block T(1)
+```
+
+`D_s` is exported as `SIGN_IN_KEY_DOMAIN`. The step takes exactly the 32-byte
+scrypt output (`invalid-seed` otherwise; the core reports any step failure as
+`invalid-profile`), computes both HMACs with `hmac` directly, zeroes `PRK_s`
+before it returns, and hands back HMAC's own output, which the core zeroes.
+
+The step is one-way, so the profile can be used with application secrets
+([refusals](#refusal-without-a-one-way-key-derivation-step) do not apply).
+`PRK_s` and the application-secret `PRK` are extracted from the same
+`masterSeed` under two different public domain strings, so a holder of the
+sign-in key, its public key, or any number of its signatures cannot compute an
+application secret, and a holder of a secret cannot compute the sign-in key.
+
+## The sign-in profile
+
+`signInEd25519ExternalSalt` uses `signInEd25519Codec`, the Ed25519 curve, scrypt
+`N = 65536, r = 8, p = 1, dkLen = 32` (the package floor and the Kalvora
+profile's), and `signInHkdfEd25519`:
+
+| field | value |
+| --- | --- |
+| `id` | `web2ish-sign-in-ed25519-external-salt-v1` |
+| `algorithm` | `scrypt-sha512-hkdf-sha256-ed25519-external-32-v1` |
+| `saltPolicy` | `external-32` |
+| `domains.salt` | *(absent)* |
+| `keyDerivation.id` | `hkdf-sha256-sign-in-key-v1` |
+| `codec.id` | `web2ish-sign-in-ed25519-hex-v1` |
+
+All UTF-8. Only the password-hash domain carries a trailing newline:
+
+| constant | exact value |
+| --- | --- |
+| `D_pw` | `web2-ish-self-custody sign-in password hash v1\n` (47 bytes, including its LF) |
+| `D_ent` | `web2-ish-self-custody sign-in Ed25519 external salt entropy v1` (62 bytes) |
+| `D_s` | `web2-ish-self-custody sign-in key v1` (36 bytes) |
+
+```
+passwordHash  = SHA-512( utf8("web2-ish-self-custody sign-in password hash v1\n") ‖ passwordBytes )
+walletEntropy = SHA-512( utf8(
+                  "web2-ish-self-custody sign-in Ed25519 external salt entropy v1" ‖ "\n" ‖
+                  applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖
+                  normalizedUsername ‖ "\n" ‖ hex(passwordHash) ) )
+salt          = the caller's exact 32 bytes
+masterSeed    = scrypt(walletEntropy, salt, N=65536, r=8, p=1, dkLen=32)
+seed_s        = HKDF-SHA256(masterSeed, salt = info = "web2-ish-self-custody sign-in key v1", L = 32)
+publicKey     = Ed25519 public key of seed_s
+address       = "S_" ‖ hex(publicKey)
+identifier    = address
+secret(label) = the application-secret construction, with profile.id = "web2ish-sign-in-ed25519-external-salt-v1"
+```
+
+The transcript is the [generic one](#derivation) with these domains; the name
+`walletEntropy` is the generic transcript's, not a claim that the key is a
+wallet.
+
+## A wallet beside the sign-in key
+
+The pattern the profile exists for:
+
+```ts
+withDerivedWallet(
+  { profile: signInEd25519ExternalSalt, username, password, salt, context },
+  (signIn, secrets) => {
+    // signIn signs the service's challenge; the service enrolls signIn.identity.
+    return withKalvoraWalletFromMasterSeed(secrets.get("example-wallet-seed-v1")!, (wallet) => …);
+  },
+  { applicationSecrets: ["example-wallet-seed-v1"] },
+);
+```
+
+- **One stretch.** The sign-in key and the wallet come from one scrypt run.
+- **The sign-in key is the password check.** The wallet has no check value of
+  its own: a mistyped password derives a different wallet without any error. An
+  application compares the run's sign-in public key with the one the service
+  enrolled before it uses or shows the wallet.
+- **What the service sees.** The sign-in public key, its signatures, and its
+  fingerprint. None of them yields the wallet master seed (above). The sign-in
+  public key is still a password oracle at scrypt cost, and so is the wallet's
+  address once it is public (see [the security model](SECURITY_MODEL.md)).
+- **What the wallet depends on.** The password, the username, the salt, the
+  context, the label, and the sign-in profile itself: its id (inside `info`),
+  its domains and its KDF. A password change, or a move to any new sign-in
+  profile, gives a new wallet. A sign-in profile is therefore never edited and,
+  once released, stays exported after it is retired, so that an application
+  can derive a user's old wallet once while it moves the user to a successor.
+- **Surviving a password change.** The SDK stores nothing. An application that
+  needs the same wallet after a password change keeps its own encrypted backup
+  of the master seed, under a key its server never holds, and opens the
+  restored seed with the same helper.
+
+## Sign-in test vector
+
+`vectors/sign-in-ed25519-external-salt-v1.json`. **Test-only credentials.** It
+uses the credentials, context and salt of the Kalvora vector
+(`correct horse battery staple lantern orbit`, `JESSE@example.COM`,
+`example-app`, `kalvora-mainnet`, salt
+`c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a`), so the two
+can be compared: the sign-in key differs from the Kalvora password wallet, and
+the secrets differ from the Kalvora profile's for the same labels. It commits
+the transcript intermediates, the sign-in key with a signature, the
+application-secret `PRK` and the secrets `example-secret-v1` and
+`example-wallet-seed-v1` with their `info` strings, and the Kalvora wallet
+opened from `example-wallet-seed-v1` with a signature. It is a new file, never
+regenerated; the Kalvora vectors are untouched by it.
+
+| field | value |
+| --- | --- |
+| `passwordHash` | `7bf0db080ee49e2ca2c76db1a2362d7bdcdc9ed5e33c396c279e46d79a53c3c77b2c25a8bca765d8b199082c347624f8e1765c237554c07e68de705ffe49fd7a` |
+| `walletEntropy` | `6e33e765b56fe02259b6a62fc37f186bc88678fccc147f622af776997256b0f737d5c04ae88440486ccefec735f95d6562cd10aefc984dc03790cad661a9214a` |
+| `masterSeed` | `45e49fb0cffa6af1c7b70497f2a22644470bc8b7923cf7bfeed538f64afd567d` |
+| `PRK_s` | `58fb4041b06645a2b4fe43c93b25608cd2b44de5173c4df5ecfcefc5ca811d6b` |
+| `seed_s` | `31ee71687bd9d3b3a892a7c8ffcd3873197c7b10890c5b92f2710fa0a239976d` |
+| sign-in public key | `8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205` |
+| sign-in identifier and address | `S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205` |
+| fingerprint | `S8B3 BA31 9C0D 2042` |
+| message | `fixture-sign-in-key-message-v1` |
+| signature | `d4dfa7f28242ed865a81ea9e015e28e9fdf9ea7415564b925deb9bb374f2546d5aa4f2d4c32e8f91c4eed2a3c99f0091bb366522c7654b41e39eaeeabf356b09` |
+| application-secret `PRK` | `593b3438a1a21d9f28a28931f7f0a80bad82c91b8ce50d7ed39ae78ab0b26dbd` |
+| `example-secret-v1` | `02204dfbae4331223644219363070c1b3927201632a6ff2e22692e685aa34d19` |
+| `example-wallet-seed-v1` | `b0e5c5c3af62990ff50d3ac0f3b5328fad8d8e5a4d5f12a1983dbefbb08dc0ff` |
+| wallet public key | `5149cd2e8791def4a15ea67fedd5abfe38541ac661ba3f217017e9e8e4d21546` |
+| wallet address | `6UKJ3nbCJGDMNQypzkZ3iq5hL6G4y2kJYQJSez8gwFL1` |
+| wallet identifier | `A_6UKJ3nbCJGDMNQypzkZ3iq5hL6G4y2kJYQJSez8gwFL1` |
+| wallet message | `fixture-governance-intent-kalvora-master-seed-v1` |
+| wallet signature | `bc8b0d1f9c4d5a058b85961e656349cf7906ee7bf7e78c657e197682c6bebfdefdd801fd02457201336d5d3afe672db8ad3220aa13fcef9ebd3434466a91f406` |
+
+## Independent verification of the sign-in vector
+
+`scripts/verify_kalvora_external_salt_vector.py` loads the sign-in vector as its
+third fixture. It requires the credential fields to equal the Kalvora wallet
+fixture's, then recomputes, with no code shared with this package:
+
+- the transcript under the sign-in domains, checking `passwordHash`,
+  `walletEntropy` and `masterSeed`;
+- the sign-in key with its own RFC 5869 HKDF (Extract, then the general Expand
+  rather than the one-block shortcut), checking `PRK_s`, `seed_s`, the public
+  key, the `S_` identifier against `^S_[0-9a-f]{64}$`, the address, the
+  fingerprint and the signature;
+- the application-secret `PRK`, every label, `info` string and secret under the
+  sign-in profile id;
+- the Kalvora wallet from the named secret with its own SLIP-0010, checking the
+  public key, the base58 address, the `A_` identifier, the fingerprint and the
+  signature;
+- that the sign-in key, that wallet and the Kalvora password wallet are three
+  different keys, that the scrypt output differs from the Kalvora profile's, and
+  that no secret equals the Kalvora profile's secret for the same label.
+
+The same assurance boundary applies as for the other vectors.
