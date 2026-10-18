@@ -249,7 +249,9 @@ afterwards.
 The step is how a chain binds its own key structure into the wallet — the
 bundled Kalvora profile uses it for SLIP-0010 at SLIP-44 coin type 5258. The
 core does not know what the step computes; `keyDerivation.id` names it so it
-can be pinned and reviewed like every other profile field.
+can be pinned and reviewed like every other profile field. A profile used with
+[application secrets](#application-secrets) needs a step that is one-way:
+`masterSeed` must not be recoverable from its output.
 
 ### 6. Identity encoding
 
@@ -293,6 +295,120 @@ The authentication challenge format that `web2-ish-self-custody/server` issues i
 a separate, layered specification; see
 [the server API reference](SERVER_API.md#challenge-message-format).
 
+## Application secrets
+
+An application can ask the same derivation for secrets of its own: one 32-byte
+value per label it chooses, computed from the scrypt output of step 4 in the
+same run as the wallet.
+
+```ts
+withDerivedWallet(credentials, (wallet, secrets) => …, { applicationSecrets: ["example-secret-v1"] })
+```
+
+`secrets` is a `ReadonlyMap` from label to secret, in request order, and is
+empty when none are requested. Requesting none, the default, computes nothing
+beyond the wallet, and the wallet is the same either way.
+
+### Construction
+
+Write `D_app` for the core-wide domain string
+`web2-ish-self-custody application secret v1` (43 bytes, UTF-8, no trailing
+newline). It is not a profile field: every profile uses the same one.
+
+```
+PRK    = HMAC-SHA256( key = utf8(D_app), data = masterSeed )            HKDF-Extract, salt = utf8(D_app)
+info   = utf8( D_app ‖ "\n" ‖ profile.id ‖ "\n" ‖ applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖
+               normalizedUsername ‖ "\n" ‖ label )
+secret = HKDF-Expand-SHA256( PRK, info, L = 32 )  =  HMAC-SHA256( PRK, info ‖ 0x01 )
+```
+
+- `masterSeed` is the 32-byte output of [step 4](#4-scrypt), before the
+  profile's key-derivation step. `applicationId` and `networkId` are the
+  canonical context values, `normalizedUsername` is the normalized username, and
+  `profile.id` is the profile's id. HKDF is RFC 5869 with SHA-256.
+- `info` has six lines joined by a single `\n` and no trailing newline. The
+  profile id, the context values, the normalized username and the label each
+  come from an alphabet without a line break, so `info` is unambiguous.
+- The profile id is in `info` although it is not in the wallet transcript. Two
+  profiles that share a transcript derive the same wallet but different
+  secrets.
+
+### Labels
+
+- A label must match `^[a-z0-9][a-z0-9._:-]{2,79}$`: 3 to 80 characters,
+  starting with an ASCII letter or digit. It is not canonicalized, so an
+  uppercase label is rejected rather than folded.
+- Labels in one request must be unique.
+- Both rules fail with `invalid-secret-label` before any KDF work, as does an
+  options value that is not an object or an `applicationSecrets` that is not an
+  array.
+- Each secret depends only on its own label. Request order, and which other
+  labels are requested, change nothing.
+- The application owns its labels. A label names one secret for good, so an
+  application versions its labels itself (`example-secret-v1`), and a new label
+  is a new, independent secret.
+
+### Why the scrypt output, and not the wallet key
+
+- **The wallet key is meant to leave.** Step 5's output is the chain's wallet
+  key. For Kalvora it is kalvora.js's own wallet key, so it can be exported to
+  any wallet that holds the same key. A secret derived from the wallet key would
+  be known to every holder of that key.
+- **Independence in both directions.** The Kalvora key-derivation step is a
+  chain of hardened HMAC-SHA512 from `masterSeed`, which does not reveal
+  `masterSeed` from the key it outputs. A holder of the wallet key, or of any
+  number of its signatures, therefore cannot compute a secret. This direction
+  holds only because the step is one-way (see the refusals below). HKDF output
+  reveals neither `PRK` nor `masterSeed`, so a holder of one secret cannot
+  compute the wallet key or another label's secret. A secret is not a
+  signature, and the identity service never receives one.
+- **One stretch.** Secrets cost no second password stretch. A second one would
+  add no offline resistance, because the public key is already an oracle for the
+  password at scrypt cost (see [the security model](SECURITY_MODEL.md)).
+
+### Refusal without a one-way key-derivation step
+
+Secrets are independent of the wallet key only when the profile's
+key-derivation step is one-way. The core cannot check that, so it refuses the
+two cases it can recognise, both with `secret-unavailable`:
+
+- **No step.** A profile without `keyDerivation` uses `masterSeed` itself as
+  the wallet key ([step 5](#5-key-derivation)), so a secret derived from it
+  would be a function of the wallet key. This refusal comes before any KDF
+  work.
+- **A step that returns `masterSeed` unchanged.** The wallet key would again
+  be `masterSeed`. The core can only see this once scrypt has run, so this
+  refusal comes after it, and the step's output is zeroed before it throws.
+
+Any other invertible step (an XOR, a permutation, or anything else from which
+`masterSeed` can be recomputed) is accepted by the core, and a holder of that
+profile's wallet key can compute every one of its secrets. Such a profile must
+not be used with application secrets. The bundled Kalvora profile's step is
+hardened SLIP-0010, which is one-way.
+
+An empty request is not a request: `applicationSecrets: []` derives the wallet
+as usual under any profile.
+
+### Lifetime and scope
+
+- `PRK` is zeroed as soon as the secrets are expanded, before the callback runs.
+- The secrets' arrays are zeroed when the callback returns or throws, like the
+  seed. A caller that needs a secret afterwards copies it inside the callback
+  and zeroes the copy itself.
+- Each array is the HMAC output itself (Expand is computed as its one block),
+  so the core leaves no other copy of a secret to clear.
+- A callback that returns the map, a secret's array, a view of one, or its
+  buffer would hand back bytes that are already zero. That fails with
+  `wallet-scope-closed` instead, and the arrays are still zeroed.
+- Only `withDerivedWallet` derives secrets. The package-internal seed path that
+  the wallet vault uses never computes `PRK`, and the vault-opened wallets
+  (`openWalletVaultWithPassword`, `openWalletVaultWithRecoveryCode`) take no such
+  option: a vault holds a wallet seed, not a `masterSeed`.
+- Whatever changes `masterSeed` changes every secret: the password, the
+  username, the salt, or the context. So does the profile id. A password change
+  therefore yields new secrets, and an application must re-protect whatever it
+  sealed under the old ones before the old password is gone.
+
 ## Versioning
 
 Changing any byte of a domain string, transcript layout, normalization rule, KDF
@@ -300,6 +416,11 @@ parameter, salt policy, curve rule, or codec requires a **new profile id**, and 
 change to an encoding requires a new codec id. Published behavior must never be
 upgraded in place — a wallet is defined by its profile, so a silent change
 destroys every wallet derived under it.
+
+Application secrets are versioned by `D_app`, not by the profile. Changing
+`D_app`, the `info` layout, the hash, or the output length is a new domain
+string (`… v2`) with its own vector, never an edit, and leaves every wallet and
+profile id unchanged.
 
 Adding a profile or a chain is not a migration. Moving an existing user onto a
 different one is, and it needs an enrollment step.
@@ -441,6 +562,31 @@ which normalizes to `jesse@example.com`.
 A refactor that changes these values is wrong. The vector is not updated to
 match an implementation; the implementation is corrected to match the vector.
 
+### Application-secret vector
+
+`vectors/kalvora-ed25519-external-salt-v1.application-secret-v1.json` uses the
+same credentials, salt and wallet as the vector above, with the labels
+`example-secret-v1` and `example-secret-v2`. It also commits each `info` string
+in full. It is a new file, never regenerated, and the vector above is untouched
+by it.
+
+| field | value |
+| --- | --- |
+| `PRK` | `2ec83c08ebee7664d3afbb267e730e0d97baff96e2f863de36ffa723d8bfbb33` |
+| `example-secret-v1` | `80710625947fa570c16a2a28a41f74c8c1570b2311dbbca4d2a62fb09cb6e24f` |
+| `example-secret-v2` | `03e18695d24d9dc7dbe1c356a1c389275011ad4ae3a92f246b3c609810f04e9c` |
+
+The `info` of `example-secret-v1`, with each line on its own:
+
+```
+web2-ish-self-custody application secret v1
+web2ish-kalvora-ed25519-external-salt-v1
+example-app
+kalvora-mainnet
+jesse@example.com
+example-secret-v1
+```
+
 ## Independent vector verification
 
 `scripts/verify_kalvora_external_salt_vector.py` reconstructs the committed vector
@@ -452,6 +598,14 @@ result, the SLIP-0010 step (its own implementation, first checked against the
 SLIP-0010 specification's test vector 1), the public key, the Base58 identity encoding, the deterministic
 signature, and signature verification, and it fails on missing, unexpected,
 duplicate, incorrectly typed, or incorrectly encoded fixture fields.
+
+The same script loads the application-secret vector as a second fixture, by its
+explicit path and with the same strict shape checks (including each entry of
+`secrets`). It requires the credential fields to equal the wallet fixture's,
+recomputes `masterSeed` and the wallet, and implements HKDF-SHA256 with the
+standard library's `hmac`, first checked against RFC 5869 test case 1. It then
+checks `PRK`, every label against the label rule and for uniqueness, every
+`info` string, and every secret.
 
 This is cross-implementation regression evidence for the committed vector. It
 is not a cryptographic audit, does not prove browser or deployment safety, does

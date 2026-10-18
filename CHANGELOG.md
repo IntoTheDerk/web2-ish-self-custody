@@ -5,6 +5,57 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## v0.10.1-alpha.0 — unreleased (alpha pre-release)
+
+Application secrets. **Additive.** Wallet derivation and every profile, codec,
+transcript and committed vector are unchanged, and a call that requests no
+secret computes nothing new. The narrow source-compatibility edges are listed in
+the compatibility note below.
+
+- **`withDerivedWallet(credentials, useWallet, options?)`** takes an optional
+  third parameter, `{ applicationSecrets?: readonly string[] }`. Each label
+  yields a 32-byte secret, HKDF-SHA256 of the same scrypt output as the wallet
+  under the domain `web2-ish-self-custody application secret v1`, bound to the
+  profile id, context, normalized username and label (see
+  `docs/PROTOCOL.md#application-secrets`). The callback receives them as a new
+  second parameter, `secrets: ReadonlyMap<string, Uint8Array>`, which is empty
+  when none are requested; the arrays are zeroed when the callback returns or
+  throws, and the intermediate PRK before it runs. Each array is the HMAC
+  output itself, so no other copy is left behind. A callback that returns the
+  map, a secret's array, a view of one or its buffer fails with the existing
+  `wallet-scope-closed` code instead of returning bytes that are already zero.
+  `DerivedWallet` is unchanged, and a one-parameter callback still type-checks.
+- **`DerivationErrorCode`** gains `invalid-secret-label` (a label outside
+  `^[a-z0-9][a-z0-9._:-]{2,79}$`, a repeated label, or malformed options),
+  raised before any KDF work, and `secret-unavailable`, for secrets requested
+  from a profile whose wallet key is the scrypt output itself. That is a
+  profile without a key-derivation step, refused before any KDF work, or one
+  whose step returns the scrypt output unchanged, refused once scrypt has run.
+  Secrets are independent of the wallet key only when the step is one-way,
+  which the core cannot check; the `KeyDerivation` documentation now says so.
+- The wallet vault is untouched: its package-internal seed path never computes
+  the PRK, and the vault-opened wallets take no secrets.
+- **Vector** `vectors/kalvora-ed25519-external-salt-v1.application-secret-v1.json`:
+  the committed credentials with the labels `example-secret-v1` and
+  `example-secret-v2`, their `info` strings, the PRK and the secrets.
+  `scripts/verify_kalvora_external_salt_vector.py` loads it as a second fixture
+  by its explicit path with the same strict shape checks, requires its
+  credentials to equal the wallet vector's, and reproduces it with the standard
+  library's `hmac` (its HKDF checked against RFC 5869 test case 1).
+- Docs: `docs/PROTOCOL.md` "Application secrets" (the exact strings, why the
+  scrypt output rather than the wallet key, the refusals without a one-way
+  key-derivation step, and how the construction is versioned), a
+  `docs/SECURITY_MODEL.md` section and failure mode, and the README.
+
+**Compatibility note.** An exhaustive `switch` over `DerivationErrorCode` with a
+`never` check needs the two new cases. A hand-written double typed as
+`typeof withDerivedWallet` that calls the callback with one argument must pass
+the map as well; doubles that declare their own one-parameter callback type are
+unaffected. The callback now always receives a second argument, an empty map
+when no secrets are requested. A callback that declares its own optional second
+parameter no longer type-checks (TS2345), and in plain JavaScript that
+parameter now receives the map.
+
 ## v0.10.0-alpha.1 — 2026-09-29 (alpha pre-release)
 
 - **kalvora.js `0.0.1-alpha.1`.** The optional peer dependency moves from

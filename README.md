@@ -240,6 +240,39 @@ the profile in source and validate the salt source rather than accepting KDF
 parameters from a server response. Run derivation in a short-lived dedicated
 worker; see [Deriving in a client](docs/INTEGRATION.md#deriving-in-a-client).
 
+### Application secrets
+
+An application that needs a password-derived secret of its own, such as the
+root of a key-encryption key, requests it by label in the same derivation
+instead of running a second KDF:
+
+```ts
+const root = await withDerivedWallet(
+  credentials,
+  // Copy it out: the map's arrays are zeroed when this callback returns.
+  (_wallet, secrets) => Uint8Array.from(secrets.get("example-secret-v1")!),
+  { applicationSecrets: ["example-secret-v1"] },
+);
+try {
+  // Import `root` as a non-extractable key, then let the bytes go.
+} finally {
+  root.fill(0);
+}
+```
+
+Each secret is 32 bytes of HKDF-SHA256 from the scrypt output, bound to the
+profile, context, username and label. It is independent of the wallet key for
+any profile whose key-derivation step is one-way, as Kalvora's is: a holder of
+the wallet key cannot compute it. Secrets are zeroed when the callback returns,
+so copy one inside the callback if it must outlive it; returning a secret
+itself fails (`wallet-scope-closed`). Labels match
+`^[a-z0-9][a-z0-9._:-]{2,79}$` and are unique per request
+(`invalid-secret-label`). A profile without a key-derivation step, or with one
+that returns the scrypt output unchanged, refuses them (`secret-unavailable`);
+the core cannot check that any other step is one-way. A password change gives
+every label a new secret.
+See [the protocol](docs/PROTOCOL.md#application-secrets).
+
 ### The signer is deliberately named unsafe
 
 `signExactMessageUnsafe` signs precisely the bytes it is handed (1 byte to
@@ -643,7 +676,7 @@ before defining either.
 
 | export | kind | purpose |
 | --- | --- | --- |
-| `withDerivedWallet(credentials, useWallet)` | function | derives a wallet, scopes it to a synchronous callback, zeroes the key on exit |
+| `withDerivedWallet(credentials, useWallet, options?)` | function | derives a wallet, scopes it to a synchronous callback, zeroes the key on exit; `options.applicationSecrets` adds [application secrets](#application-secrets) as the callback's second parameter |
 | `derivePublicIdentity(credentials)` | function | the same derivation, returning only public identity material |
 | `defineDerivationProfile(profile)` | function | validates and freezes a profile |
 | `defineIdentityCodec(codec)` | function | validates and freezes a codec |
@@ -804,9 +837,9 @@ suites) print SKIP with a reason; pass `--pip` or `--pg` (with
 
 **Python vector verifier.** `npm run verify:vectors:python` runs
 `scripts/verify_kalvora_external_salt_vector.py`, an independent reproduction of
-the committed Kalvora vector using Python's `hashlib`, the `cryptography`
-package, and its own SLIP-0010 implementation; it does not execute the
-TypeScript code. Local development therefore requires Python 3.12 and
+the committed Kalvora vector and its application-secret vector using Python's
+`hashlib` and `hmac`, the `cryptography` package, and its own SLIP-0010 and
+HKDF implementations; it does not execute the TypeScript code. Local development therefore requires Python 3.12 and
 `cryptography==46.0.3`; CI installs it from exact, hash-pinned wheels
 (`scripts/requirements-vector-verifier-ci.txt`). See
 [the protocol](docs/PROTOCOL.md#independent-vector-verification) for the

@@ -38,9 +38,21 @@ The strength policy therefore belongs to the application at the moment a passwor
 - Retained callback references: public data remains available; a malicious caller can copy data it is given.
 - Process crash: JavaScript and browser memory cleanup is best effort.
 - Raw-signature confusion: the low-level exact-byte method can sign malicious bytes unless the product locally reconstructs and confirms a typed operation.
+- Copied application secret: a secret copied out of its callback, or read there by malicious same-origin JavaScript, exposes whatever the application protects with it. It does not expose the wallet key, the scrypt output, or another label's secret.
+
+## Application secrets
+
+`withDerivedWallet` can also return application secrets: 32-byte HKDF-SHA256 outputs of the same scrypt run, one per application-chosen label ([protocol](PROTOCOL.md#application-secrets)).
+
+| property | consequence |
+| --- | --- |
+| Password-derived | A secret has exactly the wallet's offline-guessing exposure and adds no entropy; the public key stays the cheaper oracle for the password. An application that uses one as a key-encryption key should also mix in a random per-account salt that it stores, so the key cannot be computed from the password alone and changes whenever that salt is replaced. |
+| Independent of the wallet key | Derived from the scrypt output, not from the exportable wallet key, so a holder of the wallet key or of its signatures cannot compute a secret (provided the profile's key-derivation step is one-way, as Kalvora's hardened SLIP-0010 is; the core cannot check this), and a holder of a secret cannot compute the wallet key or another label's secret. A profile without a key-derivation step, whose wallet key is the scrypt output, refuses secrets (`secret-unavailable`), and so does one whose step returns the scrypt output unchanged. A profile with any other invertible step must not be used with secrets. |
+| Bounded lifetime | The intermediate key is zeroed before the callback runs and the secrets when it returns or throws, and the core keeps no other copy of a secret. A callback that returns a secret's bytes rather than a copy fails (`wallet-scope-closed`). A copy kept beyond the callback is the application's to protect and zero. The vault path never computes them. |
+| Tied to the credentials | A password, username, salt, context or profile-id change gives every label a different secret, so whatever an application sealed under a secret must be re-protected before the old password is gone. |
 
 ## Server boundary
 
-A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, or encrypted vault.
+A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, application secret, or encrypted vault.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.
