@@ -87,6 +87,20 @@ run expensive derivation in a dedicated worker as described in
 Another device obtains the same setup from a fresh challenge and repeats this
 flow. There is no encrypted key file to synchronize in deterministic mode.
 
+### Application secrets and the sign-in profile
+
+`withAccountWallet` takes `withDerivedWallet`'s options as a fifth argument and
+passes `applicationSecrets` through unchanged, so the callback receives the
+secrets of the same scrypt run as its second parameter, under the same rules
+([protocol](PROTOCOL.md#application-secrets)). That is what lets this mode serve
+the sign-in profile: configure the service with `signInEd25519ExternalSalt`, and
+the application opens its wallet from an application secret in the same
+callback ([pattern](INTEGRATION.md#a-sign-in-key-separate-from-the-wallet)).
+The service enrolls only the `S_` sign-in key. Random-vault mode refuses the
+sign-in profile, at service configuration (`invalid-service-profile`) and in
+`createRandomAccountWallet` (`invalid-profile`): its key is random, so there is
+no application secret to derive a wallet from.
+
 ### Platform-owned password changes and recovery
 
 The SDK provides no password-change, wallet-replacement, or account-recovery

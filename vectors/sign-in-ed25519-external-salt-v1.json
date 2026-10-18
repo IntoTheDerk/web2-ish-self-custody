@@ -1,0 +1,55 @@
+{
+  "warning": "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET.",
+  "profile": "web2ish-sign-in-ed25519-external-salt-v1",
+  "algorithm": "scrypt-sha512-hkdf-sha256-ed25519-external-32-v1",
+  "passwordUtf8": "correct horse battery staple lantern orbit",
+  "username": "JESSE@example.COM",
+  "normalizedUsername": "jesse@example.com",
+  "applicationId": "example-app",
+  "networkId": "kalvora-mainnet",
+  "saltHex": "c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a",
+  "passwordHashHex": "7bf0db080ee49e2ca2c76db1a2362d7bdcdc9ed5e33c396c279e46d79a53c3c77b2c25a8bca765d8b199082c347624f8e1765c237554c07e68de705ffe49fd7a",
+  "entropyHex": "6e33e765b56fe02259b6a62fc37f186bc88678fccc147f622af776997256b0f737d5c04ae88440486ccefec735f95d6562cd10aefc984dc03790cad661a9214a",
+  "masterSeedHex": "45e49fb0cffa6af1c7b70497f2a22644470bc8b7923cf7bfeed538f64afd567d",
+  "signInKey": {
+    "keyDerivation": "hkdf-sha256-sign-in-key-v1",
+    "domain": "web2-ish-self-custody sign-in key v1",
+    "codec": "web2ish-sign-in-ed25519-hex-v1",
+    "prkHex": "58fb4041b06645a2b4fe43c93b25608cd2b44de5173c4df5ecfcefc5ca811d6b",
+    "seedHex": "31ee71687bd9d3b3a892a7c8ffcd3873197c7b10890c5b92f2710fa0a239976d",
+    "publicKeyHex": "8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+    "publicKeyIdentifier": "S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+    "address": "S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+    "fingerprint": "S8B3 BA31 9C0D 2042",
+    "messageUtf8": "fixture-sign-in-key-message-v1",
+    "signatureHex": "d4dfa7f28242ed865a81ea9e015e28e9fdf9ea7415564b925deb9bb374f2546d5aa4f2d4c32e8f91c4eed2a3c99f0091bb366522c7654b41e39eaeeabf356b09"
+  },
+  "applicationSecrets": {
+    "construction": "web2-ish-self-custody application secret v1",
+    "prkHex": "593b3438a1a21d9f28a28931f7f0a80bad82c91b8ce50d7ed39ae78ab0b26dbd",
+    "secrets": [
+      {
+        "label": "example-secret-v1",
+        "infoUtf8": "web2-ish-self-custody application secret v1\nweb2ish-sign-in-ed25519-external-salt-v1\nexample-app\nkalvora-mainnet\njesse@example.com\nexample-secret-v1",
+        "secretHex": "02204dfbae4331223644219363070c1b3927201632a6ff2e22692e685aa34d19"
+      },
+      {
+        "label": "example-wallet-seed-v1",
+        "infoUtf8": "web2-ish-self-custody application secret v1\nweb2ish-sign-in-ed25519-external-salt-v1\nexample-app\nkalvora-mainnet\njesse@example.com\nexample-wallet-seed-v1",
+        "secretHex": "b0e5c5c3af62990ff50d3ac0f3b5328fad8d8e5a4d5f12a1983dbefbb08dc0ff"
+      }
+    ]
+  },
+  "kalvoraWallet": {
+    "masterSeedLabel": "example-wallet-seed-v1",
+    "path": "m/44'/5258'/0'/0'/0'",
+    "derivation": "slip10-ed25519:m/44'/5258'/0'/0'/0'",
+    "codec": "kalvora-ed25519-base58-v1",
+    "publicKeyHex": "5149cd2e8791def4a15ea67fedd5abfe38541ac661ba3f217017e9e8e4d21546",
+    "publicKeyIdentifier": "A_6UKJ3nbCJGDMNQypzkZ3iq5hL6G4y2kJYQJSez8gwFL1",
+    "address": "6UKJ3nbCJGDMNQypzkZ3iq5hL6G4y2kJYQJSez8gwFL1",
+    "fingerprint": "6UKJ 3NBC JGDM NQYP",
+    "messageUtf8": "fixture-governance-intent-kalvora-master-seed-v1",
+    "signatureHex": "bc8b0d1f9c4d5a058b85961e656349cf7906ee7bf7e78c657e197682c6bebfdefdd801fd02457201336d5d3afe672db8ad3220aa13fcef9ebd3434466a91f406"
+  }
+}

@@ -1,7 +1,7 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createRandomAccountWallet, withAccountWallet, openWalletVaultWithPassword, rewrapWalletVaultPassword, type AccountWalletSetup } from "../../src/index.js";
-import { kalvoraEd25519ExternalSalt as profile } from "../../src/chains/kalvora.js";
+import { createRandomAccountWallet, withAccountWallet, openWalletVaultWithPassword, rewrapWalletVaultPassword, signInEd25519ExternalSalt, type AccountWalletSetup } from "../../src/index.js";
+import { kalvoraEd25519ExternalSalt as profile, withKalvoraWalletFromMasterSeed } from "../../src/chains/kalvora.js";
 import { createIdentityService, createIdentityRouter, pgDriver, type IdentityService, type SqlDriver, type SqlRow, type ServiceWalletMode } from "../../src/server/index.js";
 
 declare const process: { readonly env: Readonly<Record<string, string | undefined>> };
@@ -10,13 +10,14 @@ const encoder = new TextEncoder();
 const password = encoder.encode("correct horse battery staple");
 const nextPassword = encoder.encode("another strong account password");
 const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
-const prefixes = [`wd_${suffix}`, `wv_${suffix}`, `wo_${suffix}`];
+const prefixes = [`wd_${suffix}`, `wv_${suffix}`, `wo_${suffix}`, `ws_${suffix}`];
 type Client = { connect(): Promise<void>; end(): Promise<void>; query(text: string, parameters?: readonly unknown[]): Promise<{ rows: SqlRow[] }> };
 let client: Client;
 let sql: SqlDriver;
 let deterministic: IdentityService;
 let vaultService: IdentityService;
 let other: IdentityService;
+let signInService: IdentityService;
 const config = (tablePrefix: string, walletMode: ServiceWalletMode) => ({
   tablePrefix, walletMode, serviceProfileId: "example.identity", profile,
   applicationId: "example-app", networkId: "kalvora-testnet",
@@ -34,7 +35,8 @@ describe.skipIf(!url)("account wallet modes on PostgreSQL", () => {
     deterministic = createIdentityService(sql, config(prefixes[0]!, "per-account-deterministic"));
     vaultService = createIdentityService(sql, config(prefixes[1]!, "random-vault"));
     other = createIdentityService(sql, config(prefixes[2]!, "per-account-deterministic"));
-    for (const service of [deterministic, vaultService, other]) await service.migrate();
+    signInService = createIdentityService(sql, { ...config(prefixes[3]!, "per-account-deterministic"), profile: signInEd25519ExternalSalt });
+    for (const service of [deterministic, vaultService, other, signInService]) await service.migrate();
   }, 60_000);
 
   afterAll(async () => {
@@ -129,5 +131,31 @@ describe.skipIf(!url)("account wallet modes on PostgreSQL", () => {
     const login = await vaultService.createChallenge("vault-user", "login");
     const proof = await openWalletVaultWithPassword(saved.vault, nextPassword, profile.codec, w => bytesToHex(w.signExactMessageUnsafe(encoder.encode(login.message))));
     expect((await vaultService.login({ username: "vault-user", challengeId: login.id, signature: proof })).account.id).toBe(registered.account.id);
+  });
+
+  it("enrolls the sign-in key from a per-account setup and keeps the wallet off the service", async () => {
+    const label = "example-wallet-seed-v1";
+    const challenge = await signInService.createChallenge("sign-in-user", "registration");
+    const setup = challenge.walletSetup!;
+    expect(setup).toMatchObject({ mode: "per-account-deterministic", profileId: signInEd25519ExternalSalt.id, codecId: signInEd25519ExternalSalt.codec.id });
+    const proof = await withAccountWallet(setup, signInEd25519ExternalSalt, password, (signIn, secrets) => ({
+      address: signIn.identity.address, publicKey: signIn.identity.publicKey,
+      signature: bytesToHex(signIn.signExactMessageUnsafe(encoder.encode(challenge.message))),
+      wallet: withKalvoraWalletFromMasterSeed(secrets.get(label)!, w => w.identity.address),
+    }), { applicationSecrets: [label] });
+    expect(proof.publicKey).toMatch(/^S_[0-9a-f]{64}$/u);
+    const { wallet, ...registration } = proof;
+    const registered = await signInService.register({ username: "sign-in-user", challengeId: challenge.id, ...registration });
+    expect(registered.account.id).toBe(setup.accountId);
+    expect((await signInService.listWallets(registered.account.id)).map(w => w.publicKey)).toEqual([proof.publicKey]);
+    const stored = await client.query(`SELECT address, public_key, vault FROM ${prefixes[3]}_account_wallets`);
+    expect(JSON.stringify(stored.rows)).not.toContain(wallet);
+
+    const login = await signInService.createChallenge("sign-in-user", "login");
+    expect(login.walletSetup).toEqual(setup);
+    const signature = await withAccountWallet(login.walletSetup!, signInEd25519ExternalSalt, password,
+      signIn => bytesToHex(signIn.signExactMessageUnsafe(encoder.encode(login.message))));
+    expect((await signInService.login({ username: "sign-in-user", challengeId: login.id, signature })).account.id).toBe(registered.account.id);
+    await expect(signInService.getWalletVault(registered.account.id)).rejects.toMatchObject({ code: "invalid-request" });
   });
 });

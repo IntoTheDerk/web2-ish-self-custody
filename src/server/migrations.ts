@@ -231,6 +231,9 @@ export function identityMigrations(
            ON ${p}_accounts (service_profile_id, email)
            WHERE email IS NOT NULL`,
 
+        // One row per enrolled key. The table keeps its name under every
+        // profile: the key is a wallet only when the profile is a chain wallet
+        // profile, and the account's sign-in key under the sign-in profile.
         `CREATE TABLE IF NOT EXISTS ${p}_account_wallets (
            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
            account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
@@ -367,11 +370,13 @@ export function identityMigrations(
       name: "optional-friendly-name",
       statements: Object.freeze([
         // The username is a derivation input and can never change without
-        // changing the wallet, so the friendly name is the only part of an
-        // identity a user may edit. Making it nullable is what lets "the user
-        // chose this" be distinguishable from "we defaulted it to their
-        // username" -- previously every account carried a name it never asked
-        // for, so a client could not tell whether to show it.
+        // changing the enrolled key (the wallet, under a chain wallet profile;
+        // the sign-in key under the sign-in profile), so the friendly name is
+        // the only part of an identity a user may edit. Making it nullable is
+        // what lets "the user chose this" be distinguishable from "we
+        // defaulted it to their username" -- previously every account carried
+        // a name it never asked for, so a client could not tell whether to
+        // show it.
         // One statement on purpose. Dropping and re-adding the length CHECK to
         // spell out `display_name IS NULL OR ...` would be redundant -- a CHECK
         // only fails on FALSE, and `char_length(NULL)` is NULL -- and an

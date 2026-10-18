@@ -107,11 +107,19 @@ user-agent values supplied by the caller, and audit rows. In `random-vault` mode
 it also yields encrypted vaults and revisions. An operator with write access can suspend accounts,
 delete sessions, and enroll an attacker-controlled public key against an
 existing account — so wallet enrollment records deserve the same monitoring as
-any other privileged write. Database access alone does not provide a usable
-signing key. Offline password guessing remains possible against a known public
-identity in deterministic mode or encrypted vaults in `random-vault` mode.
-That attack is bounded by password entropy and the profile's scrypt cost
-rather than by any server-side control.
+any other privileged write. What that operator cannot do is recover, derive, or
+sign with any user's key from database access alone: no material that produces
+one without the password is present, and the vaults stored in `random-vault`
+mode are ciphertext that opens only with the password or the recovery code.
+Their remaining path to a specific key is an offline guessing attack. In the
+deterministic modes it runs against a known public identity. Under a chain
+wallet profile that is the same attack any holder of the public address already
+has. Under the sign-in profile the enrolled sign-in public key is an oracle that
+may not be public otherwise, so the database adds one for every account,
+including accounts whose wallet address was never published. In `random-vault`
+mode each stored vault is an oracle as well, at the scrypt cost recorded in it.
+Either way the attack is bounded by password entropy and the profile's scrypt
+cost rather than by any server-side control.
 
 ## Reporting
 
