@@ -5,7 +5,7 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## v0.10.1-alpha.0 — unreleased (alpha pre-release)
+## v0.10.1-alpha.0 — 2026-10-18 (alpha pre-release)
 
 Application secrets, and a sign-in profile with a Kalvora wallet from a master
 seed. **Additive.** Wallet derivation and every existing profile, codec,
