@@ -37,10 +37,21 @@ export type ProfileDomains = Readonly<{
  * back. `id` names the step (for example the scheme and path) so it can be
  * recorded and pinned; like every other profile field, changing the step is a
  * new profile, never an edit.
+ *
+ * A profile used with application secrets needs a one-way step: `masterSeed`
+ * must not be recoverable from the key it returns, as with Kalvora's hardened
+ * SLIP-0010. Application secrets are derived from `masterSeed`, so with an
+ * invertible step (a copy, an XOR, a permutation) a holder of the wallet key
+ * can compute every secret. The core cannot check this. It refuses secrets
+ * only for an absent step and for one that returns `masterSeed` unchanged
+ * (`secret-unavailable`).
  */
 export type KeyDerivation = Readonly<{
   id: string;
-  /** Must not retain or mutate `masterSeed`. The result is the core's to zero. */
+  /**
+   * Must not retain or mutate `masterSeed`. The result is the core's to zero.
+   * Must be one-way if the profile is used with application secrets.
+   */
   deriveKey(masterSeed: Uint8Array): Uint8Array;
 }>;
 
