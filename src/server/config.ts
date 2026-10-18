@@ -1,5 +1,6 @@
 import { assertCodecRoundTrip } from "../codec.js";
 import type { DerivationProfile } from "../profile.js";
+import { signInEd25519Codec } from "../signIn.js";
 import { IdentityError } from "./errors.js";
 import type {
   IdentityServiceConfig,
@@ -84,10 +85,19 @@ export function resolveIdentityServiceConfig(
   if (!["service-deterministic", "per-account-deterministic", "random-vault"].includes(walletMode)) {
     throw new IdentityError("Unknown wallet mode.", "invalid-service-profile");
   }
+  const profile = assertServiceableProfile(config.profile);
+  // A random-vault key comes from no password derivation, so under the sign-in
+  // profile there would be no application secret and no wallet beside it.
+  if (walletMode === "random-vault" && profile.codec.id === signInEd25519Codec.id) {
+    throw new IdentityError(
+      `Profile "${profile.id}" enrolls a password-derived sign-in key; random-vault mode needs a chain wallet profile.`,
+      "invalid-service-profile",
+    );
+  }
   return Object.freeze({
     walletMode,
     serviceProfileId: config.serviceProfileId,
-    profile: assertServiceableProfile(config.profile),
+    profile,
     applicationId: config.applicationId,
     networkId: config.networkId,
     tablePrefix: config.tablePrefix ?? defaults.tablePrefix,

@@ -15,6 +15,132 @@ and the commit history.
 - Store vault ciphertext at enrollment, authorize multi-device downloads through
   a host hook, and use revision checks for password-wrapper updates.
 - Add PostgreSQL migration 5, integration tests, and a wallet-modes guide.
+- With v0.10.1-alpha.0 merged in: `withAccountWallet` takes an optional fifth
+  argument and passes `applicationSecrets` to `withDerivedWallet`, so the
+  callback receives application secrets as its second parameter and
+  `per-account-deterministic` mode can serve the sign-in profile.
+  `random-vault` mode refuses the sign-in profile (`invalid-service-profile`
+  from the service configuration, `invalid-profile` from
+  `createRandomAccountWallet`): a random key runs no password derivation and
+  so has no application secret to derive a wallet from.
+
+## v0.10.1-alpha.0 — 2026-10-18 (alpha pre-release)
+
+Application secrets, and a sign-in profile with a Kalvora wallet from a master
+seed. **Additive.** Wallet derivation and every existing profile, codec,
+transcript and committed vector are unchanged, and a call that requests no
+secret computes nothing new. The narrow source-compatibility edges are listed in
+the compatibility note below. There are no breaking changes.
+
+### Application secrets
+
+- **`withDerivedWallet(credentials, useWallet, options?)`** takes an optional
+  third parameter, `{ applicationSecrets?: readonly string[] }`. Each label
+  yields a 32-byte secret, HKDF-SHA256 of the same scrypt output as the wallet
+  under the domain `web2-ish-self-custody application secret v1`, bound to the
+  profile id, context, normalized username and label (see
+  `docs/PROTOCOL.md#application-secrets`). The callback receives them as a new
+  second parameter, `secrets: ReadonlyMap<string, Uint8Array>`, which is empty
+  when none are requested; the arrays are zeroed when the callback returns or
+  throws, and the intermediate PRK before it runs. Each array is the HMAC
+  output itself, so no other copy is left behind. A callback that returns the
+  map, a secret's array, a view of one or its buffer fails with the existing
+  `wallet-scope-closed` code instead of returning bytes that are already zero.
+  `DerivedWallet` is unchanged, and a one-parameter callback still type-checks.
+- **`DerivationErrorCode`** gains `invalid-secret-label` (a label outside
+  `^[a-z0-9][a-z0-9._:-]{2,79}$`, a repeated label, or malformed options),
+  raised before any KDF work, and `secret-unavailable`, for secrets requested
+  from a profile whose wallet key is the scrypt output itself. That is a
+  profile without a key-derivation step, refused before any KDF work, or one
+  whose step returns the scrypt output unchanged, refused once scrypt has run.
+  Secrets are independent of the wallet key only when the step is one-way,
+  which the core cannot check; the `KeyDerivation` documentation now says so.
+- The wallet vault is untouched: its package-internal seed path never computes
+  the PRK, and the vault-opened wallets take no secrets.
+- **Vector** `vectors/kalvora-ed25519-external-salt-v1.application-secret-v1.json`:
+  the committed credentials with the labels `example-secret-v1` and
+  `example-secret-v2`, their `info` strings, the PRK and the secrets.
+  `scripts/verify_kalvora_external_salt_vector.py` loads it as a second fixture
+  by its explicit path with the same strict shape checks, requires its
+  credentials to equal the wallet vector's, and reproduces it with the standard
+  library's `hmac` (its HKDF checked against RFC 5869 test case 1).
+- Docs: `docs/PROTOCOL.md` "Application secrets" (the exact strings, why the
+  scrypt output rather than the wallet key, the refusals without a one-way
+  key-derivation step, and how the construction is versioned), a
+  `docs/SECURITY_MODEL.md` section and failure mode, and the README.
+
+### Sign-in profile and Kalvora wallet from a master seed
+
+A key that signs in to an identity service without being a wallet, and the
+wallet as an application secret of the same password entry. Every addition is
+new API; nothing existing changes.
+
+- **New core exports** (`web2-ish-self-custody`, which still imports no chain
+  SDK):
+  - `signInEd25519ExternalSalt`, the `DerivationProfile`
+    `web2ish-sign-in-ed25519-external-salt-v1`: algorithm
+    `scrypt-sha512-hkdf-sha256-ed25519-external-32-v1`, `external-32`, scrypt
+    N=65536, r=8, p=1, dkLen=32, and its own domains
+    (`web2-ish-self-custody sign-in password hash v1\n`,
+    `web2-ish-self-custody sign-in Ed25519 external salt entropy v1`).
+  - `signInHkdfEd25519`, its `KeyDerivation` `hkdf-sha256-sign-in-key-v1`:
+    HKDF-SHA256 of the scrypt output with `SIGN_IN_KEY_DOMAIN` as salt and
+    info, computed as its single block with `hmac`, its PRK zeroed. It is
+    one-way, so the profile takes application secrets.
+  - `signInEd25519Codec`, the `IdentityCodec`
+    `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits for both
+    the address and the identifier. Decoding accepts exactly
+    `^S_[0-9a-f]{64}$` and throws `invalid-public-key` for anything else; no
+    Kalvora parser accepts the form.
+  - `SIGN_IN_KEY_DOMAIN`, `web2-ish-self-custody sign-in key v1`.
+- **New `web2-ish-self-custody/chains/kalvora` exports:**
+  `withKalvoraWalletFromMasterSeed(masterSeed, useWallet)` and the type
+  `KalvoraMasterSeedWallet`. It opens the Kalvora wallet (SLIP-0010 at
+  `m/44'/5258'/0'/0'/0'` through `kalvoraSlip10Ed25519`, Kalvora codec) of a
+  32-byte master seed, such as an application secret, synchronously and on an
+  internal copy. Its identity carries `derivation`, `codecId`, `curve`,
+  `address`, `publicKey`, `publicKeyBytes` and `fingerprint`. It signs 1 to
+  1,048,576 bytes like `withDerivedWallet`, zeroes its copy and the key,
+  closes the signer after the callback (`wallet-scope-closed`), and refuses a
+  thenable result (`async-wallet-scope`). It refuses with `invalid-seed`, before
+  deriving, a seed that is not a plain `Uint8Array` of exactly 32 bytes (a
+  Buffer or other subclass is refused, a genuine cross-realm Uint8Array is
+  accepted, and the length and bytes are read from internal slots, not from
+  overridable properties) and an all-zero seed, which is what an application
+  secret holds after its scope has ended.
+- **Identity service: no code change.** It accepts the sign-in profile as it
+  accepts any serviceable profile, enrolls and verifies `S_` keys, and under
+  that profile refuses a Kalvora key at registration (`invalid-public-key`).
+  Doc comments now say that `<p>_account_wallets`, `IdentityWallet`, the
+  `wallets` field and `listWallets` hold the enrolled key, which is a wallet
+  only under a chain wallet profile; no name changes.
+- **Vector** `vectors/sign-in-ed25519-external-salt-v1.json`: the Kalvora
+  vector's credentials and salt under the sign-in profile, with the transcript
+  intermediates, the sign-in key (PRK, seed, public key, `S_` identifier,
+  fingerprint, signature), the application-secret PRK and the secrets
+  `example-secret-v1` and `example-wallet-seed-v1`, and the Kalvora wallet
+  opened from the latter (path, public key, `A_` identifier, address,
+  fingerprint, signature). `scripts/verify_kalvora_external_salt_vector.py`
+  loads it as a third fixture by its explicit path with the same strict shape
+  checks, reproduces every value with its own HKDF and SLIP-0010, and checks
+  that the sign-in key, that wallet and the Kalvora password wallet differ.
+  No existing vector changes.
+- Docs: `docs/PROTOCOL.md` "Part 3 — the sign-in profile" and "Kalvora wallet
+  from a master seed"; `docs/INTEGRATION.md` "A sign-in key separate from the
+  wallet"; the `docs/SERVER_API.md` custody model and
+  `docs/SECURITY_MODEL.md` "Sign-in profile" for both patterns, keeping the
+  offline-guessing caveat; the README and `SECURITY.md`, which now say per
+  profile what a stolen database gives an attacker.
+
+**Compatibility note.** These edges all come from application secrets; the
+sign-in additions are new exports only. An exhaustive `switch` over
+`DerivationErrorCode` with a `never` check needs the two new cases. A
+hand-written double typed as `typeof withDerivedWallet` that calls the callback
+with one argument must pass the map as well; doubles that declare their own
+one-parameter callback type are unaffected. The callback now always receives a
+second argument, an empty map when no secrets are requested. A callback that
+declares its own optional second parameter no longer type-checks (TS2345), and
+in plain JavaScript that parameter now receives the map.
 
 ## v0.10.0-alpha.1 — 2026-09-29 (alpha pre-release)
 

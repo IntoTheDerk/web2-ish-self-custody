@@ -3,6 +3,7 @@ import { withDerivedWallet } from "./derive.js";
 import { DerivationError } from "./errors.js";
 import { normalizeUsername } from "./normalization.js";
 import type { DerivationProfile } from "./profile.js";
+import { signInEd25519Codec } from "./signIn.js";
 import type { DerivedWallet } from "./types.js";
 import { createWalletVault, type WalletVault } from "./vault.js";
 
@@ -31,12 +32,20 @@ function checkSetup(setup: AccountWalletSetup, profile: DerivationProfile): void
   }
 }
 
-/** Reconstructs an account's signing identity. A different password means a different key. */
+/**
+ * Reconstructs an account's signing identity. A different password means a different key.
+ *
+ * `options.applicationSecrets` is passed to `withDerivedWallet` unchanged, so the
+ * callback receives the same application secrets, under the same rules, as a
+ * direct call with the account's salt. Under the sign-in profile that is how
+ * the application gets its wallet's master seed from the same password entry.
+ */
 export function withAccountWallet<T>(
   setup: AccountWalletSetup,
   profile: DerivationProfile,
   password: Uint8Array,
-  use: (wallet: DerivedWallet) => T,
+  use: (wallet: DerivedWallet, secrets: ReadonlyMap<string, Uint8Array>) => T,
+  options?: Readonly<{ applicationSecrets?: readonly string[] }>,
 ): Promise<T> {
   checkSetup(setup, profile);
   if (setup.mode !== "per-account-deterministic") {
@@ -46,10 +55,16 @@ export function withAccountWallet<T>(
     profile, password, username: setup.normalizedUsername,
     context: { applicationId: setup.applicationId, networkId: setup.networkId },
     salt: hexToBytes(setup.publicSaltHex),
-  }, use);
+  }, use, options);
 }
 
-/** Generates the seed internally; neither a seed nor a password goes to the service. */
+/**
+ * Generates the seed internally; neither a seed nor a password goes to the service.
+ *
+ * Refuses the sign-in profile (`invalid-profile`): a random key comes from no
+ * password derivation, so there would be no application secret to give the
+ * application a wallet beside the sign-in key. Serve it in a deterministic mode.
+ */
 export async function createRandomAccountWallet(
   setup: AccountWalletSetup,
   profile: DerivationProfile,
@@ -58,6 +73,12 @@ export async function createRandomAccountWallet(
   checkSetup(setup, profile);
   if (setup.mode !== "random-vault") {
     throw new DerivationError("This account uses deterministic derivation.", "invalid-profile");
+  }
+  if (profile.codec.id === signInEd25519Codec.id) {
+    throw new DerivationError(
+      "The sign-in profile derives its key from the password; random-vault mode needs a chain wallet profile.",
+      "invalid-profile",
+    );
   }
   const seed = globalThis.crypto.getRandomValues(new Uint8Array(32));
   try {

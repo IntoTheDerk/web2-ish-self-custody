@@ -9,9 +9,11 @@ export type DerivationErrorCode =
   | "invalid-public-key"
   | "invalid-recovery-code"
   | "invalid-salt"
+  | "invalid-secret-label"
   | "invalid-seed"
   | "invalid-username"
   | "invalid-vault"
+  | "secret-unavailable"
   | "vault-authentication-failed"
   | "vault-identity-mismatch"
   | "wallet-scope-closed";

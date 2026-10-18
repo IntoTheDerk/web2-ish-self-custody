@@ -23,9 +23,11 @@ export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([
 export type IdentityServiceConfig = Readonly<{
   serviceProfileId: string;
   /**
-   * The chain's profile object, which carries its KDF parameters, transcript
-   * domains, and identity codec. Must use the `external-32` salt policy — a
-   * service that does not own a salt has nothing to publish.
+   * The profile of the key that signs in, which carries its KDF parameters,
+   * transcript domains, and identity codec: a chain's wallet profile, or the
+   * chain-neutral sign-in profile, whose enrolled key is not a wallet. Must use
+   * the `external-32` salt policy — a service that does not own a salt has
+   * nothing to publish.
    */
   profile: DerivationProfile;
   applicationId: string;
@@ -38,7 +40,10 @@ export type IdentityServiceConfig = Readonly<{
   emailVerificationMaxAttempts?: number;
   /** Requires a verified email before `POST /accounts` succeeds. */
   requireVerifiedEmail?: boolean;
-  /** Choose explicitly for new deployments. Omitted preserves existing wallets. */
+  /**
+   * Choose explicitly for new deployments. Omitted preserves existing wallets.
+   * `random-vault` needs a chain wallet profile and refuses the sign-in profile.
+   */
   walletMode?: ServiceWalletMode;
 }>;
 
@@ -92,6 +97,11 @@ export type IdentityAccount = Readonly<{
   updatedAt: Date;
 }>;
 
+/**
+ * One enrolled key of an account: a row of `<p>_account_wallets`. It is a
+ * wallet only when the profile is a chain wallet profile; under the sign-in
+ * profile it is the account's sign-in key. The name is kept for compatibility.
+ */
 export type IdentityWallet = Readonly<{
   id: string;
   accountId: string;
@@ -136,6 +146,7 @@ export type IssuedSession = Readonly<{
 
 export type AuthenticatedIdentity = Readonly<{
   account: IdentityAccount;
+  /** The account's enrolled keys (see `IdentityWallet`). */
   wallets: readonly IdentityWallet[];
   session: IdentitySession;
 }>;

@@ -59,6 +59,8 @@ proves the upgrade derives the same wallets.
 | a wallet whose namespace your service owns and can separate from every other service | `kalvoraEd25519ExternalSalt` | `web2-ish-self-custody/chains/kalvora` |
 | a public identity for a seed you already generated randomly | `deriveKalvoraEd25519IdentityFromSeed` | `web2-ish-self-custody/chains/kalvora` |
 | a seed that survives a password change, with a recovery code | `createWalletVault`, `createWalletVaultFromCredentials`, and the other vault functions | `web2-ish-self-custody` |
+| a key that signs in to your identity service and is not a wallet | `signInEd25519ExternalSalt` | `web2-ish-self-custody` |
+| the Kalvora wallet of a master seed you hold, such as an application secret | `withKalvoraWalletFromMasterSeed` | `web2-ish-self-custody/chains/kalvora` |
 | the server half of a service-salted profile | `createIdentityService` and friends | `web2-ish-self-custody/server` |
 
 Derivation profiles are not interchangeable. Selecting a different one for an
@@ -191,6 +193,76 @@ lifecycle controls remain the application's responsibility. This split lets
 several applications share one address convention and one envelope format
 without turning this package into a browser storage or policy layer.
 
+## A sign-in key separate from the wallet
+
+Under the Kalvora profile the key that signs in to your identity service is the
+user's wallet, so the service stores every user's wallet address and receives a
+wallet signature at every sign-in. An application that must not hold or see
+its users' wallets keeps the two apart:
+
+- **The sign-in profile enrolls with the identity service.** Configure the
+  service with `signInEd25519ExternalSalt`. The enrolled key is an `S_` sign-in
+  key, which no chain accepts; the service stores and verifies only that.
+- **The wallet is an application secret of the same run.** Request a label for
+  the wallet's master seed and open it with `withKalvoraWalletFromMasterSeed`
+  inside the callback. Once the callback returns the secret is zeroed, and the
+  helper refuses it (`invalid-seed`) rather than open the all-zero seed's
+  wallet. One password entry is one scrypt run for both.
+- **A host may back the wallet up with its own E2EE storage.** The SDK stores
+  nothing. To keep the same wallet across a password change, the host seals the
+  master seed under a key its server never holds and opens the restored seed
+  with the same helper.
+
+```ts
+import { signInEd25519ExternalSalt, withDerivedWallet } from "web2-ish-self-custody";
+import { withKalvoraWalletFromMasterSeed } from "web2-ish-self-custody/chains/kalvora";
+
+const WALLET_SEED = "example-wallet-seed-v1"; // your label, versioned by you
+
+const result = await withDerivedWallet(
+  { profile: signInEd25519ExternalSalt, username, password, salt, context },
+  (signIn, secrets) => {
+    // The sign-in key is the password check: the wallet has none of its own.
+    if (signIn.identity.publicKey !== enrolledSignInPublicKey) return { wrongPassword: true };
+    return withKalvoraWalletFromMasterSeed(secrets.get(WALLET_SEED)!, (wallet) => ({
+      wrongPassword: false,
+      address: wallet.identity.address,
+      signature: wallet.signExactMessageUnsafe(confirmedTransactionBytes),
+    }));
+  },
+  { applicationSecrets: [WALLET_SEED] },
+);
+```
+
+That is the `service-deterministic` mode, with the salt from `/profile`. In
+`per-account-deterministic` mode take the setup from the challenge instead:
+`withAccountWallet(challenge.walletSetup, signInEd25519ExternalSalt, password, useWallet, { applicationSecrets: [WALLET_SEED] })`
+passes the same labels through and calls the same callback. `random-vault` mode
+refuses the sign-in profile, because a random key leaves no application secret
+to derive the wallet from ([wallet modes](WALLET_MODES.md)).
+
+Rules for the pattern:
+
+- **Check the password before any wallet output.** A mistyped password derives
+  a different wallet without an error. Compare the run's sign-in public key with
+  the one the service enrolled, and stop on a mismatch.
+- **Keep wallet material in the worker.** The master seed, the wallet key and
+  every copy stay inside the derivation worker and are zeroed before it
+  returns. Send the identity service only the sign-in key and its signatures.
+  Send nothing derived from the wallet unless the user publishes it on purpose.
+- **Sign in without the wallet.** Request the wallet label only for a wallet
+  operation, not at sign-in.
+- **A password change is a new wallet,** and so is any move to a new sign-in
+  profile, unless the host restores a backed-up master seed. The sign-in key
+  changes too, and the host re-enrolls it.
+- **The offline-guessing exposure stays.** The enrolled sign-in public key is a
+  password oracle at scrypt cost, and so is the wallet's address once it is
+  public to anyone who also knows the username and the public salt. A correct
+  guess gives the wallet and the sign-in key together. See
+  [the security model](SECURITY_MODEL.md#sign-in-profile).
+
+The construction is in [the protocol](PROTOCOL.md#part-3--the-sign-in-profile).
+
 ## Two services, one identity format
 
 Any two applications on the bundled Kalvora profile — say DemocracyOS and a second
@@ -238,7 +310,9 @@ random-vault mode also stores encrypted vaults. New deployments should choose a
 mode using [the account-wallet integration guide](WALLET_MODES.md), which covers
 per-account salts, multi-device access, and vault password changes and recovery.
 
-Configuration takes the profile object, not an id:
+Configuration takes the profile object, not an id. It is the profile of the key
+that signs in: a chain's wallet profile, as below, or the chain-neutral sign-in
+profile of [A sign-in key separate from the wallet](#a-sign-in-key-separate-from-the-wallet):
 
 ```ts
 import { kalvoraEd25519ExternalSalt } from "web2-ish-self-custody/chains/kalvora";
