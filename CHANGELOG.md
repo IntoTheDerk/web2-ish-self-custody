@@ -5,7 +5,84 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased
+## v0.11.0-alpha.0 — 2026-10-18 (alpha pre-release)
+
+Account wallet modes (#5), session management (#10), and account changes and
+recovery keys (#11). The new features are opt-in, and outside `random-vault`
+mode the new `/wallet-vault` routes refuse every request. Derivation and every
+existing profile, codec, transcript and committed vector are unchanged; one
+vector is added, `vectors/account-change-v1.json`. The release is breaking for
+existing deployments, which must migrate first, and for code that implements,
+parses exactly or matches exhaustively the server's types. Each feature's
+subsection below also lists its narrower edges.
+
+### Breaking changes
+
+- **Apply migrations 5, 6 and 7 before this version serves traffic.** Run
+  `migrate()` first. Challenges read migration 5's wallet policy, `register`
+  and `login` write migration 6's `client_label`, and `pruneExpired` deletes
+  from migration 7's `<p>_account_recoveries`, so each fails on a schema
+  without its migration. Migration 5 records the namespace's wallet mode once,
+  as `service-deterministic` when accounts already exist, and a configuration
+  whose `walletMode` differs from the stored mode is refused
+  (`invalid-service-profile`).
+- **`GET /profile` gains `walletMode`** (#5), as does the
+  `PublishedDerivationProfile` that `derivationProfile()` returns. A parser
+  that accepts an exact set of keys, or an exact-equality assertion, sees the
+  new key.
+- **`IdentityService` gains sixteen required methods**, which breaks
+  hand-written implementations and test doubles: `getWalletVault` and
+  `updateWalletVault` (#5); `listSessions`, `liveSessionIds`,
+  `revokeSessionById` and `revokeOtherSessions` (#10); `rotateSignInKey`,
+  `changeEmail`, `enrollRecoveryKey`, `removeRecoveryKey`, `recoveryStatus`,
+  `beginRecovery`, `authenticateRecovery`, `completeRecovery`,
+  `listSecurityEvents` and `revokeRecoveryKeys` (#11). Services made by
+  `createIdentityService` and the adapters already have them.
+- **`IdentityErrorCode` gains `key-unchanged` and `stale-key`** (#11), and
+  `wallet-conflict` (#5), all 409. **`DerivationErrorCode`** gains
+  `invalid-email` (#11). Each breaks exhaustive switches.
+  `enumerationSensitiveCodes` is unchanged.
+- **Registration refuses small-order and non-canonical public keys**
+  (`invalid-public-key`, #11). No key a profile derives is either.
+- **Email addresses with control characters are refused** (`invalid-email`,
+  #11): `normalizeEmail`, and so registration, `updateAccount`, email
+  verification and `changeEmail`, refuses a C0 control, DEL or a C1 control in
+  the local part. Addresses already stored are not touched.
+- **`ResolvedIdentityServiceConfig` and `identityServiceDefaults`** gain
+  `walletMode` (#5), `storeSessionClientHashes` (#10), and `accountSecurity`,
+  `onSecurityEvent` and `auditRetentionDays` (#11). A hand-built resolved
+  config needs them, and an exact-equality assertion sees them.
+
+### New opt-in routes and configuration
+
+Each is off, or keeps the released behavior, unless configured.
+
+- **`walletMode`** (#5, `IdentityServiceConfig`): `service-deterministic`, the
+  default and the released behavior, `per-account-deterministic` or
+  `random-vault`, fixed per namespace by migration 5. In `random-vault` mode the
+  service stores each account's encrypted vault. The new `/wallet-vault`
+  routes serve it: `POST` returns a vault only for the account that the
+  router's new `authorizeVaultRead` hook returns (401 without the hook), and
+  `PUT` updates one under the session token with a revision check.
+- **`accountSecurityRoutes`** (#10, `IdentityRouterOptions`, default `false`):
+  mounts `GET /sessions`, `DELETE /sessions` and `DELETE /sessions/{id}`.
+- **`clientLabel`** (#10, `IdentityRouterOptions`): the host's hook for a
+  display-only session label, called on `POST /accounts` and `POST /sessions`.
+- **`storeSessionClientHashes`** (#10, `IdentityServiceConfig`, default
+  `true`): `false` stores no IP or user-agent hash on new sessions.
+- **`accountSecurity`** (#11, `IdentityServiceConfig`):
+  `{ signInKeyRotation, recoveryKeys }`, both default `false`, in the
+  deterministic modes only. None of the account-change methods is routed.
+- **`onSecurityEvent`** (#11, `IdentityServiceConfig`): a hook awaited for at
+  most 3 s after an account change commits, its errors ignored.
+- **`auditRetentionDays`** (#11, `IdentityServiceConfig`, default unset): when
+  set, `pruneExpired` deletes this service's `account.*` and `session.*` audit
+  rows older than it.
+- **`createSessionResponder(service, options)`** (#11, new export from
+  `web2-ish-self-custody/server`): the router's own session response, for a
+  host route that issues the session of `completeRecovery`.
+
+### Account wallet modes
 
 - Add opt-in per-account deterministic and random-vault modes, with persistent
   random account UUIDs/salts and client helpers. Existing derivation profiles,
@@ -24,6 +101,9 @@ and the commit history.
   from the service configuration, `invalid-profile` from
   `createRandomAccountWallet`): a random key runs no password derivation and
   so has no application secret to derive a wallet from.
+- The optional peer dependency kalvora.js accepts `0.0.1-alpha.1 ||
+  0.0.1-alpha.2`; the development dependency, and so the suite, moves to
+  `0.0.1-alpha.2`.
 
 ### Session management
 
