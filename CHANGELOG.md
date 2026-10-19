@@ -5,20 +5,17 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased
+## v0.12.0-alpha.0 — 2026-10-19 (alpha pre-release)
 
-Account resets: account recovery by email, the signed-in reset, the two
+Account resets (#15): account recovery by email, the signed-in reset, the two
 per-account settings that govern them, and reauthentication for a host label
 (migration 8). The resets are opt-in and off by default
 (`accountSecurity.emailReset`, `accountSecurity.signedInReset`); none of the
 new methods is routed. Derivation and every existing profile, codec,
-transcript and committed vector are unchanged. One vector is added,
-`vectors/account-change-resets-v1.json`. It is a new file because a released
-vector is never edited in place: the design's "new fixture section" in
-`account-change-v1.json` would have changed a released file, so the
-repository's versioning rule wins. The release is breaking for deployments,
-which must migrate first, and for code that implements or matches exhaustively
-the server's types.
+transcript and committed vector are unchanged; one vector is added,
+`vectors/account-change-resets-v1.json`. The release is breaking for existing
+deployments, which must migrate first, and for code that implements or matches
+exhaustively the server's types.
 
 ### Breaking changes
 
@@ -53,15 +50,6 @@ the server's types.
   `account.signed-in-reset`.** A host hook that matches exhaustively sees new
   actions once a reset opt-in is on, and `account.signed-in-reset.abort` from
   a login or a password change whenever a pending reset exists.
-- **`rotateSignInKey` aborts the account's pending signed-in reset** in its
-  statement (audit `account.signed-in-reset.abort { abortedBy: "rotation",
-  sessionId }`, and the hook after `account.key-rotate`). A password change
-  proves the password is not forgotten, as a sign-in does, and the rotation
-  keeps the caller's session, which may be a stolen copy of the session that
-  started the reset: before this, that copy completed the reset 72 hours
-  later and replaced the password the owner had just set. Its result is
-  unchanged. The design's §5.5 names only the abort and the sign-in; it
-  needs the password change too.
 - **`ResolvedIdentityServiceConfig.accountSecurity` and
   `identityServiceDefaults.accountSecurity` gain `emailReset` and
   `signedInReset`** (both `false`). A hand-built resolved config needs them,
@@ -71,13 +59,24 @@ the server's types.
   `DELETE /sessions` and `DELETE /sessions/{id}`) answer `409 reset-pending`
   for it. Nothing changes until a signed-in reset exists, which needs
   `accountSecurity.signedInReset`.
+- **`rotateSignInKey` aborts the account's pending signed-in reset** in its
+  statement (audit `account.signed-in-reset.abort { abortedBy: "rotation",
+  sessionId }`, and the hook after `account.key-rotate`). A password change
+  proves the password is not forgotten, as a sign-in does, and the rotation
+  keeps the caller's session, which may be a stolen copy of the session that
+  started the reset: before this, that copy completed the reset 72 hours
+  later and replaced the password the owner had just set. Its result is
+  unchanged. The design's §5.5 names only the abort and the sign-in; it
+  needs the password change too.
 - **An email change turns account recovery by email off**, in `changeEmail`
   and in `updateAccount` (and so `PATCH /accounts/me`), and closes the
   account's live emailed codes. Their audit metadata gains
   `emailResetDisabled` and `closedResets` (`account.email-change`,
   `account.update`).
 
-### Migration 8 `account-resets`
+### Account resets
+
+#### Migration 8 `account-resets`
 
 Six statements, each one `ADD COLUMN IF NOT EXISTS` or `CREATE … IF NOT
 EXISTS` with its constraints inline, safe to re-run and to run from concurrent
@@ -95,7 +94,7 @@ runners:
   signed-in reset per account), `<p>_account_resets_account_idx` and
   `<p>_account_resets_expires_idx`.
 
-### New methods and behavior
+#### New methods and behavior
 
 Each change is one statement in the account changes' lock order (account
 `FOR SHARE` or `FOR NO KEY UPDATE`, never `FOR UPDATE`; the enrolled key; the
@@ -175,7 +174,7 @@ writes an audit row with field names only.
 - **Config** `accountSecurity.emailReset` and `accountSecurity.signedInReset`,
   strict booleans, default `false`.
 
-### Public-export changes
+#### Public-export changes
 
 - `web2-ish-self-custody`: `AccountChangeAction` and `accountChangeActions`
   gain the five actions (above).
@@ -190,7 +189,7 @@ writes an audit row with field names only.
   `SecurityEventAction` and `ResolvedIdentityServiceConfig` change as listed
   under Breaking changes.
 
-### Vector
+#### Vector
 
 `vectors/account-change-resets-v1.json`, over `account-change-v1.json`'s
 context and keys: two reset ids (UUIDs from SHA-256 of fixed labels), the
@@ -202,7 +201,11 @@ standard library and `cryptography` alone; `test/accountChange.test.ts` and
 `test/server/accountChangeSignature.test.ts` check it against the builder and
 the strict verifier. No released vector changes.
 
-### Tests and docs
+The vector is a new file because a released vector is never edited in place:
+the design's "new fixture section" in `account-change-v1.json` would have
+changed a released file, so the repository's versioning rule wins.
+
+#### Tests and docs
 
 - `test/server/accountResets.integration.test.ts` (real PostgreSQL): migration
   8 re-run and from concurrent runners, its checks and indexes; the settings
