@@ -23,8 +23,10 @@ import { normalizeUsername } from "./normalization.js";
  * <nonceHex>        the `rotation` challenge's 32-byte nonce, 64 lowercase hex
  * <expiresAt>       the challenge's expiry, ISO-8601 UTC with milliseconds
  * <authorizer>      "key:" + codec.encodePublicKey | "recovery-key:" + 64 hex
+ *                   | "email:" + resetId | "session-reset:" + resetId
  * <subject>         "key:" + codec.encodePublicKey | "recovery-key:" + 64 hex
- *                   | "email:" + normalizeEmail(address) | "none"
+ *                   | "email:" + normalizeEmail(address) | "setting:on" | "setting:off"
+ *                   | "host:" + label | "none"
  * ```
  *
  * Fixed wire surface: a change to the domain, the layout, an action or a
@@ -33,16 +35,40 @@ import { normalizeUsername } from "./normalization.js";
  */
 export const ACCOUNT_CHANGE_DOMAIN = "web2-ish-self-custody account change v1";
 
-/** The actions this release signs, each with one authorizer and one subject form. */
+/**
+ * The actions this release signs, each with one authorizer and one subject
+ * form. The first six arrived with account changes and recovery keys; the
+ * last five with account resets. An existing action's forms never change
+ * (docs/PROTOCOL.md#versioning).
+ */
 export type AccountChangeAction =
   | "sign-in-key-rotation"
   | "email-change"
   | "recovery-key-enrollment"
   | "recovery-key-removal"
   | "recovery-begin"
-  | "recovery-reset";
+  | "recovery-reset"
+  | "reauthentication"
+  | "email-reset-setting"
+  | "signed-in-reset-setting"
+  | "email-reset"
+  | "signed-in-reset";
 
-type PrincipalForm = "key" | "recovery-key" | "email" | "none";
+/**
+ * `email` is an `email:` address subject; `email-reset` is the `email:`
+ * authorizer of an emailed reset, which names the reset's id, never an
+ * address. Each action allows exactly one of the two, and a reset id (a UUID)
+ * is never a valid address, so the shared prefix cannot be confused.
+ */
+type PrincipalForm =
+  | "key"
+  | "recovery-key"
+  | "email"
+  | "none"
+  | "host"
+  | "setting"
+  | "email-reset"
+  | "session-reset";
 
 const actionRules: Readonly<
   Record<AccountChangeAction, Readonly<{ authorizer: PrincipalForm; subject: PrincipalForm }>>
@@ -53,6 +79,11 @@ const actionRules: Readonly<
   "recovery-key-removal": Object.freeze({ authorizer: "key", subject: "none" }),
   "recovery-begin": Object.freeze({ authorizer: "recovery-key", subject: "none" }),
   "recovery-reset": Object.freeze({ authorizer: "recovery-key", subject: "key" }),
+  reauthentication: Object.freeze({ authorizer: "key", subject: "host" }),
+  "email-reset-setting": Object.freeze({ authorizer: "key", subject: "setting" }),
+  "signed-in-reset-setting": Object.freeze({ authorizer: "key", subject: "setting" }),
+  "email-reset": Object.freeze({ authorizer: "email-reset", subject: "key" }),
+  "signed-in-reset": Object.freeze({ authorizer: "session-reset", subject: "key" }),
 });
 
 export const accountChangeActions: readonly AccountChangeAction[] = Object.freeze(
@@ -93,6 +124,19 @@ const nonceHexPattern = /^[0-9a-f]{64}$/u;
 const keyPrincipal = /^key:[\x21-\x7e]{1,160}$/u;
 const recoveryKeyPrincipal = /^recovery-key:[0-9a-f]{64}$/u;
 const EMAIL_PREFIX = "email:";
+/** A reset id as the service issues it: a UUID in lowercase hex. */
+const resetIdText = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const emailResetPrincipal = new RegExp(`^email:${resetIdText}$`, "u");
+const sessionResetPrincipal = new RegExp(`^session-reset:${resetIdText}$`, "u");
+const settingPrincipal = /^setting:(on|off)$/u;
+
+/**
+ * A host's reauthentication label: 3 to 80 characters from `[a-z0-9._:-]`,
+ * starting with a letter or digit. It is a constant the host chooses to name
+ * what the reauthentication unlocks, never user data. Package-internal: the
+ * identity service checks `verifyReauthentication`'s label with it.
+ */
+export const hostLabelPattern = /^[a-z0-9][a-z0-9._:-]{2,79}$/u;
 
 /**
  * The service's email normalization: trim, lowercase, and refuse anything that
@@ -153,6 +197,28 @@ function assertPrincipal(value: string, form: PrincipalForm, field: string): voi
     case "none":
       if (value !== "none") {
         refuse(`${field} must be "none" for this action.`);
+      }
+      return;
+    case "host": {
+      const label = value.startsWith("host:") ? value.slice("host:".length) : "";
+      if (!hostLabelPattern.test(label)) {
+        refuse(`${field} must be "host:" followed by a 3-80 character label from [a-z0-9._:-].`);
+      }
+      return;
+    }
+    case "setting":
+      if (!settingPrincipal.test(value)) {
+        refuse(`${field} must be "setting:on" or "setting:off".`);
+      }
+      return;
+    case "email-reset":
+      if (!emailResetPrincipal.test(value)) {
+        refuse(`${field} must be "email:" followed by the reset id, a lowercase UUID.`);
+      }
+      return;
+    case "session-reset":
+      if (!sessionResetPrincipal.test(value)) {
+        refuse(`${field} must be "session-reset:" followed by the reset id, a lowercase UUID.`);
       }
       return;
   }

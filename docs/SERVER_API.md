@@ -13,7 +13,8 @@ That is the legacy default. New deployments can select
 authorized vault download/update routes, and vault password changes and recovery.
 In the deterministic modes the service offers opt-in sign-in-key rotation and
 recovery keys ([account changes](#account-changes-and-recovery-keys-opt-in)),
-both off unless configured.
+and account recovery by email and the signed-in reset
+([account resets](#account-resets-opt-in)), each off unless configured.
 `/profile` reports `walletMode`; in either new mode use `/challenges`'s
 `walletSetup`, not the service salt, to create the wallet.
 
@@ -63,6 +64,9 @@ for both, and the enrolled key is a wallet only under a chain wallet profile.
 - encrypted vaults and revisions, only when `walletMode` is `random-vault`
 - with recovery keys enabled, each account's recovery public keys (raw Ed25519,
   with status and times) and SHA-256 digests of recovery tokens (migration 7)
+- each account's two reset settings and, with account resets enabled, its reset
+  rows: their kind, times, attempt count, the initiating session's id and the
+  SHA-256 digest of an emailed reset code (migration 8)
 
 ### What the server never holds
 
@@ -81,7 +85,7 @@ for both, and the enrolled key is a wallet only under a chain wallet profile.
   `resolveIdentityServiceConfig` refuses it with `random-vault`
 
 There is no password column, and no recovery secret: the recovery tables hold
-public keys and token digests only. In the deterministic
+public keys and token digests only, and the reset table code digests only. In the deterministic
 modes no input to any method in `IdentityService` carries secret wallet
 material, so there is no code path in which the service could store it even by
 mistake. In `random-vault` mode registration and `updateWalletVault` accept a
@@ -571,6 +575,12 @@ first, the other finds its own session revoked and answers `401`.
 `pruneExpired` skips session rows another statement holds locked, so
 maintenance never waits on a revocation.
 
+**A pending signed-in reset.** While a [signed-in reset](#the-signed-in-reset)
+started by the caller's session is pending, `DELETE /sessions` and
+`DELETE /sessions/{id}` from that session answer `409 reset-pending` and
+revoke nothing, so it cannot sign out the sessions that show the reset. Every
+other session of the account revokes as before, the initiating one included.
+
 ### `GET /accounts/me`
 
 Authenticated.
@@ -594,7 +604,9 @@ Resubmitting the same address leaves verification intact.
 This route (and `updateAccount`) changes the email with the session alone and
 reports nothing to `onSecurityEvent`. A host that treats the email as a
 security channel refuses `email` here and changes it only through the signed
-[`changeEmail`](#methods).
+[`changeEmail`](#methods). Either way an address change turns the account's
+account recovery by email off and closes its live codes, in the same statement
+([the email-change interlock](#the-email-change-interlock)).
 
 Errors: `invalid-display-name`, `invalid-email` (400).
 
@@ -738,13 +750,13 @@ three from code that already holds operator trust:
 
 `listSessions`, `revokeSessionById` and `revokeOtherSessions` are routed only
 with `accountSecurityRoutes` ([Session management](#session-management-opt-in)).
-None of the [account changes](#account-changes-and-recovery-keys-opt-in) is
-routed, `revokeRecoveryKeys(accountId)` above all: it takes an account id and
-belongs to operator tooling.
+None of the [account changes](#account-changes-and-recovery-keys-opt-in) or
+[account resets](#account-resets-opt-in) is routed, `revokeRecoveryKeys(accountId)`
+above all: it takes an account id and belongs to operator tooling.
 
 ```ts
 const removed = await service.pruneExpired();
-// { challenges, sessions, emailVerifications, rateLimits, recoveryTokens, auditEvents }
+// { challenges, sessions, emailVerifications, rateLimits, recoveryTokens, accountResets, auditEvents }
 ```
 
 ### Error envelope
@@ -783,6 +795,9 @@ Service codes, from `IdentityError`:
 | `invalid-username` | 400 |
 | `key-unchanged` | 409 |
 | `rate-limited` | 429 |
+| `reset-pending` | 409 |
+| `reset-setting-refused` | 409 |
+| `reset-unavailable` | 409 |
 | `service-profile-missing` | 503 |
 | `session-expired` | 401 |
 | `session-not-found` | 401 |
@@ -964,11 +979,13 @@ counts. A recovery token is 256 bits and needs no limit of its own.
 ### The security-event hook
 
 `onSecurityEvent` (config) receives `{ action, accountId, occurredAt,
-clientLabel, revokedSessions?, previousVerifiedEmail? }` after the statement of
+clientLabel, revokedSessions?, previousVerifiedEmail?, setting?, enabled?,
+availableAt?, abortedBy? }` after the statement of
 `account.key-rotate`, `account.email-change` (when the address changed),
 `account.recovery-key.enroll` (when it changed), `account.recovery-key.remove`,
-`account.recovery-key.revoke`, `account.recovery-begin`, `account.recover` and
-`session.revoke-others` (when it revoked a session) has committed. The service
+`account.recovery-key.revoke`, `account.recovery-begin`, `account.recover`,
+`session.revoke-others` (when it revoked a session) and the
+[account resets' events](#reset-events) has committed. The service
 awaits it for at most 3 seconds and ignores what it throws, so a slow or failing
 notice provider never fails or rolls back a change. A host that sends notices
 from its own route after its own statements can leave it unset.
@@ -999,6 +1016,257 @@ prunes another's rows on a shared prefix: an operator that deletes an account
 deletes its audit rows first (`DELETE FROM <p>_audit_events WHERE account_id =
 $1`). Recovery-token rows are deleted one day after they expire, whatever
 the retention.
+
+## Account resets (opt-in)
+
+Account recovery by email and the signed-in reset replace the enrolled key
+without the old password, as a recovery key does; reauthentication proves the
+current password to the host and changes nothing. Eight `IdentityService`
+methods, none routed by `createIdentityRouter`: a host calls them from its own
+routes and answers `completeAccountReset` with `createSessionResponder`
+([above](#answering-a-recovery-from-a-host-route)). Each change is signed over
+the [account-change message](PROTOCOL.md#part-4--the-account-change-message)
+for a `rotation` challenge of the account's username and verified
+[strictly](#strict-verification), as the account changes are.
+
+### Opt-ins, settings and status
+
+Two service opt-ins, both **default `false`**, and two per-account settings
+(migration 8):
+
+| | account recovery by email | signed-in reset |
+| --- | --- | --- |
+| service opt-in | `accountSecurity.emailReset` | `accountSecurity.signedInReset` |
+| account setting, default | `email-reset`, **off** | `signed-in-reset`, **on** |
+| turning the setting on | needs the opt-in and a verified email | needs the opt-in |
+| turning the setting off | always works; closes its live codes | only while an active recovery key (with `recoveryKeys` on) or account recovery by email is set; aborts a pending reset, which counts as pending, and completes, only while the setting is on |
+| methods | `startAccountReset`, `completeAccountReset` | `startSignedInReset`, `completeSignedInReset` |
+
+`abortSignedInReset`, `accountResetStatus`, turning a setting off and
+`verifyReauthentication` need no opt-in. The resets and the settings run only
+in the deterministic wallet modes (`invalid-request` in `random-vault` mode,
+before any SQL); reauthentication runs in every mode. Every method requires an
+`active` account, checked again under the account row's lock; a suspended
+account's caller gets `invalid-signature`, and `startAccountReset` answers as
+for any other username. The rule for turning the signed-in reset off is
+checked when it is turned off: removing the other method later leaves it off.
+A change of either setting, in either direction, closes that kind's open
+resets: a turn-off closes the live ones, and a turn-on closes any that a start
+inserted while the turn-off waited for the account row, which the turn-off's
+snapshot could not see (no start inserts while the setting is off).
+
+With `signedInReset` on, every account's signed-in reset is on until its owner
+turns it off: a stolen session can then replace the enrolled key after the
+72-hour wait unless another session aborts it or the owner signs in with the
+password or changes it ([security model](SECURITY_MODEL.md#account-resets)). The
+initiating session must outlive the wait, since only it completes the reset
+and a session's expiry is fixed: without an emailed code, `startSignedInReset`
+refuses a session that expires before `availableAt` (`reset-unavailable`,
+`details.reason: "session-expires-first"`) rather than accept a reset that can
+never complete, and it never extends the session. With `sessionTtlSeconds` at
+or below 72 hours every such start is refused; at the default 14 days a
+session can start one during its first 11 days.
+
+### Reset methods
+
+| method | signed by | effect |
+| --- | --- | --- |
+| `setAccountResetSetting(token, { challengeId, setting, enabled, authorizerSignature }, context?)` | the current key, action `email-reset-setting` or `signed-in-reset-setting`, subject `setting:on` or `setting:off` | one statement: sets the setting (the account row `FOR NO KEY UPDATE`, the key and any recovery key `FOR SHARE`, so a change that committed while it waited is seen), closes that kind's open resets when it changes the value ([above](#opt-ins-settings-and-status)), audits `account.reset-setting { setting, enabled, closedResets, sessionId }`. Returns `{ settings, changed }`; `changed: false` when it already had the value. |
+| `accountResetStatus(token, context?)` | — | `{ settings: { emailReset, signedInReset }, emailVerified, pendingSignedInReset }`. The pending reset is `{ id, createdAt, availableAt, expiresAt, initiatedByCaller, codeUsable }`, or `null` when none is live, its session is gone, or the signed-in reset setting is off. A host shows every other session a banner with **Abort** from it. |
+| `startAccountReset({ username }, context?)` | — | [below](#account-recovery-by-email). Returns `{ resetId, expiresAt, delivery }`. |
+| `completeAccountReset({ username, resetId, code, challengeId, newKey, subjectSignature }, context?)` | `newKey` only, action `email-reset`, authorizer `email:<resetId>` | one statement: replaces the enrolled key, marks the reset completed, closes the account's other live resets, revokes **every** session and issues a new one, audits `account.email-reset { method: "email", revokedSessions, closedResets, sessionId }`. Returns `{ account, wallets, session, revokedSessionIds }`. |
+| `startSignedInReset(token, context?)` | — | [below](#the-signed-in-reset). Returns `{ reset, delivery }`. |
+| `abortSignedInReset(token, context?)` | — | aborts the account's pending signed-in reset, from any of its sessions, audits `account.signed-in-reset.abort { abortedBy: "session", sessionId }`. Returns `{ aborted }`. |
+| `completeSignedInReset(token, { challengeId, resetId, newKey, subjectSignature, code? }, context?)` | `newKey` only, action `signed-in-reset`, authorizer `session-reset:<resetId>` | one statement, from the initiating session only: replaces the enrolled key, marks the reset completed, closes the account's other live resets, revokes every **other** session (the caller's stays), audits `account.signed-in-reset { method: "wait" or "email-code", revokedSessions, closedResets, sessionId }`. Returns `{ wallets, revokedSessionIds }`. |
+| `verifyReauthentication(token, { challengeId, label, authorizerSignature }, context?)` | the current key, action `reauthentication`, subject `host:<label>` | one statement: re-checks the session, the status and the key under their locks and audits `account.reauth { label, sessionId }`; nothing else. Returns `{ accountId, sessionId, label, verifiedAt }`. |
+
+A reset's authorizer is not a key: the emailed code, or the elapsed wait from
+the same session, is what authorizes it, so only the subject, the new key,
+signs (proof of possession). A setting's and a reauthentication's authorizer is
+the current key, which signs, so a stolen session alone can change neither.
+
+### Account recovery by email
+
+`startAccountReset` answers **every username the same way**: a fresh random
+`resetId`, an `expiresAt` 15 minutes on, and the same statements, whether or
+not the account exists, has a verified email, has the setting on or is active.
+It stores a code row (its SHA-256 bound to the reset id under its own domain, 5
+attempts) only for an active account with a verified email and the setting on,
+and only while the address is under its per-recipient cap
+(`account-reset-recipient`, [below](#reset-rate-limits)). Then, and only then,
+`delivery` is `{ email, code }`, for the host to send; otherwise it is `null`.
+The code is 16 symbols of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (80 bits),
+returned ungrouped; a host may show it in four groups of four, since a
+completion ignores case and separators. It replaces the enrolled key with no
+password, so it is long enough that its stored digest cannot be searched
+offline within its 15 minutes.
+
+```ts
+const issued = await service.startAccountReset({ username }, context);
+if (issued.delivery !== null) {
+  void sendResetCode(issued.delivery); // with a time budget; log the outcome only
+}
+await padTo(start, 3_500); // the same total time for every username
+return Response.json({ resetId: issued.resetId, expiresAt: issued.expiresAt });
+```
+
+Never put `delivery` in a response, never answer differently when it is
+`null`, and pad every response to one fixed time: the SDK's work is the same
+for every username, the delivery is not. No hook runs for a start, for the same
+reason. The client signs the `email-reset` message over `email:<resetId>` and
+`key:<new key>` with the new key, and completes with the code the email
+carries.
+
+Every failure of `completeAccountReset` that an unauthenticated caller can
+cause is one `invalid-signature`: an unknown username or reset id, a wrong,
+spent or expired code, a code out of attempts, the setting turned off, the
+email changed or unverified, a suspended account, a bad signature, a challenge
+of another username. Each attempt is counted in its own statement before the
+code is compared, so parallel guesses cannot share one, and the completion
+statement re-checks the code's digest, the attempts, the expiry, the setting
+and the verified email (verified before the code was issued) under the row
+locks. A code that verified but names the current key is `key-unchanged`.
+
+#### The email-change interlock
+
+An address change turns account recovery by email off and closes the
+account's live emailed codes in the same statement, in `changeEmail` and in
+`updateAccount` (`PATCH /accounts/me`) alike: the new address is not yet a
+recovery channel, and the codes went to the old one. Turning it back on needs
+the new address verified and a signature by the key. The audit rows say so
+(`account.email-change` and `account.update` gain `emailResetDisabled` and
+`closedResets`).
+
+### The signed-in reset
+
+For a user who has forgotten the password but is still signed in.
+`startSignedInReset` starts a reset bound to the caller's session, available to
+that session **72 hours** later and completable for 7 days after that. With
+account recovery by email on (the opt-in, the setting and a verified email) it
+also issues an emailed code, returned as `delivery`, that completes the reset
+at once (15 minutes, 5 attempts); when the code runs out or expires, the wait
+remains. The hook receives `availableAt`, so a host can send its owner a notice
+at the start and another before the reset becomes available.
+
+- **One at a time.** A second start, from any session, answers `409
+  reset-pending`; the unique live index refuses a concurrent second insert,
+  whose retry finds the first. A reset that lapsed, or whose session is gone, is
+  closed by the next start.
+- **Abort.** Any session of the account aborts it (`abortSignedInReset`). A
+  sign-in with the password aborts it **in the login statement**
+  (`account.signed-in-reset.abort { abortedBy: "login", sessionId }`), and a
+  password change (`rotateSignInKey`) **in the rotation's statement**
+  (`abortedBy: "rotation"`), because each proves the password is not
+  forgotten. The rotation keeps the caller's session, which may be the very
+  session (or a stolen copy of it) that started the reset, so without this
+  the reset would outlive the new password. Revoking the initiating session
+  ends it too, since only that session can complete it.
+- **Session lifetime.** Without an emailed code, a start from a session that
+  expires before `availableAt` is refused (`reset-unavailable`,
+  `details: { reason: "session-expires-first", sessionExpiresAt }`).
+- **No hiding.** While it is pending, the initiating session's
+  `revokeOtherSessions` and `revokeSessionById` answer `409 reset-pending`.
+- **Completion.** Only the initiating session, with `resetId`, a new
+  `rotation` challenge and the new key's signature; `code` to complete before
+  `availableAt`. `reset-unavailable` when there is no such pending reset of
+  this session (aborted, completed, expired, another session's) or it is not
+  available yet (`details.availableAt`); `email-verification-failed` for a
+  wrong, expired or exhausted code; `stale-key` when the enrolled key changed
+  after the call began (another change won).
+
+### Reauthentication
+
+`verifyReauthentication` lets a host require a fresh current-password run for
+an action of its own, with an audit row naming it. `label` is the host's
+constant for that action, 3 to 80 characters from `[a-z0-9._:-]` starting with
+a letter or digit, never user data. A label is part of the signed subject, so a
+signature for one label proves nothing for another. It consumes the challenge,
+counts under `account-change`, and changes nothing else; the host acts on the
+result in its own statement.
+
+### Reset errors
+
+| code | HTTP | when |
+| --- | --- | --- |
+| `invalid-signature` | 401 | a bad signature, a challenge of another username, a suspended account; every failure of `completeAccountReset` an unauthenticated caller can cause |
+| `reset-setting-refused` | 409 | account recovery by email without a verified email (`details.reason: "email-unverified"`); the signed-in reset off with no other method (`"no-other-reset-method"`); a signed-in reset while the account's setting is off (`"signed-in-reset-off"`) |
+| `reset-pending` | 409 | a second signed-in reset; a revocation by the session that started a pending one |
+| `reset-unavailable` | 409 | no pending signed-in reset of this session to complete, or not yet available (`details.availableAt`); a `startSignedInReset` without an emailed code whose session expires before the reset would be available (`details.reason: "session-expires-first"`, `details.sessionExpiresAt`) |
+| `email-verification-failed` | 400 | `completeSignedInReset`: a wrong, expired or exhausted code |
+| `key-unchanged`, `stale-key`, `wallet-conflict`, `wallet-registered` | 409 | as for the account changes |
+| `invalid-request` | 400 | the opt-in or the mode refuses the method, or a malformed input (setting, value, label, reset id) |
+| `invalid-public-key`, `invalid-address`, `invalid-username` | 400 | a submitted key or username, checked before any lookup |
+| `rate-limited` | 429 | the rules [below](#reset-rate-limits) |
+
+The three new codes are 409s that need a session; none is added to
+`enumerationSensitiveCodes`.
+
+### Reset statements and lock order
+
+Each change is one statement, in the [account changes' order](#statements-and-lock-order),
+with the resets after the enrolled key and before the sessions, and never
+`FOR UPDATE` on the account row:
+
+1. the account row: `FOR SHARE` (`FOR NO KEY UPDATE` for a setting change, an
+   address change and `updateAccount`);
+2. the enrolled-key row (`FOR UPDATE` to replace it, `FOR SHARE` to check it);
+3. a setting change only: the active recovery key, `FOR SHARE`;
+4. the reset being completed (`FOR UPDATE`), then the other live resets it
+   closes;
+5. sessions, in id order (`FOR NO KEY UPDATE`), never the caller's own row;
+6. inserts: a new session, the audit rows.
+
+The login statement locks the one reset row it aborts and no session;
+`abortSignedInReset` takes the account `FOR SHARE` and the reset row; the
+rotation takes the account `FOR SHARE`, the key, the pending reset and then
+sessions, in the order above; the revocations only read the resets. So a completion and revoke-others, revoke-all,
+`authenticate`, a login or an abort never close a cycle, and a rotation and a
+completion of one account serialize on the enrolled key: the second finds the
+key moved (`stale-key`). `accountResets.integration.test.ts` drives these
+interleavings with a lock holder and fails with PostgreSQL 40P01 when a
+completion takes the account `FOR UPDATE`.
+
+A completion that is already waiting when a revoke-others revokes its
+initiating session can still commit: its snapshot saw the session live. The
+abort, the password login and the password change are the race-safe stops,
+because they lock the reset row the completion locks.
+
+A setting change cannot close a reset that a start inserted while the change
+waited for the account row, because the change's snapshot predates the row.
+So a signed-in reset counts as pending (the status, `reset-pending`) and
+completes only while its setting is on, and turning the setting on closes the
+leftover. What remains needs the owner's own signed turn-off and turn-on in
+flight at once, both overlapping the start.
+
+### Reset rate limits
+
+| rule | limit | subject |
+| --- | --- | --- |
+| `account-reset-start` | 3 per 3,600 s | normalized username, whoever asks |
+| `account-reset-start-day` | 10 per 86,400 s | normalized username, whoever asks |
+| `account-reset-start-ip` | 20 per 3,600 s | hashed IP, only when the host supplies one |
+| `account-reset-recipient` | 8 per 3,600 s | the address, counted inside the start's statement for an eligible account only, and never surfaced: over the cap the start issues no code and answers as always |
+| `account-change` | 10 per 300 s | hashed IP and account id for the signed-in methods; hashed IP and normalized username for `completeAccountReset` |
+
+The username rules count every request, whether or not a code is issued, so
+they answer alike for every username. `account-reset-recipient` is a bucket of
+its own, read by nothing but the start, whose answer is uniform. Sharing email
+verification's `email-verification-recipient` bucket would leak and silence:
+`startEmailVerification` is unauthenticated and answers `429` from that
+bucket, so its threshold would reveal that a start found an eligible account
+at a guessed address, and eight verification requests an hour would stop the
+owner's reset codes without a trace. An edge limiter in front of
+`startAccountReset` is still the host's.
+
+### Reset events
+
+`onSecurityEvent` receives, after commit: `account.reset-setting` (when it
+changed; `setting`, `enabled`), `account.email-reset` and
+`account.signed-in-reset` (`revokedSessions`), `account.signed-in-reset.start`
+(`availableAt`) and `account.signed-in-reset.abort` (`abortedBy`: `session`,
+`login` or `rotation`). The start of
+an account recovery by email and a reauthentication are audited
+(`account.email-reset.start`, `account.reauth`) but not reported.
 
 ## Challenge message format
 
@@ -1200,6 +1468,10 @@ triggers protect this table.
 `username_normalized`, `display_name`, `email`, `email_verified_at`, `status`,
 `created_at`, `updated_at`.
 
+Migration 8 adds `email_reset_enabled boolean NOT NULL DEFAULT false` and
+`signed_in_reset_enabled boolean NOT NULL DEFAULT true`, each one `ADD COLUMN
+IF NOT EXISTS`: the account's [reset settings](#opt-ins-settings-and-status).
+
 Invariants: `status IN ('active','suspended')`; `username_normalized` is 3–320
 characters; `display_name` is 1–120 characters; `email_verified_at` may only be
 set when `email` is non-null; `UNIQUE (service_profile_id, username_normalized)`
@@ -1345,6 +1617,32 @@ a row a day after it expires. Each of migration 7's six statements is one
 `CREATE … IF NOT EXISTS` with its constraints inline, safe to re-run and to run
 from concurrent runners.
 
+### `<p>_account_resets` (migration 8)
+
+`id uuid` (PK), `account_id` (FK, cascade), `kind` (`email` or `signed-in`),
+`code_hash` (64 lowercase hex, or NULL), `attempts`, `session_id` (the
+initiating session; no foreign key), `created_at`, `available_at`,
+`expires_at`, `completed_at`, `aborted_at`. CHECKs: an `email` row has a code
+digest, no session and `available_at = created_at`; a `signed-in` row has a
+session; `available_at >= created_at` and `expires_at > available_at`; never
+both completed and aborted; `attempts >= 0`. A live reset is neither completed
+nor aborted; `aborted_at` also closes a superseded or lapsed one (an email
+change, a setting change, a completion, a password sign-in or password change
+for a signed-in reset, or the next start). The partial
+**unique** index `<p>_account_resets_signed_in_live_idx` on `(account_id)
+WHERE kind = 'signed-in' AND completed_at IS NULL AND aborted_at IS NULL`
+allows one live signed-in reset per account and serves the login abort and the
+status; `<p>_account_resets_account_idx` on `(account_id, created_at DESC)`
+serves the closing of an account's live codes and the cascade; and
+`<p>_account_resets_expires_idx` on `(expires_at)` serves `pruneExpired`, which
+deletes a row a day after it expires. `session_id` has no foreign key on
+purpose: `pruneExpired` deletes dead sessions under `SKIP LOCKED`, and a cascade
+from them would lock reset rows behind session locks, against the order every
+reset statement takes. A reset whose session is gone cannot complete. Each of
+migration 8's six statements is one `ADD COLUMN IF NOT EXISTS` or `CREATE …
+IF NOT EXISTS` with its constraints inline, safe to re-run and to run from
+concurrent runners.
+
 ### There is no salt adoption
 
 Every deployment's salt is minted by the database on its first `migrate()`
@@ -1383,7 +1681,12 @@ type IdentityServiceConfig = {
   requireVerifiedEmail?: boolean;
   storeSessionClientHashes?: boolean;
   walletMode?: "service-deterministic" | "per-account-deterministic" | "random-vault";
-  accountSecurity?: { signInKeyRotation?: boolean; recoveryKeys?: boolean };
+  accountSecurity?: {
+    signInKeyRotation?: boolean;
+    recoveryKeys?: boolean;
+    emailReset?: boolean;
+    signedInReset?: boolean;
+  };
   onSecurityEvent?: (event: SecurityEventNotice) => void | Promise<void>;
   auditRetentionDays?: number;
 };
@@ -1417,7 +1720,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 | `emailVerificationMaxAttempts` | 5 |
 | `requireVerifiedEmail` | `false` |
 | `storeSessionClientHashes` | `true`; `false` writes `NULL` to a new session's `ip_hash` and `user_agent_hash` ([`<p>_sessions`](#p_sessions)); a value that is not a boolean is refused |
-| `accountSecurity` | `{ signInKeyRotation: false, recoveryKeys: false }`; each a strict boolean, an unknown key refused ([account changes](#account-changes-and-recovery-keys-opt-in)) |
+| `accountSecurity` | `{ signInKeyRotation: false, recoveryKeys: false, emailReset: false, signedInReset: false }`; each a strict boolean, an unknown key refused ([account changes](#account-changes-and-recovery-keys-opt-in), [account resets](#account-resets-opt-in)) |
 | `onSecurityEvent` | none; a function, awaited for at most 3 s after a change commits ([the hook](#the-security-event-hook)) |
 | `auditRetentionDays` | none (audit rows are kept); an integer from 1 to 36,500 ([audit retention](#audit-retention)) |
 
@@ -1544,9 +1847,13 @@ is gated on a database URL environment variable and skips without one, so CI
 stays offline by default. The other suites under `test/server/*.integration.test.ts`
 use the same gate; `sessions.integration.test.ts` covers migration 6 (re-run and
 concurrent runners), the client label and hashes, listing and revocation, and
-the session routes, and `accountChanges.integration.test.ts` covers migration 7,
+the session routes, `accountChanges.integration.test.ts` covers migration 7,
 every account change, the status and mode rules, the rate limits, the hook, and
-the lock order against concurrent revocations. `pg` and `@types/pg` are devDependencies only; moving
+the lock order against concurrent revocations, and
+`accountResets.integration.test.ts` covers migration 8, the settings, the
+uniform start answer, both resets, the login and password-change aborts,
+reauthentication, the email-change interlock, the setting race and the lock
+order against revocations and rotations. `pg` and `@types/pg` are devDependencies only; moving
 either into `dependencies` would defeat the injected-client design.
 
 ## Threat notes
@@ -1565,9 +1872,12 @@ the message `Authentication failed.`:
 - `wallet-mismatch` — the key is not enrolled for this account
 
 `enumerationSensitiveCodes` is the exported set the router consults; route code
-must never hardcode the list. The account changes add no code to it: every
-recovery failure an unauthenticated caller can cause is `invalid-signature`, and
-`key-unchanged` and `stale-key` need a session or a recovery token. The service-level codes stay distinct for logging,
+must never hardcode the list. The account changes and resets add no code to it:
+every recovery or emailed-reset failure an unauthenticated caller can cause is
+`invalid-signature`, `key-unchanged` and `stale-key` need a session, a recovery
+token or an emailed code, and the reset codes need a session.
+`startAccountReset` answers every username alike
+([account recovery by email](#account-recovery-by-email)). The service-level codes stay distinct for logging,
 which is where the distinction is actually useful.
 
 Registration cannot hide existence: `account-exists` is a real `409`, because a
@@ -1596,7 +1906,10 @@ protection. It exists to bound credential guessing, not traffic.
 Account changes and recovery begins have rules of their own
 ([account-change rate limits](#account-change-rate-limits)): `account-change`, 10 per
 300 s per hashed IP and account; `recovery-begin`, 5 per hour per hashed IP and
-username; and `recovery-begin-ip`, 20 per hour per hashed IP.
+username; and `recovery-begin-ip`, 20 per hour per hashed IP. Starting an
+account recovery by email is bounded per username whoever asks (3 per hour, 10
+per day) and per hashed IP (20 per hour), and by a recipient bound of its own
+([reset rate limits](#reset-rate-limits)).
 
 Starting an email verification is bounded three ways, each per hour: 5 per
 normalized username and address pair, 8 per recipient address whatever the
@@ -1609,7 +1922,10 @@ Email verification carries a further, independent bound: `attempts` on each
 verification row, compared against `emailVerificationMaxAttempts` (default 5).
 An 8-character code from a 32-symbol alphabet is roughly 40 bits, but the
 attempt bound is what makes a *specific* code unguessable within its 15-minute
-lifetime.
+lifetime. Its digest could be searched offline from a database read, which
+yields only the confirmation of an address. An account reset code replaces the
+enrolled key, so it is 16 symbols (80 bits) instead
+([account recovery by email](#account-recovery-by-email)).
 
 ### Challenge replay protection
 
@@ -1680,16 +1996,26 @@ recover the account with it. Those are the real insider risk in this design and
 deserve the same monitoring as any other privileged write. Alert on any INSERT
 into `<p>_account_wallets`, any UPDATE of its `public_key` or `address`, and any
 INSERT or `status` change in `<p>_account_recovery_keys`, when no audit row of
-`account.register`, `account.key-rotate`, `account.recover` or
-`account.recovery-key.*` for the same account carries the same `created_at`
-(each statement writes its audit row with its own clock).
+`account.register`, `account.key-rotate`, `account.recover`,
+`account.email-reset`, `account.signed-in-reset` or `account.recovery-key.*`
+for the same account carries the same `created_at` (each statement writes its
+audit row with its own clock). With account resets, an operator with write
+access can also turn an account's account recovery by email on or point its
+verified email at another inbox, then complete a reset with a code it reads
+from its own row; alert on a change of `email_reset_enabled` or
+`signed_in_reset_enabled` without an `account.reset-setting` (or
+`account.email-change` / `account.update`) audit row at the same time, and on
+any INSERT into `<p>_account_resets` of kind `email` without an
+`account.email-reset.start` row.
 
 **Cannot:** recover, derive, reconstruct, decrypt, or sign with any user's
 enrolled key or wallet without that user's password or, in `random-vault` mode,
 recovery code. No material capable of producing one without them is present, and
 no amount of database access creates it. Under the sign-in profile the database
 does not even say which wallet a user has. Nor can they mint a usable session token from the
-stored hashes, or read a plaintext email verification code.
+stored hashes, read a plaintext email verification code, or, from a read alone,
+recover a live account reset code: it is 80 bits, and only its SHA-256 is
+stored, which cannot be searched within the code's 15 minutes.
 
 Their remaining path to a specific wallet is an offline guessing attack. In the
 deterministic modes it is the one every holder of a public address already has;

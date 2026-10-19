@@ -77,7 +77,12 @@ const begin = (recoveryPublicKey: string) =>
 describe("the account-security opt-ins", () => {
   it("refuses rotation, enrollment and recovery with both opt-ins off (the default)", async () => {
     const off = service();
-    expect(off.config.accountSecurity).toEqual({ signInKeyRotation: false, recoveryKeys: false });
+    expect(off.config.accountSecurity).toEqual({
+      signInKeyRotation: false,
+      recoveryKeys: false,
+      emailReset: false,
+      signedInReset: false,
+    });
     await expectCode(() => off.rotateSignInKey("token", rotation(goodKey)), "invalid-request");
     await expectCode(() => off.enrollRecoveryKey("token", enrollment(goodKey)), "invalid-request");
     await expectCode(() => off.beginRecovery(begin(goodKey)), "invalid-request");

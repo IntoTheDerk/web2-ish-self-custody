@@ -340,7 +340,8 @@ Deterministic derivation alone cannot survive a password change: a new password
 is a new wallet, and a forgotten password is a lost one. (The identity service's
 opt-in [account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)
 can rebind an account to the new password's key, or recover the account with a
-recovery key, but the old key stays lost.) A wallet vault
+recovery key, and its opt-in [account resets](docs/SERVER_API.md#account-resets-opt-in)
+with an emailed code or from a signed-in session, but the old key stays lost.) A wallet vault
 (`src/vault.ts`, since v0.5.0) decouples the two by storing the seed encrypted
 under two independent wrappers.
 
@@ -592,6 +593,11 @@ rotation, the signed email change, recovery keys and the security-event list are
 service methods a host routes itself; `accountSecurity` turns on rotation and
 recovery keys (see
 [Account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)).
+Account recovery by email, the signed-in reset (a 72-hour wait that any other
+session, a password sign-in or a password change aborts) and reauthentication
+for a host label are service methods too; `accountSecurity.emailReset` and
+`accountSecurity.signedInReset` turn the resets on (see
+[Account resets](docs/SERVER_API.md#account-resets-opt-in)).
 
 ### Email verification delivery
 
@@ -768,7 +774,7 @@ before defining either.
 | `normalizeUsername(username)` | function | the exact username normalization derivation applies |
 | `buildAccountChangeMessage(input)` | function | the ten-line [account-change message](docs/PROTOCOL.md#part-4--the-account-change-message) a client signs to change its account |
 | `normalizeEmail(address)` | function | the identity service's email normalization, for an `email:` subject |
-| `ACCOUNT_CHANGE_DOMAIN` / `accountChangeActions` | constant / list | `"web2-ish-self-custody account change v1"` and this release's six actions |
+| `ACCOUNT_CHANGE_DOMAIN` / `accountChangeActions` | constant / list | `"web2-ish-self-custody account change v1"` and this release's eleven actions |
 | `signInEd25519ExternalSalt` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v1`: service-salted sign-in key, not a wallet ([sign-in profile](#a-sign-in-key-separate-from-the-wallet)) |
 | `signInEd25519Codec` | `IdentityCodec` | `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits, decoded strictly |
 | `signInHkdfEd25519` | `KeyDerivation` | `hkdf-sha256-sign-in-key-v1`: the sign-in profile's HKDF-SHA256 step |
@@ -832,7 +838,10 @@ and the `kalvora-ed25519-base58-v1` codec. Its test vector is committed in
 changes it is wrong. The chain-neutral sign-in profile,
 `web2ish-sign-in-ed25519-external-salt-v1`, has its own vector,
 [`vectors/sign-in-ed25519-external-salt-v1.json`](vectors/sign-in-ed25519-external-salt-v1.json),
-under the same rule. Retired profile ids are listed in
+under the same rule, and so do the account-change message's,
+[`vectors/account-change-v1.json`](vectors/account-change-v1.json) and
+[`vectors/account-change-resets-v1.json`](vectors/account-change-resets-v1.json):
+a release that adds actions adds a vector file beside the released ones. Retired profile ids are listed in
 [the protocol](docs/PROTOCOL.md#retired-profiles). The generic
 `derived-from-username` salt policy remains available to chains that define
 their own profile.
@@ -859,6 +868,12 @@ their own profile.
   channel refuses `email` there and changes it only through `changeEmail`. A
   recovery key is a full account credential, single use, and the service holds
   only its public half.
+- **Account resets trade a credential for a channel.** With account recovery by
+  email on, the verified inbox can replace the enrolled key; with the signed-in
+  reset, a session can after 72 hours unless another session aborts it or the
+  owner signs in with the password or changes it. Both are opt-in for the
+  deployment, and the settings that turn them on or off need the key's
+  signature. Any email change turns account recovery by email off.
 - **Pin the profile in source.** A client that accepts a profile id, codec id,
   or KDF parameters from a server has handed that server a downgrade lever.
 - **Isolate derivation.** Run it in a fresh dedicated worker, one derivation at

@@ -51,7 +51,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       requireVerifiedEmail: false,
       walletMode: "service-deterministic",
       storeSessionClientHashes: true,
-      accountSecurity: { signInKeyRotation: false, recoveryKeys: false },
+      accountSecurity: { signInKeyRotation: false, recoveryKeys: false, emailReset: false, signedInReset: false },
       onSecurityEvent: null,
       auditRetentionDays: null,
     });
@@ -83,7 +83,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       requireVerifiedEmail: false,
       walletMode: "service-deterministic",
       storeSessionClientHashes: true,
-      accountSecurity: { signInKeyRotation: false, recoveryKeys: false },
+      accountSecurity: { signInKeyRotation: false, recoveryKeys: false, emailReset: false, signedInReset: false },
       onSecurityEvent: null,
       auditRetentionDays: null,
     });
@@ -257,32 +257,45 @@ describe("resolveIdentityServiceConfig range validation", () => {
 });
 
 describe("resolveIdentityServiceConfig account security options", () => {
-  it("defaults both opt-ins to false, no hook and no audit retention", () => {
+  it("defaults every opt-in to false, no hook and no audit retention", () => {
     const resolved = resolveIdentityServiceConfig(minimal);
-    expect(resolved.accountSecurity).toEqual({ signInKeyRotation: false, recoveryKeys: false });
+    expect(resolved.accountSecurity).toEqual({
+      signInKeyRotation: false,
+      recoveryKeys: false,
+      emailReset: false,
+      signedInReset: false,
+    });
     expect(Object.isFrozen(resolved.accountSecurity)).toBe(true);
     expect(resolved.onSecurityEvent).toBeNull();
     expect(resolved.auditRetentionDays).toBeNull();
   });
 
-  it("keeps each opt-in independently, and an empty object is both off", () => {
+  it("keeps each opt-in independently, and an empty object is all off", () => {
     for (const signInKeyRotation of [true, false]) {
       for (const recoveryKeys of [true, false]) {
-        expect(
-          resolveIdentityServiceConfig(withOverride({ accountSecurity: { signInKeyRotation, recoveryKeys } }))
-            .accountSecurity,
-        ).toEqual({ signInKeyRotation, recoveryKeys });
+        for (const emailReset of [true, false]) {
+          for (const signedInReset of [true, false]) {
+            expect(
+              resolveIdentityServiceConfig(
+                withOverride({ accountSecurity: { signInKeyRotation, recoveryKeys, emailReset, signedInReset } }),
+              ).accountSecurity,
+            ).toEqual({ signInKeyRotation, recoveryKeys, emailReset, signedInReset });
+          }
+        }
       }
     }
     expect(resolveIdentityServiceConfig(withOverride({ accountSecurity: {} })).accountSecurity).toEqual({
       signInKeyRotation: false,
       recoveryKeys: false,
+      emailReset: false,
+      signedInReset: false,
     });
   });
 
   it("refuses a non-object, a non-boolean opt-in and a misspelt key", () => {
     for (const accountSecurity of [true, "on", null, [], { signInKeyRotation: "true" }, { recoveryKeys: 1 },
-      { walletRotation: true }, { signInKeyRotation: true, recovery: true }]) {
+      { walletRotation: true }, { signInKeyRotation: true, recovery: true }, { emailReset: "true" },
+      { signedInReset: 1 }, { emailResets: true }, { sessionReset: true }]) {
       expectIdentityError(
         () => resolveIdentityServiceConfig({ ...minimal, accountSecurity } as unknown as IdentityServiceConfig),
         "invalid-service-profile",

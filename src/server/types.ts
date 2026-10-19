@@ -53,8 +53,8 @@ export type IdentityServiceConfig = Readonly<{
    */
   storeSessionClientHashes?: boolean;
   /**
-   * Opt-ins for the account changes that alter what signs in. Both default
-   * `false`, so a deployment sees no new behavior until it turns one on.
+   * Opt-ins for the account changes that alter what signs in. Each defaults
+   * to `false`, so a deployment sees no new behavior until it turns one on.
    * They apply only in the deterministic wallet modes; `random-vault` mode
    * refuses each operation they enable whatever their value.
    */
@@ -76,7 +76,7 @@ export type IdentityServiceConfig = Readonly<{
   auditRetentionDays?: number | null;
 }>;
 
-/** The two opt-ins of `IdentityServiceConfig.accountSecurity`. */
+/** The opt-ins of `IdentityServiceConfig.accountSecurity`. */
 export type AccountSecurityOptions = Readonly<{
   /** Enables `rotateSignInKey`: re-binding the account to a new enrolled key. */
   signInKeyRotation?: boolean;
@@ -87,6 +87,23 @@ export type AccountSecurityOptions = Readonly<{
    * status and the operator's `revokeRecoveryKeys` work either way.
    */
   recoveryKeys?: boolean;
+  /**
+   * Enables account recovery by email: `startAccountReset` and
+   * `completeAccountReset`, turning an account's `email-reset` setting on, and
+   * the emailed code that completes a signed-in reset at once. Each account's
+   * own setting is off until its owner turns it on with a verified email.
+   * Turning the setting off works either way.
+   */
+  emailReset?: boolean;
+  /**
+   * Enables the signed-in reset: `startSignedInReset` and
+   * `completeSignedInReset`, and turning an account's `signed-in-reset`
+   * setting on. Each account's own setting is ON by default (migration 8), so
+   * with this opt-in a stolen session can replace the enrolled key after the
+   * 72-hour wait unless another session aborts or the owner signs in with the
+   * password. Aborting and turning the setting off work either way.
+   */
+  signedInReset?: boolean;
 }>;
 
 /**
@@ -101,6 +118,11 @@ export type SecurityEventAction =
   | "account.recovery-key.revoke"
   | "account.recovery-begin"
   | "account.recover"
+  | "account.reset-setting"
+  | "account.email-reset"
+  | "account.signed-in-reset.start"
+  | "account.signed-in-reset.abort"
+  | "account.signed-in-reset"
   | "session.revoke-others";
 
 /**
@@ -121,6 +143,20 @@ export type SecurityEventNotice = Readonly<{
    * verified, so the host can tell its owner. It is never audited.
    */
   previousVerifiedEmail?: string | null;
+  /** `account.reset-setting` only: which setting changed, and its new value. */
+  setting?: AccountResetSettingName;
+  enabled?: boolean;
+  /**
+   * `account.signed-in-reset.start` only: when the reset becomes available
+   * without an emailed code, for a host that sends a second notice before it.
+   */
+  availableAt?: Date;
+  /**
+   * `account.signed-in-reset.abort` only: what aborted it, `session` (an
+   * explicit abort), `login` (a sign-in with the password) or `rotation` (a
+   * password change, `rotateSignInKey`).
+   */
+  abortedBy?: "session" | "login" | "rotation";
 }>;
 
 export type SecurityEventHook = (event: SecurityEventNotice) => void | Promise<void>;
@@ -138,7 +174,12 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   requireVerifiedEmail: boolean;
   walletMode: ServiceWalletMode;
   storeSessionClientHashes: boolean;
-  accountSecurity: Readonly<{ signInKeyRotation: boolean; recoveryKeys: boolean }>;
+  accountSecurity: Readonly<{
+    signInKeyRotation: boolean;
+    recoveryKeys: boolean;
+    emailReset: boolean;
+    signedInReset: boolean;
+  }>;
   onSecurityEvent: SecurityEventHook | null;
   auditRetentionDays: number | null;
 }>;
@@ -404,6 +445,142 @@ export type SecurityEvent = Readonly<{
    * row still exists (`pruneExpired` deletes it with the row), else `null`.
    */
   clientLabel: string | null;
+}>;
+
+/** The two per-account reset settings of `setAccountResetSetting`. */
+export type AccountResetSettingName = "email-reset" | "signed-in-reset";
+
+/**
+ * `setAccountResetSetting`: action `email-reset-setting` or
+ * `signed-in-reset-setting`, authorizer `key:<current key>`, subject
+ * `setting:on` or `setting:off`, so the signature binds the value.
+ */
+export type AccountResetSettingInput = Readonly<{
+  challengeId: string;
+  setting: AccountResetSettingName;
+  enabled: boolean;
+  /** By the current enrolled key: proof of the current password. */
+  authorizerSignature: string;
+}>;
+
+/** An account's two reset settings, as stored. */
+export type AccountResetSettings = Readonly<{
+  /** Account recovery by email. Off by default; needs a verified email. */
+  emailReset: boolean;
+  /** The signed-in reset. On by default. */
+  signedInReset: boolean;
+}>;
+
+/**
+ * A code to deliver, for the host only. Never put it in a response: whoever
+ * reads it can complete the reset.
+ */
+export type AccountResetDelivery = Readonly<{
+  /** The account's verified address. */
+  email: string;
+  /**
+   * 16 symbols of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (80 bits), ungrouped. A
+   * host may show it in groups of four: the completion ignores case and
+   * separators.
+   */
+  code: string;
+}>;
+
+/**
+ * What `startAccountReset` returns, the same shape for every username. The
+ * caller's answer carries `resetId` and `expiresAt` only, whatever happened:
+ * `delivery` is `null` unless a code was issued (an active account with a
+ * verified email and its `email-reset` setting on, within the per-recipient
+ * cap), and a host that sends it must not let the response time or content
+ * depend on it.
+ */
+export type IssuedAccountReset = Readonly<{
+  /** A fresh UUID for every request; the client signs `email:<resetId>`. */
+  resetId: string;
+  expiresAt: Date;
+  delivery: AccountResetDelivery | null;
+}>;
+
+/**
+ * `completeAccountReset`: action `email-reset`, authorizer `email:<resetId>`,
+ * subject `key:<newKey.publicKey>`. The emailed code is the authorization; only
+ * the new key signs.
+ */
+export type AccountResetCompletionInput = Readonly<{
+  username: string;
+  resetId: string;
+  /** The emailed code (case and separators are ignored). */
+  code: string;
+  /** A `rotation` challenge for the username. */
+  challengeId: string;
+  newKey: EnrolledKeyInput;
+  /** By the new key: proof of possession. */
+  subjectSignature: string;
+}>;
+
+/** A pending signed-in reset of the caller's account. */
+export type PendingSignedInReset = Readonly<{
+  id: string;
+  createdAt: Date;
+  /** From then on the initiating session can complete it without a code. */
+  availableAt: Date;
+  expiresAt: Date;
+  /** True for the session that started it, the only one that can complete it. */
+  initiatedByCaller: boolean;
+  /** Whether an emailed code can still complete it before `availableAt`. */
+  codeUsable: boolean;
+}>;
+
+/** What `startSignedInReset` returns. */
+export type IssuedSignedInReset = Readonly<{
+  reset: PendingSignedInReset;
+  /**
+   * With account recovery by email on (the opt-in, the account's setting and
+   * a verified email): the code that completes the reset at once. Otherwise
+   * `null`, and the reset waits 72 hours.
+   */
+  delivery: AccountResetDelivery | null;
+}>;
+
+/**
+ * `completeSignedInReset`: action `signed-in-reset`, authorizer
+ * `session-reset:<resetId>`, subject `key:<newKey.publicKey>`. The elapsed
+ * wait, or the emailed code, is the authorization; only the new key signs.
+ */
+export type SignedInResetCompletionInput = Readonly<{
+  challengeId: string;
+  resetId: string;
+  newKey: EnrolledKeyInput;
+  /** By the new key: proof of possession. */
+  subjectSignature: string;
+  /** The emailed code, to complete before `availableAt`; omit to rely on the wait. */
+  code?: string;
+}>;
+
+/** `accountResetStatus`: the settings and the pending signed-in reset, if any. */
+export type AccountResetStatus = Readonly<{
+  settings: AccountResetSettings;
+  emailVerified: boolean;
+  pendingSignedInReset: PendingSignedInReset | null;
+}>;
+
+/**
+ * `verifyReauthentication`: action `reauthentication`, authorizer
+ * `key:<current key>`, subject `host:<label>`.
+ */
+export type ReauthenticationInput = Readonly<{
+  challengeId: string;
+  /** The host's constant for what this unlocks: `^[a-z0-9][a-z0-9._:-]{2,79}$`. */
+  label: string;
+  authorizerSignature: string;
+}>;
+
+/** A verified reauthentication, as audited (`account.reauth`). */
+export type VerifiedReauthentication = Readonly<{
+  accountId: string;
+  sessionId: string;
+  label: string;
+  verifiedAt: Date;
 }>;
 
 export type EmailVerificationRequest = Readonly<{

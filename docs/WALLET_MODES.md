@@ -122,12 +122,20 @@ identity service rebind the account, both in `service-deterministic` and
   (`beginRecovery`, which spends nothing), then sign the new password's key
   with it (`completeRecovery`): one statement replaces the enrolled key, marks
   the recovery key used, revokes every session and issues a new one.
+- **Account resets** (`accountSecurity.emailReset`,
+  `accountSecurity.signedInReset`). Account recovery by email replaces the key
+  with an emailed code (`startAccountReset`, `completeAccountReset`) for an
+  account whose owner turned it on with a verified email; the signed-in reset
+  replaces it from a session after a 72-hour wait that any other session, a
+  password sign-in or a password change aborts (`startSignedInReset`,
+  `completeSignedInReset`)
+  ([server API](SERVER_API.md#account-resets-opt-in)). The new key alone signs.
 
-Both replace the key; neither recovers the old one, and under a chain wallet
+Each replaces the key; none recovers the old one, and under a chain wallet
 profile the replaced key is a wallet that the account no longer signs in with.
 The platform updates anything else that names the old key, including on-chain
 authorization where applicable, and keeps its own account UUID throughout.
-`random-vault` mode refuses both (`invalid-request`): there a password change
+`random-vault` mode refuses them all (`invalid-request`): there a password change
 is a vault re-wrap that keeps the wallet, and the vault has its own recovery
 code. A platform that wants a different flow can still build its own; the
 service's are off unless configured.

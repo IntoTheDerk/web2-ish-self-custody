@@ -18,6 +18,9 @@ export type IdentityErrorCode =
   | "invalid-username"
   | "key-unchanged"
   | "rate-limited"
+  | "reset-pending"
+  | "reset-setting-refused"
+  | "reset-unavailable"
   | "service-profile-missing"
   | "session-expired"
   | "session-not-found"
@@ -48,6 +51,18 @@ const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze(
   // with a session or a recovery token gets this far, so it reveals nothing.
   "key-unchanged": 409,
   "rate-limited": 429,
+  // A signed-in reset of the account is pending: a second one cannot start,
+  // and the session that started it cannot revoke the account's other
+  // sessions, which would hide the reset from them. Needs a session.
+  "reset-pending": 409,
+  // A reset setting refused by its rule: account recovery by email needs a
+  // verified email, and the signed-in reset can be turned off only while
+  // another reset method is set. Needs a session and the key's signature.
+  "reset-setting-refused": 409,
+  // The caller's signed-in reset is not there to complete (aborted, expired,
+  // completed, another session's) or not available yet; or a start whose
+  // session would expire before the reset became available. Needs a session.
+  "reset-unavailable": 409,
   "service-profile-missing": 503,
   "session-expired": 401,
   "session-not-found": 401,

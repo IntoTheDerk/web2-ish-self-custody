@@ -5,6 +5,234 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased
+
+Account resets: account recovery by email, the signed-in reset, the two
+per-account settings that govern them, and reauthentication for a host label
+(migration 8). The resets are opt-in and off by default
+(`accountSecurity.emailReset`, `accountSecurity.signedInReset`); none of the
+new methods is routed. Derivation and every existing profile, codec,
+transcript and committed vector are unchanged. One vector is added,
+`vectors/account-change-resets-v1.json`. It is a new file because a released
+vector is never edited in place: the design's "new fixture section" in
+`account-change-v1.json` would have changed a released file, so the
+repository's versioning rule wins. The release is breaking for deployments,
+which must migrate first, and for code that implements or matches exhaustively
+the server's types.
+
+### Breaking changes
+
+- **Apply migration 8 before this version serves traffic.** Run `migrate()`
+  first. `login` and `rotateSignInKey` abort a pending signed-in reset in
+  their own statements, `revokeSessionById` and `revokeOtherSessions` read
+  `<p>_account_resets` and the account's `signed_in_reset_enabled`,
+  `changeEmail` and `updateAccount` write `email_reset_enabled`, and
+  `pruneExpired` deletes from `<p>_account_resets`. Each fails on a schema
+  without migration 8.
+- **`IdentityService` gains eight required methods**, which breaks
+  hand-written implementations and test doubles: `setAccountResetSetting`,
+  `accountResetStatus`, `startAccountReset`, `completeAccountReset`,
+  `startSignedInReset`, `abortSignedInReset`, `completeSignedInReset` and
+  `verifyReauthentication`. Services made by `createIdentityService` and the
+  adapters already have them.
+- **`pruneExpired`'s result gains `accountResets`.** An exact-shape assertion
+  sees the new key.
+- **`IdentityErrorCode` gains `reset-pending`, `reset-setting-refused` and
+  `reset-unavailable`**, all 409. Each breaks exhaustive switches.
+  `enumerationSensitiveCodes` is unchanged.
+- **`AccountChangeAction` gains `reauthentication`, `email-reset-setting`,
+  `signed-in-reset-setting`, `email-reset` and `signed-in-reset`**, and
+  `accountChangeActions` lists them after the six released ones. This breaks
+  exhaustive switches over the type, and code that expects six entries.
+  `buildAccountChangeMessage` accepts the new actions and principal forms
+  (`host:<label>`, `setting:on`, `setting:off`, `email:<resetId>`,
+  `session-reset:<resetId>`), each only in its own action's row; the six
+  released actions accept exactly the forms they did.
+- **`SecurityEventAction` gains `account.reset-setting`, `account.email-reset`,
+  `account.signed-in-reset.start`, `account.signed-in-reset.abort` and
+  `account.signed-in-reset`.** A host hook that matches exhaustively sees new
+  actions once a reset opt-in is on, and `account.signed-in-reset.abort` from
+  a login or a password change whenever a pending reset exists.
+- **`rotateSignInKey` aborts the account's pending signed-in reset** in its
+  statement (audit `account.signed-in-reset.abort { abortedBy: "rotation",
+  sessionId }`, and the hook after `account.key-rotate`). A password change
+  proves the password is not forgotten, as a sign-in does, and the rotation
+  keeps the caller's session, which may be a stolen copy of the session that
+  started the reset: before this, that copy completed the reset 72 hours
+  later and replaced the password the owner had just set. Its result is
+  unchanged. The design's §5.5 names only the abort and the sign-in; it
+  needs the password change too.
+- **`ResolvedIdentityServiceConfig.accountSecurity` and
+  `identityServiceDefaults.accountSecurity` gain `emailReset` and
+  `signedInReset`** (both `false`). A hand-built resolved config needs them,
+  and an exact-equality assertion sees them.
+- **The session that started a pending signed-in reset cannot revoke other
+  sessions**: `revokeOtherSessions` and `revokeSessionById` (and the router's
+  `DELETE /sessions` and `DELETE /sessions/{id}`) answer `409 reset-pending`
+  for it. Nothing changes until a signed-in reset exists, which needs
+  `accountSecurity.signedInReset`.
+- **An email change turns account recovery by email off**, in `changeEmail`
+  and in `updateAccount` (and so `PATCH /accounts/me`), and closes the
+  account's live emailed codes. Their audit metadata gains
+  `emailResetDisabled` and `closedResets` (`account.email-change`,
+  `account.update`).
+
+### Migration 8 `account-resets`
+
+Six statements, each one `ADD COLUMN IF NOT EXISTS` or `CREATE … IF NOT
+EXISTS` with its constraints inline, safe to re-run and to run from concurrent
+runners:
+
+- `<p>_accounts.email_reset_enabled boolean NOT NULL DEFAULT false` and
+  `<p>_accounts.signed_in_reset_enabled boolean NOT NULL DEFAULT true`, one
+  statement each. Existing accounts read the defaults at once (no rewrite).
+- `<p>_account_resets (id, account_id, kind, code_hash, attempts, session_id,
+  created_at, available_at, expires_at, completed_at, aborted_at)`, with
+  CHECKs on the kind, the code digest's shape, the attempts, the shape of each
+  kind, the times and the closed state. `session_id` has no foreign key, so
+  that pruning a dead session never locks a reset.
+- The partial unique index `<p>_account_resets_signed_in_live_idx` (one live
+  signed-in reset per account), `<p>_account_resets_account_idx` and
+  `<p>_account_resets_expires_idx`.
+
+### New methods and behavior
+
+Each change is one statement in the account changes' lock order (account
+`FOR SHARE` or `FOR NO KEY UPDATE`, never `FOR UPDATE`; the enrolled key; the
+resets; sessions in id order; inserts), requires an `active` account, and
+writes an audit row with field names only.
+
+- **`setAccountResetSetting(token, { challengeId, setting, enabled,
+  authorizerSignature }, context?)`**, one setting per call, signed by the
+  current key over action `email-reset-setting` or `signed-in-reset-setting`
+  and subject `setting:on` or `setting:off`. Account recovery by email needs a
+  verified email to turn on; the signed-in reset turns off only while an
+  active recovery key or account recovery by email is set
+  (`reset-setting-refused`). A change of a setting, in either direction,
+  closes that kind's open resets: a turn-off its live ones, and a turn-on any
+  that a start inserted while the turn-off waited for the account row, which
+  the turn-off's snapshot could not see. A signed-in reset counts as pending
+  (status, `reset-pending`) and completes only while its setting is on. Audit
+  `account.reset-setting`.
+- **`accountResetStatus(token, context?)`**: the settings, whether the email
+  is verified, and the pending signed-in reset with `initiatedByCaller`, for a
+  host's banner and settings page. Not named in the design's SDK-4 row; added
+  because the banner, the abort and the `reset_pending` rule need it.
+- **`startAccountReset({ username }, context?)`** answers every username with
+  a fresh `resetId` and the same `expiresAt` (15 minutes) in the same
+  statements, and stores a code (SHA-256 under the new domain `web2-ish-self-custody
+  account reset code v1`, 5 attempts) only for an active account with a
+  verified email and the setting on, within the per-recipient cap; then
+  `delivery` carries `{ email, code }` for the host to send. No hook runs for
+  a start. Rate limits `account-reset-start` (3 per hour per username),
+  `account-reset-start-day` (10 per day per username) and
+  `account-reset-start-ip` (20 per hour per hashed IP; not in the design, added
+  as `recovery-begin-ip` is), and the new `account-reset-recipient` cap (8 per
+  hour per address), counted inside the statement and never surfaced. The
+  design says "the existing per-recipient cap", but sharing
+  `email-verification-recipient` broke the uniform start: the unauthenticated
+  `startEmailVerification` answers `429` from that bucket, so its threshold
+  revealed that a start had found an eligible account at a guessed address,
+  and eight verification requests an hour silenced the owner's codes. The
+  reset's bucket is its own and read by nothing else.
+- **Reset codes are 16 symbols (80 bits)** of the verification alphabet,
+  returned ungrouped (the completion ignores case and separators), for both
+  resets. A reset code replaces the enrolled key with no password and is
+  stored as unkeyed SHA-256 over values its row holds, so an 8-symbol (40-bit)
+  code could be searched from a database read in about a minute, well inside
+  its 15 minutes. The design leaves the length open. Email verification codes
+  stay 8 symbols.
+- **`completeAccountReset({ username, resetId, code, challengeId, newKey,
+  subjectSignature }, context?)`**: action `email-reset`, authorizer
+  `email:<resetId>`, signed by the new key only. One statement replaces the
+  enrolled key, completes the reset, closes the account's other live resets,
+  revokes every session and issues a new one. Every failure an
+  unauthenticated caller can cause is `invalid-signature`. `challengeId` is
+  not in the design's route body; every account change consumes a `rotation`
+  challenge, whose nonce and expiry are lines 7 and 8 of the signed message.
+- **`startSignedInReset(token, context?)`**, **`abortSignedInReset(token,
+  context?)`** and **`completeSignedInReset(token, { challengeId, resetId,
+  newKey, subjectSignature, code? }, context?)`**: available to the initiating
+  session 72 hours after the start and for 7 days after that (the window is
+  this SDK's choice; the design leaves it open), or at once with an emailed
+  code when account recovery by email is on. Any session of the account
+  aborts it, a sign-in with the password aborts it in the login statement and
+  a password change in the rotation's, and only the initiating session
+  completes it (action `signed-in-reset`, authorizer
+  `session-reset:<resetId>`, the new key alone signs). Sessions keep their
+  expiry, so without an emailed code a start whose session expires before
+  `availableAt` is refused with `reset-unavailable` (`details.reason:
+  "session-expires-first"`, `details.sessionExpiresAt`), and never extends
+  the session. `resetId`
+  and `code` are not in the design's route body: the signed authorizer names
+  the reset, and the emailed code needs a field.
+- **`verifyReauthentication(token, { challengeId, label, authorizerSignature },
+  context?)`**: action `reauthentication`, authorizer the current key, subject
+  `host:<label>` (`^[a-z0-9][a-z0-9._:-]{2,79}$`). It consumes the challenge,
+  verifies strictly, requires an active account, counts under
+  `account-change`, audits `account.reauth { label, sessionId }` and changes
+  nothing else.
+- **Config** `accountSecurity.emailReset` and `accountSecurity.signedInReset`,
+  strict booleans, default `false`.
+
+### Public-export changes
+
+- `web2-ish-self-custody`: `AccountChangeAction` and `accountChangeActions`
+  gain the five actions (above).
+- `web2-ish-self-custody/server`: new types `AccountResetCompletionInput`,
+  `AccountResetDelivery`, `AccountResetSettingInput`, `AccountResetSettingName`,
+  `AccountResetSettings`, `AccountResetStatus`, `IssuedAccountReset`,
+  `IssuedSignedInReset`, `PendingSignedInReset`, `ReauthenticationInput`,
+  `SignedInResetCompletionInput` and `VerifiedReauthentication`;
+  `AccountSecurityOptions` gains `emailReset` and `signedInReset`;
+  `SecurityEventNotice` gains the optional `setting`, `enabled`, `availableAt`
+  and `abortedBy` (`"session" | "login" | "rotation"`); `IdentityService`, `IdentityErrorCode`,
+  `SecurityEventAction` and `ResolvedIdentityServiceConfig` change as listed
+  under Breaking changes.
+
+### Vector
+
+`vectors/account-change-resets-v1.json`, over `account-change-v1.json`'s
+context and keys: two reset ids (UUIDs from SHA-256 of fixed labels), the
+generic host label `example-host-action-v1`, seven messages (reauthentication,
+each setting on and off, both resets) with their signatures, and twenty
+principals every builder must refuse. `scripts/verify_account_change_vector.py`
+loads it by explicit path after the first vector and reproduces it with the
+standard library and `cryptography` alone; `test/accountChange.test.ts` and
+`test/server/accountChangeSignature.test.ts` check it against the builder and
+the strict verifier. No released vector changes.
+
+### Tests and docs
+
+- `test/server/accountResets.integration.test.ts` (real PostgreSQL): migration
+  8 re-run and from concurrent runners, its checks and indexes; the settings
+  and their rules; the email-change interlock through `changeEmail` and
+  `updateAccount`; the uniform start answer (same statements, shape and
+  expiry for an unknown username, no email, an unverified email, the setting
+  off, a suspended account and an eligible one); the start's rate limits and
+  the per-recipient cap; completion, single use, attempts (sequential and
+  parallel), expiry and the uniform refusals; the signed-in reset's wait,
+  initiator rule, abort, login abort, password-change abort (on the
+  initiating session too), emailed code, one-pending rule and concurrent
+  starts, the session-lifetime refusal, the `reset-pending` revocation refusal
+  (also over HTTP), a start that races the setting's turn-off, and
+  `stale-key`; the reset recipient cap's own bucket (email verification's
+  `429` unchanged by a start, and not silencing it); reauthentication; the status rule; pruning; and the lock
+  order: held-row observation, an orchestrated interleaving with revoke-others
+  that fails with 40P01 when a completion takes the account `FOR UPDATE`
+  (checked by mutation), a rotation and a completion in both orders, the
+  rotation's reset lock before sessions, an abort against a completion in both
+  orders, a start that waits on a lapsed reset that a completion or an abort
+  holds, and a stress run.
+- `test/server/accountResets.test.ts` (no database): the opt-ins, the mode rule
+  and input checks before any SQL, and the new error codes.
+- The migration pins in the other server suites become `[1..8]`.
+- `docs/SERVER_API.md` "Account resets (opt-in)" and the schema, config,
+  errors, rate-limit, enumeration and operator sections; `docs/PROTOCOL.md`
+  Part 4 (actions, principals, the new vector and its verification);
+  `docs/SECURITY_MODEL.md` "Account resets"; `docs/WALLET_MODES.md`; the
+  README.
+
 ## v0.11.0-alpha.0 — 2026-10-18 (alpha pre-release)
 
 Account wallet modes (#5), session management (#10), and account changes and

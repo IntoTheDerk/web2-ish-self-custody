@@ -42,7 +42,7 @@ const prefix = `wsm_${suffix}`;
 const concurrencyPrefix = `wsc_${suffix}`;
 const serviceProfileId = `w2sc-sessions-${suffix}`;
 const tables = [
-  "account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications",
+  "account_resets", "account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications",
   "sessions", "auth_challenges", "account_wallets", "accounts", "service_profile_bootstrap",
   "service_profiles", "schema_migrations",
 ];
@@ -193,7 +193,7 @@ describe.skipIf(!url)("session management on PostgreSQL", () => {
     await Promise.all([first.connect(), second.connect()]);
     sql = pgDriver(first);
     service = createIdentityService(sql, config(prefix));
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   }, 60_000);
 
   afterAll(async () => {

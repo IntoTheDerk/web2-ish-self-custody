@@ -1,0 +1,273 @@
+{
+  "warning": "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET.",
+  "format": "web2-ish-self-custody account change v1",
+  "baseVector": "account-change-v1.json",
+  "context": {
+    "serviceProfileId": "example-account-v1",
+    "applicationId": "example-app",
+    "networkId": "kalvora-mainnet",
+    "usernameNormalized": "jesse@example.com",
+    "nonceHex": "61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf",
+    "expiresAt": "2026-10-18T12:05:00.000Z"
+  },
+  "keys": {
+    "current": {
+      "publicKeyHex": "8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "principal": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205"
+    },
+    "next": {
+      "publicKeyHex": "8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "principal": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392"
+    },
+    "recovery": {
+      "publicKeyHex": "da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "principal": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169"
+    }
+  },
+  "resetIds": {
+    "email": {
+      "label": "fixture-account-reset-email-v1",
+      "id": "b368f9a7-045c-497b-97a2-68604d64d640"
+    },
+    "signedIn": {
+      "label": "fixture-account-reset-signed-in-v1",
+      "id": "d464b46b-cc16-4eff-81e3-92309c7dd60c"
+    }
+  },
+  "hostLabel": "example-host-action-v1",
+  "cases": [
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:example-host-action-v1",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nreauthentication\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nhost:example-host-action-v1",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "1aff4ead4359866f5bc824d1d3dcb05c1491a473dd3c6e9765bd4c74e92c3e21d69ac157cdb75a0158e85af7fe69fbfbf94e59da12cef1be33692eecf3efcb09"
+        }
+      ]
+    },
+    {
+      "action": "email-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:on",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nemail-reset-setting\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nsetting:on",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "0bddc90b635e5c4d19c778fede782142409a3e34ecaf31fc8f4804ec7d599dbd3726d6b54e58f0b8b6dc68441f2afbc8b0eb3110c8aa3a95ea4d8f6866514b09"
+        }
+      ]
+    },
+    {
+      "action": "email-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:off",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nemail-reset-setting\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nsetting:off",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "b5f223a5bec54567e620ad98f040b6dc61cee9935e44a3f75b6db093a20b889ec591512b737de47d4fe89080d39642c274d177bf2815932d38029f409ea98709"
+        }
+      ]
+    },
+    {
+      "action": "signed-in-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:on",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsigned-in-reset-setting\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nsetting:on",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "3fbe2e1ac94b8fdd28a4a143fa765651f540cc1ca767b71d1fd45454dfd23241dccd88b59758a07e8066c08630467fcd92d41c45f3856335e5263a6bd048fa0a"
+        }
+      ]
+    },
+    {
+      "action": "signed-in-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:off",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsigned-in-reset-setting\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nsetting:off",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "eb073879d059a62e3309b9844c1c7aeb700142df5ddb2b48bae6c60682ff6ecc9a8219139c8028b7f2794de7c378a3763efa47bbb3a1efb7af4d747dbde9d905"
+        }
+      ]
+    },
+    {
+      "action": "email-reset",
+      "authorizer": "email:b368f9a7-045c-497b-97a2-68604d64d640",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nemail-reset\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nemail:b368f9a7-045c-497b-97a2-68604d64d640\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "signatures": [
+        {
+          "role": "subject",
+          "signer": "next",
+          "signatureHex": "384cfb84aa62f2a44e31cd037ed4228372b4fd6a01c9895308746a5d534b5de397ffdcdbdbb583d1f45b317813ea69c5c0c28068b6f765da62f151dbd39a3b07"
+        }
+      ]
+    },
+    {
+      "action": "signed-in-reset",
+      "authorizer": "session-reset:d464b46b-cc16-4eff-81e3-92309c7dd60c",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsigned-in-reset\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nsession-reset:d464b46b-cc16-4eff-81e3-92309c7dd60c\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "signatures": [
+        {
+          "role": "subject",
+          "signer": "next",
+          "signatureHex": "9e27385f276da585a1b6ef834fa1e40d384a88d017526c9c24ca81313f104885285229351eb9cf380621969640a8dcb53b49a57d68fbc9fd9559e0b839cd1001"
+        }
+      ]
+    }
+  ],
+  "refusedPrincipals": [
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:ab",
+      "refusedField": "subject",
+      "name": "label shorter than 3 characters"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:Example-host-action-v1",
+      "refusedField": "subject",
+      "name": "uppercase label"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:-example-host-action",
+      "refusedField": "subject",
+      "name": "label starts with a dash"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "refusedField": "subject",
+      "name": "label longer than 80 characters"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:example host",
+      "refusedField": "subject",
+      "name": "space in the label"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "none",
+      "refusedField": "subject",
+      "name": "none is not a host subject"
+    },
+    {
+      "action": "reauthentication",
+      "authorizer": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "subject": "host:example-host-action-v1",
+      "refusedField": "authorizer",
+      "name": "a recovery key does not reauthenticate"
+    },
+    {
+      "action": "email-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:yes",
+      "refusedField": "subject",
+      "name": "a setting is on or off"
+    },
+    {
+      "action": "email-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:ON",
+      "refusedField": "subject",
+      "name": "the value is lowercase"
+    },
+    {
+      "action": "signed-in-reset-setting",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:",
+      "refusedField": "subject",
+      "name": "an empty value"
+    },
+    {
+      "action": "email-reset",
+      "authorizer": "email:jesse@example.com",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "an address is not a reset id"
+    },
+    {
+      "action": "email-reset",
+      "authorizer": "email:B368F9A7-045C-497B-97A2-68604D64D640",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "the reset id is lowercase"
+    },
+    {
+      "action": "email-reset",
+      "authorizer": "session-reset:b368f9a7-045c-497b-97a2-68604d64d640",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "the signed-in form for the emailed reset"
+    },
+    {
+      "action": "email-reset",
+      "authorizer": "email:b368f9a7-045c-497b-97a2-68604d64d640",
+      "subject": "none",
+      "refusedField": "subject",
+      "name": "the new key is the subject"
+    },
+    {
+      "action": "signed-in-reset",
+      "authorizer": "session-reset:not-a-uuid",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "the reset id is a UUID"
+    },
+    {
+      "action": "signed-in-reset",
+      "authorizer": "email:d464b46b-cc16-4eff-81e3-92309c7dd60c",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "the emailed form for the signed-in reset"
+    },
+    {
+      "action": "signed-in-reset",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "refusedField": "authorizer",
+      "name": "a key does not authorize a signed-in reset"
+    },
+    {
+      "action": "recovery-key-removal",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "host:example-host-action-v1",
+      "refusedField": "subject",
+      "name": "host: belongs to reauthentication only"
+    },
+    {
+      "action": "sign-in-key-rotation",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "setting:on",
+      "refusedField": "subject",
+      "name": "setting: belongs to the setting actions only"
+    },
+    {
+      "action": "email-change",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "email:b368f9a7-045c-497b-97a2-68604d64d640",
+      "refusedField": "subject",
+      "name": "a reset id is not an address"
+    }
+  ]
+}

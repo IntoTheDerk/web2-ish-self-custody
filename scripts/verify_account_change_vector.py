@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Independently verify the account-change vector.
+"""Independently verify the account-change vectors.
 
 `vectors/account-change-v1.json` pins the account-change message (ten lines,
-docs/PROTOCOL.md "Account-change message") for each action, signatures by three
-keys, and four signatures that a strict verifier must refuse. This script
-reproduces all of it from the standard library and `cryptography` alone, and
-shares no code with the TypeScript implementation:
+docs/PROTOCOL.md "Account-change message") for each action of the account
+changes and recovery keys, signatures by three keys, and four signatures that a
+strict verifier must refuse. `vectors/account-change-resets-v1.json`, a second
+fixture loaded by explicit path (a released vector is never edited in place),
+pins the five actions of account resets over the same context and keys, and
+principals of the new forms that every builder must refuse. This script
+reproduces both from the standard library and `cryptography` alone, and shares
+no code with the TypeScript implementation:
 
 - the two sign-in keys are derived from credentials (the sign-in profile's
   transcript, scrypt and HKDF step), the first of them checked against the
@@ -18,7 +22,11 @@ shares no code with the TypeScript implementation:
   check its `reason` names;
 - `acceptedUnderZip215` is checked against this script's own ZIP-215
   (cofactored, non-canonical-tolerant) verification in pure Python, which is how
-  the small-order case verifies under a lax rule.
+  the small-order case verifies under a lax rule;
+- for the resets fixture: its context and keys must be the first fixture's, its
+  reset ids are recomputed from their labels, each message is rebuilt and each
+  signature re-signed and verified as above, and each refused principal must
+  fail exactly its named field's form under this script's own form rules.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "vectors" / "account-change-v1.json"
+RESETS_FIXTURE_PATH = ROOT / "vectors" / "account-change-resets-v1.json"
 SIGN_IN_FIXTURE_PATH = ROOT / "vectors" / "sign-in-ed25519-external-salt-v1.json"
 WARNING = "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET."
 ACCOUNT_CHANGE_DOMAIN = "web2-ish-self-custody account change v1"
@@ -90,6 +99,32 @@ ACTION_KEYS: dict[str, tuple[str, str | None]] = {
     "recovery-begin": ("recovery", None),
     "recovery-reset": ("recovery", "next"),
 }
+# The actions of account resets (docs/PROTOCOL.md Part 4), in the resets
+# fixture. "host", "setting", "email-reset" (email:<reset id>) and
+# "session-reset" are the principal forms they introduce. A reset's subject is
+# the new key, and only it signs: the code or the elapsed wait authorizes.
+RESET_ACTION_RULES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "reauthentication": ("key", "host", ("authorizer",)),
+    "email-reset-setting": ("key", "setting", ("authorizer",)),
+    "signed-in-reset-setting": ("key", "setting", ("authorizer",)),
+    "email-reset": ("email-reset", "key", ("subject",)),
+    "signed-in-reset": ("session-reset", "key", ("subject",)),
+}
+RESET_ACTION_KEYS: dict[str, tuple[str | None, str | None]] = {
+    "reauthentication": ("current", None),
+    "email-reset-setting": ("current", None),
+    "signed-in-reset-setting": ("current", None),
+    "email-reset": (None, "next"),
+    "signed-in-reset": (None, "next"),
+}
+# How many cases each action has: each setting once on and once off.
+RESET_CASE_COUNTS = {
+    "reauthentication": 1,
+    "email-reset-setting": 2,
+    "signed-in-reset-setting": 2,
+    "email-reset": 1,
+    "signed-in-reset": 1,
+}
 NEGATIVE_REASONS = (
     "small-order-public-key",
     "non-canonical-public-key",
@@ -116,6 +151,12 @@ SIGNATURE_KEYS = frozenset({"role", "signer", "signatureHex"})
 NEGATIVE_KEYS = frozenset(
     {"name", "reason", "acceptedUnderZip215", "messageUtf8", "publicKeyHex", "signatureHex"}
 )
+RESETS_EXPECTED_KEYS = frozenset(
+    {"warning", "format", "baseVector", "context", "keys", "resetIds", "hostLabel", "cases", "refusedPrincipals"}
+)
+RESETS_KEY_KEYS = frozenset({"publicKeyHex", "principal"})
+RESET_ID_KEYS = frozenset({"label", "id"})
+REFUSED_KEYS = frozenset({"action", "authorizer", "subject", "refusedField", "name"})
 
 CONTEXT_LITERAL = re.compile(r"[a-z0-9][a-z0-9._:-]{0,79}", re.ASCII)
 HEX_PATTERN = re.compile(r"[0-9a-f]+", re.ASCII)
@@ -125,6 +166,10 @@ RECOVERY_PRINCIPAL = re.compile(r"recovery-key:[0-9a-f]{64}", re.ASCII)
 EMAIL_PATTERN = re.compile(
     r"[^\s@<>\"',;:\\\x00-\x1f\x7f-\x9f]{1,64}@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+"
 )
+UUID_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+EMAIL_RESET_PRINCIPAL = re.compile(r"email:" + UUID_TEXT, re.ASCII)
+SESSION_RESET_PRINCIPAL = re.compile(r"session-reset:" + UUID_TEXT, re.ASCII)
+HOST_LABEL = re.compile(r"[a-z0-9][a-z0-9._:-]{2,79}", re.ASCII)
 
 
 class VerificationError(Exception):
@@ -396,17 +441,53 @@ def derive_sign_in_key(credentials: dict[str, str], password: str) -> tuple[byte
 # --- The fixture -------------------------------------------------------------
 
 
-def check_principal(value: str, form: str, location: str) -> None:
-    if form == "key" and KEY_PRINCIPAL.fullmatch(value) is None:
-        fail(f"{location} must be key:S_<64 hex>")
-    if form == "recovery-key" and RECOVERY_PRINCIPAL.fullmatch(value) is None:
-        fail(f"{location} must be recovery-key:<64 hex>")
-    if form == "none" and value != "none":
-        fail(f"{location} must be none")
+def principal_ok(value: str, form: str) -> bool:
+    """Whether `value` is a principal of `form`, by this script's own rules."""
+    if form == "key":
+        return KEY_PRINCIPAL.fullmatch(value) is not None
+    if form == "recovery-key":
+        return RECOVERY_PRINCIPAL.fullmatch(value) is not None
+    if form == "none":
+        return value == "none"
     if form == "email":
         address = value[len("email:") :] if value.startswith("email:") else ""
-        if EMAIL_PATTERN.fullmatch(address) is None or address != address.strip().lower():
-            fail(f"{location} must be email:<normalized address>")
+        return EMAIL_PATTERN.fullmatch(address) is not None and address == address.strip().lower()
+    if form == "host":
+        label = value[len("host:") :] if value.startswith("host:") else ""
+        return HOST_LABEL.fullmatch(label) is not None
+    if form == "setting":
+        return value in ("setting:on", "setting:off")
+    if form == "email-reset":
+        return EMAIL_RESET_PRINCIPAL.fullmatch(value) is not None
+    if form == "session-reset":
+        return SESSION_RESET_PRINCIPAL.fullmatch(value) is not None
+    fail(f"unknown principal form {form!r}")
+
+
+PRINCIPAL_FORM_NAMES = {
+    "key": "key:S_<64 hex>",
+    "recovery-key": "recovery-key:<64 hex>",
+    "none": "none",
+    "email": "email:<normalized address>",
+    "host": "host:<label>",
+    "setting": "setting:on or setting:off",
+    "email-reset": "email:<reset id>",
+    "session-reset": "session-reset:<reset id>",
+}
+
+
+def check_principal(value: str, form: str, location: str) -> None:
+    if not principal_ok(value, form):
+        fail(f"{location} must be {PRINCIPAL_FORM_NAMES[form]}")
+
+
+def reset_id_from_label(label: str) -> str:
+    """The fixture's reset ids: SHA-256 of a label, as a version-4 UUID."""
+    raw = bytearray(hashlib.sha256(label.encode("utf-8")).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    text = raw.hex()
+    return f"{text[0:8]}-{text[8:12]}-{text[12:16]}-{text[16:20]}-{text[20:32]}"
 
 
 def build_message(context: dict[str, str], action: str, authorizer: str, subject: str) -> str:
@@ -594,9 +675,164 @@ def verify() -> str:
         reasons.append(reason)
     if sorted(reasons) != sorted(NEGATIVE_REASONS):
         fail("fixture.negativeCases must cover each strict check exactly once")
+    resets_summary = verify_resets(context, seeds, publics, principals, messages)
     return (
-        f"{len(cases)} account-change messages and their signatures, and "
-        f"{len(negatives)} strictly refused signatures"
+        f"{len(cases)} account-change messages and their signatures, "
+        f"{len(negatives)} strictly refused signatures, and {resets_summary}"
+    )
+
+
+def verify_resets(
+    context: dict[str, str],
+    seeds: dict[str, bytes],
+    publics: dict[str, bytes],
+    principals: dict[str, str],
+    base_messages: set[str],
+) -> str:
+    """The second fixture: the actions of account resets over the first one's
+    context and keys, and principals that every builder must refuse."""
+    fixture = require_exact_keys(
+        read_strict_json(RESETS_FIXTURE_PATH, "resets fixture"), RESETS_EXPECTED_KEYS, "resets"
+    )
+    if fixture["warning"] != WARNING:
+        fail("resets.warning does not contain the required test-only warning")
+    if fixture["format"] != ACCOUNT_CHANGE_DOMAIN:
+        fail(f"resets.format must be {ACCOUNT_CHANGE_DOMAIN!r}")
+    if fixture["baseVector"] != FIXTURE_PATH.name:
+        fail(f"resets.baseVector must be {FIXTURE_PATH.name!r}")
+    resets_context = require_exact_keys(fixture["context"], CONTEXT_KEYS, "resets.context")
+    if resets_context != context:
+        fail("resets.context must be the first fixture's context")
+
+    keys = require_exact_keys(fixture["keys"], frozenset({"current", "next", "recovery"}), "resets.keys")
+    for name in ("current", "next", "recovery"):
+        entry = require_exact_keys(keys[name], RESETS_KEY_KEYS, f"resets.keys.{name}")
+        if require_hex(entry["publicKeyHex"], 32, f"resets.keys.{name}.publicKeyHex") != publics[name]:
+            fail(f"resets.keys.{name}.publicKeyHex is not the first fixture's key")
+        if entry["principal"] != principals[name]:
+            fail(f"resets.keys.{name}.principal is not the first fixture's principal")
+
+    reset_ids = require_exact_keys(fixture["resetIds"], frozenset({"email", "signedIn"}), "resets.resetIds")
+    ids: dict[str, str] = {}
+    for name in ("email", "signedIn"):
+        entry = require_exact_keys(reset_ids[name], RESET_ID_KEYS, f"resets.resetIds.{name}")
+        label = require_string(entry["label"], f"resets.resetIds.{name}.label")
+        if entry["id"] != reset_id_from_label(label):
+            fail(f"resets.resetIds.{name}.id is not the UUID of its label")
+        ids[name] = entry["id"]
+    if ids["email"] == ids["signedIn"]:
+        fail("the two reset ids must differ")
+    host_label = require_string(fixture["hostLabel"], "resets.hostLabel")
+    if HOST_LABEL.fullmatch(host_label) is None:
+        fail("resets.hostLabel is not a valid host label")
+
+    expected_authorizer = {
+        "email-reset": f"email:{ids['email']}",
+        "signed-in-reset": f"session-reset:{ids['signedIn']}",
+    }
+    cases = fixture["cases"]
+    if not isinstance(cases, list):
+        fail("resets.cases must be an array")
+    counts: dict[str, int] = {}
+    settings_seen: set[tuple[str, str]] = set()
+    messages: set[str] = set()
+    for index, raw in enumerate(cases):
+        location = f"resets.cases[{index}]"
+        case = require_exact_keys(raw, CASE_KEYS, location)
+        action = case["action"]
+        if action not in RESET_ACTION_RULES:
+            fail(f"{location}.action is not an action of account resets")
+        authorizer_form, subject_form, signing_roles = RESET_ACTION_RULES[action]
+        authorizer = require_string(case["authorizer"], f"{location}.authorizer")
+        subject = require_string(case["subject"], f"{location}.subject")
+        check_principal(authorizer, authorizer_form, f"{location}.authorizer")
+        check_principal(subject, subject_form, f"{location}.subject")
+        authorizer_key, subject_key = RESET_ACTION_KEYS[action]
+        if authorizer_key is not None and authorizer != principals[authorizer_key]:
+            fail(f"{location}.authorizer must name keys.{authorizer_key}")
+        if subject_key is not None and subject != principals[subject_key]:
+            fail(f"{location}.subject must name keys.{subject_key}")
+        if action in expected_authorizer and authorizer != expected_authorizer[action]:
+            fail(f"{location}.authorizer must name the fixture's reset id")
+        if action == "reauthentication" and subject != f"host:{host_label}":
+            fail(f"{location}.subject must be host: + resets.hostLabel")
+        if subject_form == "setting":
+            settings_seen.add((action, subject))
+        message = build_message(context, action, authorizer, subject)
+        if message != require_string(case["messageUtf8"], f"{location}.messageUtf8"):
+            fail(f"independent message construction does not match {location}.messageUtf8")
+        if len(message.split("\n")) != 10 or message.endswith("\n"):
+            fail(f"{location}.messageUtf8 is not ten lines without a trailing newline")
+        if message in base_messages or message in messages:
+            fail(f"{location}.messageUtf8 repeats another case's message")
+        message_bytes = message.encode("utf-8")
+        signatures = case["signatures"]
+        if not isinstance(signatures, list):
+            fail(f"{location}.signatures must be an array")
+        roles = []
+        for signature_index, raw_signature in enumerate(signatures):
+            signature_location = f"{location}.signatures[{signature_index}]"
+            entry = require_exact_keys(raw_signature, SIGNATURE_KEYS, signature_location)
+            role = entry["role"]
+            signer = entry["signer"]
+            expected_signer = authorizer_key if role == "authorizer" else subject_key
+            if expected_signer is None or signer != expected_signer:
+                fail(f"{signature_location}.signer must be the {role}'s key")
+            signature = require_hex(entry["signatureHex"], 64, f"{signature_location}.signatureHex")
+            if Ed25519PrivateKey.from_private_bytes(seeds[signer]).sign(message_bytes) != signature:
+                fail(f"independent Ed25519 signature does not match {signature_location}.signatureHex")
+            if not strict_verify(publics[signer], message_bytes, signature):
+                fail(f"{signature_location} does not verify strictly")
+            if not zip215_verify(publics[signer], message_bytes, signature):
+                fail(f"{signature_location} does not verify under ZIP-215 either")
+            roles.append(role)
+        if tuple(roles) != signing_roles:
+            fail(f"{location} must carry exactly the signatures {signing_roles!r}")
+        counts[action] = counts.get(action, 0) + 1
+        messages.add(message)
+    if counts != RESET_CASE_COUNTS:
+        fail(f"resets.cases must have exactly {RESET_CASE_COUNTS!r} cases per action")
+    for action in ("email-reset-setting", "signed-in-reset-setting"):
+        if settings_seen & {(action, "setting:on"), (action, "setting:off")} != {
+            (action, "setting:on"),
+            (action, "setting:off"),
+        }:
+            fail(f"resets.cases must cover {action} with setting:on and setting:off")
+
+    every_rule = {**ACTION_RULES, **RESET_ACTION_RULES}
+    refused = fixture["refusedPrincipals"]
+    if not isinstance(refused, list) or not refused:
+        fail("resets.refusedPrincipals must be a non-empty array")
+    refused_forms: set[str] = set()
+    refused_actions: set[str] = set()
+    for index, raw in enumerate(refused):
+        location = f"resets.refusedPrincipals[{index}]"
+        case = require_exact_keys(raw, REFUSED_KEYS, location)
+        if not require_string(case["name"], f"{location}.name"):
+            fail(f"{location}.name must not be empty")
+        action = case["action"]
+        if action not in every_rule:
+            fail(f"{location}.action is not an action of this release")
+        field = case["refusedField"]
+        if field not in ("authorizer", "subject"):
+            fail(f"{location}.refusedField must be authorizer or subject")
+        authorizer_form, subject_form, _ = every_rule[action]
+        authorizer = require_string(case["authorizer"], f"{location}.authorizer")
+        subject = require_string(case["subject"], f"{location}.subject")
+        authorizer_ok = principal_ok(authorizer, authorizer_form)
+        subject_ok = principal_ok(subject, subject_form)
+        if (authorizer_ok, subject_ok) != (field == "subject", field == "authorizer"):
+            fail(f"{location} must refuse exactly its {field}")
+        refused_forms.add(authorizer_form if field == "authorizer" else subject_form)
+        refused_actions.add(action)
+    missing_forms = {"host", "setting", "email-reset", "session-reset"} - refused_forms
+    if missing_forms:
+        fail(f"resets.refusedPrincipals must refuse each new form at least once (missing {sorted(missing_forms)!r})")
+    if not set(RESET_ACTION_RULES) <= refused_actions:
+        fail("resets.refusedPrincipals must cover each action of account resets")
+    return (
+        f"{len(cases)} account-reset messages and their signatures and "
+        f"{len(refused)} refused principals"
     )
 
 
@@ -610,7 +846,7 @@ def main() -> int:
         print(f"Account-change vector verification failed closed: {error}", file=sys.stderr)
         return 1
     print(
-        "Independent Python verification passed for the account-change vector: "
+        "Independent Python verification passed for the account-change vectors: "
         f"{summary}; the sign-in keys re-derived from their credentials (scrypt and "
         "HKDF), the messages rebuilt field by field, every signature reproduced, the "
         "RFC 8032 strict checks applied before cryptography's verification, and "
