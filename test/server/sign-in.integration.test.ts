@@ -239,7 +239,7 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL with th
 
   it("migrates and publishes the sign-in profile", async () => {
     const { service, appliedVersions } = h();
-    expect([...appliedVersions]).toEqual([1, 2, 3, 4, 5]);
+    expect([...appliedVersions]).toEqual([1, 2, 3, 4, 5, 6]);
     const published = await service.derivationProfile();
     expect(published).toMatchObject({
       walletMode: "service-deterministic",

@@ -33,6 +33,7 @@ import {
   randomNonceHex,
 } from "./tokens.js";
 import {
+  acceptedClientLabel,
   challengePurposes,
   type AuthenticatedIdentity,
   type ChallengePurpose,
@@ -44,6 +45,7 @@ import {
   type IdentityWallet,
   type IssuedEmailVerification,
   type IssuedSession,
+  type ListedSession,
   type LoginInput,
   type PublishedDerivationProfile,
   type RegistrationInput,
@@ -64,6 +66,9 @@ const MAX_USERNAME_LENGTH = 320;
 const MAX_DISPLAY_NAME_LENGTH = 120;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_CONTEXT_HASH_LENGTH = 128;
+
+/** The most rows `listSessions` returns; `liveSessionIds` has no cap. */
+const MAX_LISTED_SESSIONS = 50;
 
 /** Rate-limit rows outlive their window only long enough to stay auditable. */
 const RATE_LIMIT_RETENTION_SECONDS = 86_400;
@@ -214,6 +219,26 @@ function sanitizeContextHash(value: string | undefined): string | null {
     return null;
   }
   return trimmed;
+}
+
+/**
+ * Session ids reach a `::uuid` cast, so they are shape-checked first. A
+ * malformed id is the caller's input error, which says nothing about whether
+ * any session exists.
+ */
+function assertSessionId(value: unknown): string {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!uuidPattern.test(normalized)) {
+    throw new IdentityError("sessionId must be a session id (a UUID).", "invalid-request");
+  }
+  return normalized;
+}
+
+function assertSessionToken(token: unknown): string {
+  if (typeof token !== "string" || token.trim().length === 0) {
+    throw new IdentityError("Session token is missing.", "session-not-found");
+  }
+  return token;
 }
 
 function rateLimitIpHash(context: RequestContext | undefined): string {
@@ -468,6 +493,49 @@ export function createIdentityService(
       expiresAt: challenge.expiresAt,
     });
 
+  /**
+   * What a new session row stores about its client. The hashes are kept only
+   * while `storeSessionClientHashes` is on; rate limits read the context
+   * directly and never these columns. A label the CHECK would refuse is
+   * dropped rather than failing the sign-in it describes.
+   */
+  const sessionClientColumns = (
+    context: RequestContext | undefined,
+  ): Readonly<{ ipHash: string | null; userAgentHash: string | null; clientLabel: string | null }> =>
+    Object.freeze({
+      ipHash: resolved.storeSessionClientHashes ? sanitizeContextHash(context?.ipHash) : null,
+      userAgentHash: resolved.storeSessionClientHashes
+        ? sanitizeContextHash(context?.userAgentHash)
+        : null,
+      clientLabel: acceptedClientLabel(context?.clientLabel) ?? null,
+    });
+
+  /**
+   * Why a token did not resolve to a live session: revoked or unknown is
+   * `session-not-found`, past its expiry `session-expired`. Read-only, and run
+   * only after the statement that needed the session found none.
+   */
+  const sessionFailure = async (
+    tokenHash: string,
+    nowParam: string | null,
+  ): Promise<IdentityError> => {
+    const existing = await sql.query(
+      `SELECT revoked_at,
+              expires_at <= COALESCE($2::timestamptz, now()) AS is_expired
+         FROM ${p}_sessions
+        WHERE token_hash = $1::text`,
+      [tokenHash, nowParam],
+    );
+    const session = optionalRow(existing);
+    if (session === null || optionalInstantColumn(session, "revoked_at") !== null) {
+      return new IdentityError("Session is not valid.", "session-not-found");
+    }
+    if (booleanColumn(session, "is_expired")) {
+      return new IdentityError("Session has expired.", "session-expired");
+    }
+    return new IdentityError("Session is not valid.", "session-not-found");
+  };
+
   const issueSession = async (
     accountId: string,
     action: string,
@@ -475,16 +543,17 @@ export function createIdentityService(
     context: RequestContext | undefined,
   ): Promise<IssuedSession> => {
     const token = generateSessionToken();
+    const client = sessionClientColumns(context);
     const rows = await sql.query(
       `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
             new_session AS (
               INSERT INTO ${p}_sessions (
                 account_id, token_hash, issued_at, expires_at, last_seen_at,
-                ip_hash, user_agent_hash
+                ip_hash, user_agent_hash, client_label
               )
               SELECT $2::uuid, $3::text, clock.at,
                      date_trunc('milliseconds', clock.at + (interval '1 second' * $4::double precision)),
-                     clock.at, $5::text, $6::text
+                     clock.at, $5::text, $6::text, $9::text
               FROM clock
               RETURNING id, account_id, issued_at, expires_at, last_seen_at
             ),
@@ -499,10 +568,11 @@ export function createIdentityService(
         accountId,
         hashSessionToken(token),
         resolved.sessionTtlSeconds,
-        sanitizeContextHash(context?.ipHash),
-        sanitizeContextHash(context?.userAgentHash),
+        client.ipHash,
+        client.userAgentHash,
         action,
         metadataJson(metadata),
+        client.clientLabel,
       ],
     );
     const row = requireSingleRow(
@@ -819,6 +889,7 @@ export function createIdentityService(
       // A valid challenge already provisioned this setup; preserve it exactly.
       const walletSetup = await accountWallets.prepare(usernameNormalized);
       const token = generateSessionToken();
+      const client = sessionClientColumns(context);
       const parameters: readonly SqlParameter[] = [
         nowParam,
         serviceProfileId,
@@ -837,8 +908,8 @@ export function createIdentityService(
         fingerprint(wallet.address),
         hashSessionToken(token),
         resolved.sessionTtlSeconds,
-        sanitizeContextHash(context?.ipHash),
-        sanitizeContextHash(context?.userAgentHash),
+        client.ipHash,
+        client.userAgentHash,
         metadataJson({
           profileId: resolved.profile.id,
           curve: wallet.curve,
@@ -848,6 +919,7 @@ export function createIdentityService(
         }),
         walletSetup?.accountId ?? null,
         vault === null ? null : JSON.stringify(vault),
+        client.clientLabel,
       ];
 
       // Account, primary wallet, session, and audit row land in ONE statement:
@@ -886,11 +958,11 @@ export function createIdentityService(
                 new_session AS (
                   INSERT INTO ${p}_sessions (
                     account_id, token_hash, issued_at, expires_at, last_seen_at,
-                    ip_hash, user_agent_hash
+                    ip_hash, user_agent_hash, client_label
                   )
                   SELECT new_account.id, $16::text, clock.at,
                          date_trunc('milliseconds', clock.at + (interval '1 second' * $17::double precision)),
-                         clock.at, $18::text, $19::text
+                         clock.at, $18::text, $19::text, $23::text
                   FROM new_account, clock
                   RETURNING id, account_id, issued_at, expires_at, last_seen_at
                 ),
@@ -1089,21 +1161,7 @@ export function createIdentityService(
       );
       const row = optionalRow(rows);
       if (row === null) {
-        const existing = await sql.query(
-          `SELECT revoked_at,
-                  expires_at <= COALESCE($2::timestamptz, now()) AS is_expired
-             FROM ${p}_sessions
-            WHERE token_hash = $1::text`,
-          [tokenHash, nowParam],
-        );
-        const session = optionalRow(existing);
-        if (session === null || optionalInstantColumn(session, "revoked_at") !== null) {
-          throw new IdentityError("Session is not valid.", "session-not-found");
-        }
-        if (booleanColumn(session, "is_expired")) {
-          throw new IdentityError("Session has expired.", "session-expired");
-        }
-        throw new IdentityError("Session is not valid.", "session-not-found");
+        throw await sessionFailure(tokenHash, nowParam);
       }
 
       const account = mapAccount(row, "account_");
@@ -1158,19 +1216,29 @@ export function createIdentityService(
       context?: RequestContext,
     ): Promise<number> {
       const id = assertUuid(accountId, "account-not-found");
+      // Locks its rows in id order, like `revokeOtherSessions`, so the two
+      // multi-row revocations take their locks in one order.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($3::timestamptz, now()) AS at),
               acct AS (
                 SELECT id FROM ${p}_accounts
                  WHERE id = $1::uuid AND service_profile_id = $2::text
               ),
+              targets AS (
+                SELECT s.id
+                  FROM ${p}_sessions s
+                 WHERE s.account_id IN (SELECT id FROM acct)
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 ORDER BY s.id
+                 FOR NO KEY UPDATE OF s
+              ),
               revoked AS (
-                UPDATE ${p}_sessions
+                UPDATE ${p}_sessions s
                    SET revoked_at = (SELECT at FROM clock)
-                 WHERE account_id IN (SELECT id FROM acct)
-                   AND revoked_at IS NULL
-                   AND expires_at > (SELECT at FROM clock)
-                 RETURNING id
+                  FROM targets
+                 WHERE s.id = targets.id
+                 RETURNING s.id
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -1192,6 +1260,227 @@ export function createIdentityService(
         throw new IdentityError("Account does not exist.", "account-not-found");
       }
       return integerColumn(row, "revoked");
+    },
+
+    async listSessions(
+      token: string,
+      context?: RequestContext,
+    ): Promise<readonly ListedSession[]> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      // The caller's row is slid like `authenticate` does and always kept in
+      // the page, whatever the other rows' activity; the lateral read sees the
+      // pre-update snapshot, so the caller's new `last_seen_at` is substituted.
+      // The filter runs through `<p>_sessions_account_idx`; the few rows left
+      // are sorted in memory, deliberately without an index on `last_seen_at`.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                UPDATE ${p}_sessions s
+                   SET last_seen_at = (SELECT at FROM clock)
+                  FROM ${p}_accounts a
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                   AND a.id = s.account_id
+                   AND a.service_profile_id = $3::text
+                 RETURNING s.id, s.account_id, s.last_seen_at
+              )
+         SELECT l.id, l.issued_at, l.expires_at, l.client_label, l.is_current,
+                CASE WHEN l.is_current THEN caller.last_seen_at ELSE l.last_seen_at END
+                  AS seen_at
+           FROM caller
+           CROSS JOIN LATERAL (
+             SELECT s.id, s.issued_at, s.expires_at, s.last_seen_at, s.client_label,
+                    s.id = caller.id AS is_current
+               FROM ${p}_sessions s
+              WHERE s.account_id = caller.account_id
+                AND s.revoked_at IS NULL
+                AND s.expires_at > (SELECT at FROM clock)
+              ORDER BY s.id = caller.id DESC, s.last_seen_at DESC, s.id
+              LIMIT $4::integer
+           ) l
+          ORDER BY seen_at DESC, l.id`,
+        [tokenHash, nowParam, serviceProfileId, MAX_LISTED_SESSIONS],
+      );
+      if (rows.length === 0) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      return Object.freeze(
+        rows.map((row) =>
+          Object.freeze({
+            id: textColumn(row, "id"),
+            issuedAt: instantColumn(row, "issued_at"),
+            lastSeenAt: instantColumn(row, "seen_at"),
+            expiresAt: instantColumn(row, "expires_at"),
+            clientLabel: optionalTextColumn(row, "client_label"),
+            current: booleanColumn(row, "is_current"),
+          }),
+        ),
+      );
+    },
+
+    async liveSessionIds(
+      token: string,
+      context?: RequestContext,
+    ): Promise<readonly string[]> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              )
+         SELECT caller.id AS caller_id, s.id
+           FROM caller
+           LEFT JOIN ${p}_sessions s
+             ON s.account_id = caller.account_id
+            AND s.revoked_at IS NULL
+            AND s.expires_at > (SELECT at FROM clock)
+          ORDER BY s.issued_at, s.id`,
+        [tokenHash, nowParam, serviceProfileId],
+      );
+      if (rows.length === 0) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      return Object.freeze(
+        rows
+          .map((row) => optionalTextColumn(row, "id"))
+          .filter((id): id is string => id !== null),
+      );
+    },
+
+    async revokeSessionById(
+      token: string,
+      sessionId: string,
+      context?: RequestContext,
+    ): Promise<{ revoked: boolean }> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const targetId = assertSessionId(sessionId);
+      const nowParam = requestNow(context);
+      // The caller is read, not updated: the statement locks at most one row,
+      // the target, so two sessions revoking each other at once cannot
+      // deadlock.
+      // The target must be another live session of the caller's own account;
+      // every other case matches no row and answers the same `false`.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              ),
+              revoked AS (
+                UPDATE ${p}_sessions s
+                   SET revoked_at = (SELECT at FROM clock)
+                  FROM caller
+                 WHERE s.id = $4::uuid
+                   AND s.account_id = caller.account_id
+                   AND s.id <> caller.id
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 RETURNING s.id, s.account_id
+              ),
+              logged AS (
+                INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+                SELECT revoked.account_id, 'session.revoke', $5::jsonb, (SELECT at FROM clock)
+                  FROM revoked
+                RETURNING 1
+              )
+         SELECT caller.id AS caller_id, (SELECT count(*) FROM revoked)::int AS revoked
+           FROM caller`,
+        [tokenHash, nowParam, serviceProfileId, targetId, metadataJson({ scope: "other" })],
+      );
+      const row = optionalRow(rows);
+      if (row === null) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      if (textColumn(row, "caller_id") === targetId) {
+        // Nothing was changed: the UPDATE excludes the caller's own row.
+        throw new IdentityError(
+          "That is the calling session; sign out with revokeSession instead.",
+          "invalid-request",
+        );
+      }
+      return Object.freeze({ revoked: integerColumn(row, "revoked") === 1 });
+    },
+
+    async revokeOtherSessions(
+      token: string,
+      context?: RequestContext,
+    ): Promise<{ revokedSessionIds: readonly string[] }> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      // `targets` locks the rows in id order before the UPDATE touches them.
+      // A plain multi-row UPDATE locks in scan order, which follows each
+      // statement's snapshot of where the row versions sit; `authenticate`
+      // moves them, so two concurrent revoke-others could lock the same rows
+      // in different orders and deadlock. The lock's READ COMMITTED recheck
+      // drops a row another statement revoked first, and the caller's own row
+      // is read, never locked, so two sessions revoking each other both end
+      // revoked.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              ),
+              targets AS (
+                SELECT s.id
+                  FROM ${p}_sessions s, caller
+                 WHERE s.account_id = caller.account_id
+                   AND s.id <> caller.id
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 ORDER BY s.id
+                 FOR NO KEY UPDATE OF s
+              ),
+              revoked AS (
+                UPDATE ${p}_sessions s
+                   SET revoked_at = (SELECT at FROM clock)
+                  FROM targets
+                 WHERE s.id = targets.id
+                 RETURNING s.id
+              ),
+              logged AS (
+                INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+                SELECT caller.account_id, 'session.revoke-others',
+                       jsonb_build_object('scope', 'others', 'revoked', (SELECT count(*) FROM revoked)),
+                       (SELECT at FROM clock)
+                  FROM caller
+                RETURNING 1
+              )
+         SELECT caller.id AS caller_id, revoked.id AS revoked_id
+           FROM caller
+           LEFT JOIN revoked ON true
+          ORDER BY revoked.id`,
+        [tokenHash, nowParam, serviceProfileId],
+      );
+      if (rows.length === 0) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      return Object.freeze({
+        revokedSessionIds: Object.freeze(
+          rows
+            .map((row) => optionalTextColumn(row, "revoked_id"))
+            .filter((id): id is string => id !== null),
+        ),
+      });
     },
 
     async getAccount(accountId: string): Promise<IdentityAccount> {
@@ -1481,6 +1770,9 @@ export function createIdentityService(
       emailVerifications: number;
       rateLimits: number;
     }> {
+      // Dead sessions are deleted only if no other statement holds their row
+      // lock (SKIP LOCKED): maintenance never waits on a revocation, so it can
+      // never close a deadlock with one. A skipped row goes on the next run.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
               expired_challenges AS (
@@ -1491,10 +1783,15 @@ export function createIdentityService(
               ),
               dead_sessions AS (
                 DELETE FROM ${p}_sessions
-                 WHERE (expires_at <= (SELECT at FROM clock) OR revoked_at IS NOT NULL)
-                   AND account_id IN (
-                     SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
-                   )
+                 WHERE id IN (
+                   SELECT s.id
+                     FROM ${p}_sessions s
+                    WHERE (s.expires_at <= (SELECT at FROM clock) OR s.revoked_at IS NOT NULL)
+                      AND s.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF s SKIP LOCKED
+                 )
                  RETURNING 1
               ),
               expired_verifications AS (

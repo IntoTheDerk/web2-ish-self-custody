@@ -49,7 +49,14 @@ for both, and the enrolled key is a wallet only under a chain wallet profile.
   the sign-in profile it is the sign-in key, and the server holds no chain key
 - single-use challenge nonces with their expiry and consumption state
 - SHA-256 hashes of session tokens and of email verification codes
-- a SHA-256 hash of the user agent, and a caller-computed IP hash
+- per session, a SHA-256 hash of the user agent and a caller-computed IP hash,
+  unless `storeSessionClientHashes` is `false`
+- per session, an optional coarse client label such as `Firefox on macOS`
+  (migration 6), supplied by the host, never the raw User-Agent
+- rate-limit counters keyed by a SHA-256 bucket over the rule and its subject,
+  which for most rules includes the caller-computed IP hash (alone, or with the
+  normalized username or account id), whatever `storeSessionClientHashes` says;
+  `pruneExpired` removes a counter 24 hours after its last update
 - append-only audit rows
 - immutable account UUID/salt setup and wallet policy (migration 5)
 - encrypted vaults and revisions, only when `walletMode` is `random-vault`
@@ -438,6 +445,128 @@ still returns `200` and still clears the cookie. Failing here would strand a
 browser holding a dead cookie it cannot clear, and the desired end state has
 already been reached.
 
+### Session management (opt-in)
+
+The caller's account-wide session control: a sessions list, signing out one
+other session, and signing out every other session. The three routes below are
+mounted only when the router option `accountSecurityRoutes` is `true`. **The
+default is `false`**, and then `GET /sessions` and `DELETE /sessions` answer
+`405` (`Allow: POST`) and `DELETE /sessions/{id}` answers `404 not-found`, as
+for any unrouted path. `POST /sessions` (login) and `GET|DELETE
+/sessions/current` are the same either way. A host that runs its own statements
+around a revocation (for example deleting state it keeps per session) leaves the
+option off and calls the service methods from its own routes.
+
+```ts
+const handler = createIdentityRouter(service, {
+  basePath: "/api/identity",
+  trustedOrigins: ["https://app.example.com"],
+  accountSecurityRoutes: true,
+  // Coarse and allowlisted; never the raw header.
+  clientLabel: (request) => labelFromUserAgent(request.headers.get("user-agent")),
+});
+```
+
+All three are authenticated with the caller's session token, by cookie or
+bearer, with the answers of `GET /sessions/current`: a missing, unknown or
+revoked token is `401 session-not-found`, an expired one `401 session-expired`.
+Only the list slides the caller's `lastSeenAt`.
+`DELETE` requests are unsafe methods, so in cookie mode they pass the
+`trustedOrigins` gate first (see [CSRF and CORS](#csrf-and-cors)). They take no
+body. No response of an existing route gains a field.
+
+**The client label.** The router option `clientLabel?: (request) => string |
+undefined` returns a display label for the client. The router calls it only on
+the two routes that issue a session, `POST /accounts` and `POST /sessions`, and
+passes the result to the service as `RequestContext.clientLabel`. The service
+stores it on the new session row when it matches the column's CHECK,
+`^[A-Za-z0-9 .()-]{1,64}$`. Any other value, and a hook that throws, are
+dropped: the session is issued without a label, never refused. A host that
+issues sessions through the service directly passes `clientLabel` in the
+`RequestContext` of `register` or `login`, with the same rule. Build the label
+from an allowlist of browser and operating-system families, such as
+`"<Browser> on <OS>"`; keep no version, model or other token, and never pass the
+raw User-Agent. The label is deleted with its session row (see
+[`<p>_sessions`](#p_sessions)).
+
+#### `GET /sessions`
+
+Calls `listSessions(token)`. Returns the account's live sessions (not revoked,
+not expired), most recently active first, **at most 50**, for display:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "b41a…",
+      "issuedAt": "2026-10-09T09:12:40.000Z",
+      "lastSeenAt": "2026-10-18T18:24:07.000Z",
+      "expiresAt": "2026-10-23T09:12:40.000Z",
+      "clientLabel": "Firefox on macOS",
+      "current": true
+    },
+    {
+      "id": "7c09…",
+      "issuedAt": "2026-10-11T20:01:13.000Z",
+      "lastSeenAt": "2026-10-12T07:45:51.000Z",
+      "expiresAt": "2026-10-25T20:01:13.000Z",
+      "clientLabel": null,
+      "current": false
+    }
+  ]
+}
+```
+
+`current` is `true` on exactly one row, the session whose token made the call.
+The call slides that session's `lastSeenAt` as `GET /sessions/current` does, and
+the caller's row is always on the page whatever the other rows' activity. A row
+carries only these six fields: no hash, address, token or IP. `clientLabel` is
+`null` for a session issued without one, including every session made before
+migration 6. The list is display-only; use `liveSessionIds` (below) to decide
+which sessions exist.
+
+#### `DELETE /sessions/{id}`
+
+Calls `revokeSessionById(token, id)`. Signs out one other live session of the
+caller's account.
+
+```json
+{ "revoked": true }
+```
+
+`revoked` is `false`, with the same `200`, when the id names a session of
+another account, no session at all, or a session already revoked or expired:
+the answer does not reveal which. The caller's own session id is `400
+invalid-request`, because signing out is `DELETE /sessions/current`; so is an id
+that is not a UUID. A revocation writes the audit row `session.revoke` with
+metadata `{ "scope": "other" }`; an answer of `false` writes none. The revoked
+session's next request answers `401 session-not-found`.
+
+#### `DELETE /sessions`
+
+Calls `revokeOtherSessions(token)`. Signs out every live session of the
+caller's account except the caller's own.
+
+```json
+{ "revokedSessionIds": ["7c09…", "e5d2…"] }
+```
+
+The list is empty when there was nothing to revoke. Each call writes one audit
+row `session.revoke-others` with metadata `{ "scope": "others", "revoked": n }`.
+
+**Concurrency.** Each revocation is one statement that reads the caller's
+session and never locks it. `DELETE /sessions/{id}` locks at most its target.
+`DELETE /sessions` locks the account's other live sessions in id order before
+revoking them, as `revokeAllSessions` does, so any number of concurrent
+revocations take their locks in one order and cannot deadlock one another,
+however `authenticate` traffic has moved the rows. A row that another statement
+revoked first is skipped, so each session is revoked, and reported, once. If
+two devices sign each other out and the statements overlap, both act on a
+snapshot in which the other was live and both end revoked; if one commits
+first, the other finds its own session revoked and answers `401`.
+`pruneExpired` skips session rows another statement holds locked, so
+maintenance never waits on a revocation.
+
 ### `GET /accounts/me`
 
 Authenticated.
@@ -588,14 +717,18 @@ is spent; `email-verification-expired` (410); `rate-limited` (429).
 
 ### Not exposed over HTTP
 
-Three `IdentityService` methods have no route, deliberately. Call them from code
-that already holds operator trust:
+These `IdentityService` methods have no route, deliberately. Call the first
+three from code that already holds operator trust:
 
 | method | why it is not routed |
 | --- | --- |
-| `revokeAllSessions(accountId)` | takes an account id rather than a token; expose it behind your own authorization if you want a "sign out everywhere" control |
-| `pruneExpired()` | maintenance; run it on a schedule (Vercel Cron, systemd timer, job runner) |
+| `revokeAllSessions(accountId)` | takes an account id rather than a token, and revokes the caller's session too; expose it behind your own authorization if you want a "sign out everywhere" control |
+| `pruneExpired()` | maintenance; run it on a schedule (Vercel Cron, systemd timer, job runner). A dead session row that another statement holds locked is skipped, not waited on, and goes on the next run |
 | `migrate()` | provisions the salt on first run; belongs to a deploy step, not to traffic |
+| `liveSessionIds(token)` | every live session id of the caller's account, the caller's included, with no cap: for a host reconciling state it keeps per session against the sessions that still exist, never for display |
+
+`listSessions`, `revokeSessionById` and `revokeOtherSessions` are routed only
+with `accountSecurityRoutes` ([Session management](#session-management-opt-in)).
 
 ```ts
 const removed = await service.pruneExpired();
@@ -911,7 +1044,7 @@ redemptions cannot both succeed.
 
 `id uuid` (PK), `account_id` (FK, cascade), `token_hash text UNIQUE`,
 `issued_at`, `expires_at`, `last_seen_at`, `revoked_at`, `ip_hash`,
-`user_agent_hash`.
+`user_agent_hash`, `client_label` (migration 6).
 
 Invariants: `token_hash ~ '^[0-9a-f]{64}$'` — the column is structurally
 incapable of holding a plaintext token. Tokens are 32 CSPRNG bytes rendered as
@@ -919,7 +1052,31 @@ incapable of holding a plaintext token. Tokens are 32 CSPRNG bytes rendered as
 `ip_hash` is supplied pre-hashed by the host through the router's
 `hashRequestIp` option; the service never receives or stores a raw IP address.
 `user_agent_hash` is `SHA-256` of the `User-Agent` header, computed by the
-router.
+router. With `storeSessionClientHashes: false` new rows store `NULL` in both:
+the service never reads them back from a session row, and the rate limits hash
+`RequestContext.ipHash` directly, so turning them off changes nothing else. Rows
+written before the change keep their hashes until `pruneExpired` removes them.
+An unkeyed hash of an IPv4 address can be reversed by enumerating the address
+space, so a deployment that does not need the stored hashes should turn them
+off. The option does not touch `<p>_rate_limits`: its buckets are derived from
+the same `ipHash`, and an operator can reverse them the same way while they are
+kept (until `pruneExpired` removes them, 24 hours after their last update). A
+host that wants no reversible IP-derived data at rest should key
+`hashRequestIp` with a server secret.
+
+`client_label` is a nullable display label, at most 64 characters, under the
+`<p>_sessions_client_label` CHECK `client_label IS NULL OR client_label ~
+'^[A-Za-z0-9 .()-]{1,64}$'`. Migration 6 adds it with one `ALTER TABLE …
+ADD COLUMN IF NOT EXISTS … CONSTRAINT … CHECK` statement, which concurrent
+migration runners serialize on the table lock and which skips the column and
+its constraint together on a re-run. It lives exactly as long as its row:
+`pruneExpired` deletes revoked and expired sessions, and the label with them.
+
+`last_seen_at` is rewritten by every `authenticate`, so no index contains it,
+and migration 6 adds none: that keeps the per-request update a HOT update.
+`listSessions` filters through `<p>_sessions_account_idx`
+(`account_id, expires_at DESC`) and sorts the account's few rows by
+`last_seen_at`.
 
 ### `<p>_email_verifications`
 
@@ -979,6 +1136,7 @@ type IdentityServiceConfig = {
   emailVerificationTtlSeconds?: number;
   emailVerificationMaxAttempts?: number;
   requireVerifiedEmail?: boolean;
+  storeSessionClientHashes?: boolean;
 };
 ```
 
@@ -1009,6 +1167,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 | `emailVerificationTtlSeconds` | 900 |
 | `emailVerificationMaxAttempts` | 5 |
 | `requireVerifiedEmail` | `false` |
+| `storeSessionClientHashes` | `true`; `false` writes `NULL` to a new session's `ip_hash` and `user_agent_hash` ([`<p>_sessions`](#p_sessions)); a value that is not a boolean is refused |
 
 ### Vercel + Neon
 
@@ -1130,7 +1289,10 @@ consumer and nothing imports a driver at module scope.
 
 `npm run test:server:integration` runs the service against a real PostgreSQL. It
 is gated on a database URL environment variable and skips without one, so CI
-stays offline by default. `pg` and `@types/pg` are devDependencies only; moving
+stays offline by default. The other suites under `test/server/*.integration.test.ts`
+use the same gate; `sessions.integration.test.ts` covers migration 6 (re-run and
+concurrent runners), the client label and hashes, listing and revocation, and
+the session routes. `pg` and `@types/pg` are devDependencies only; moving
 either into `dependencies` would defeat the injected-client design.
 
 ## Threat notes
@@ -1247,7 +1409,10 @@ address, public key and fingerprint (a wallet's only under a chain wallet
 profile), and the public salt (per account in `per-account-deterministic`
 mode); in `random-vault` mode, every account's encrypted vault and its
 revisions; read hashed session
-tokens, hashed IPs, hashed user agents, and audit rows; suspend accounts; delete
+tokens, hashed IPs and hashed user agents on session rows (where
+`storeSessionClientHashes` is on), rate-limit buckets derived from the
+caller-supplied IP hash (kept until `pruneExpired` removes them, 24 hours after
+their last update), session client labels, and audit rows; suspend accounts; delete
 sessions; and — with write access — enroll an attacker-controlled public key
 against an existing account. That last one is the real insider risk in this
 design and deserves the same monitoring as any other privileged write. Alert on

@@ -469,6 +469,8 @@ than a convention hardcoded in the server.
 | the enrolled key's public material: address, encoded public key, codec id, fingerprint (a wallet only under a chain wallet profile; a sign-in key under the sign-in profile) | in the deterministic modes, any ciphertext, encrypted vault, or key-escrow blob |
 | the encrypted vault and its revision, only in `random-vault` mode | |
 | single-use challenge nonces, SHA-256 hashes of session tokens and email codes, append-only audit rows | |
+| per session: hashes of the user agent and of the caller's IP (unless `storeSessionClientHashes` is `false`) and an optional coarse client label | |
+| rate-limit buckets derived from the caller's IP hash, whatever `storeSessionClientHashes` says, until `pruneExpired` removes them 24 hours after their last update | |
 
 There is no password column and no recovery table. In the deterministic modes,
 under a chain wallet profile a stolen database gives an attacker exactly what
@@ -574,7 +576,11 @@ successful run against a new database is the moment that service's public salt
 comes into existence, and the schema then refuses to change it: the database is
 the wallet namespace, so back it up. Schedule `service.pruneExpired()` for
 maintenance. Optional config includes `tablePrefix`, session, challenge, and
-email-verification TTLs, and `requireVerifiedEmail`.
+email-verification TTLs, `requireVerifiedEmail`, and `storeSessionClientHashes`.
+A sessions list with signing out of one or every other session is opt-in: the
+router's `accountSecurityRoutes` option mounts it, and its `clientLabel` hook
+stores a coarse label per session (see
+[Session management](docs/SERVER_API.md#session-management-opt-in)).
 
 ### Email verification delivery
 

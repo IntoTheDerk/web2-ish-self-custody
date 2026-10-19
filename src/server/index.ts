@@ -109,6 +109,7 @@ export type {
   IdentityWallet,
   IssuedEmailVerification,
   IssuedSession,
+  ListedSession,
   LoginInput,
   PublishedDerivationProfile,
   RegistrationInput,

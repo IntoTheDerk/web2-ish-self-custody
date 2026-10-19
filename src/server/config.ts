@@ -15,6 +15,7 @@ const defaults = Object.freeze({
   emailVerificationMaxAttempts: 5,
   requireVerifiedEmail: false,
   walletMode: "service-deterministic" as const,
+  storeSessionClientHashes: true,
 });
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
@@ -77,6 +78,20 @@ function assertServiceableProfile(profile: DerivationProfile): DerivationProfile
   return profile;
 }
 
+/**
+ * A misspelt or stringly-typed `"false"` would otherwise read as truthy and
+ * keep storing the hashes a deployment asked to stop storing.
+ */
+function optionalBoolean(value: unknown, field: string, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "boolean") {
+    throw new IdentityError(`${field} must be a boolean.`, "invalid-service-profile");
+  }
+  return value;
+}
+
 export function resolveIdentityServiceConfig(
   config: IdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
@@ -122,6 +137,11 @@ export function resolveIdentityServiceConfig(
       100,
     ),
     requireVerifiedEmail: config.requireVerifiedEmail ?? defaults.requireVerifiedEmail,
+    storeSessionClientHashes: optionalBoolean(
+      config.storeSessionClientHashes,
+      "storeSessionClientHashes",
+      defaults.storeSessionClientHashes,
+    ),
   });
 }
 

@@ -45,6 +45,13 @@ export type IdentityServiceConfig = Readonly<{
    * `random-vault` needs a chain wallet profile and refuses the sign-in profile.
    */
   walletMode?: ServiceWalletMode;
+  /**
+   * Whether new session rows keep `ip_hash` and `user_agent_hash`. Default
+   * `true`. With `false` both are written as NULL. The service never reads them
+   * back from a session row, and rate limits keep hashing
+   * `RequestContext.ipHash` directly either way.
+   */
+  storeSessionClientHashes?: boolean;
 }>;
 
 export type ResolvedIdentityServiceConfig = Readonly<{
@@ -59,6 +66,7 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   emailVerificationMaxAttempts: number;
   requireVerifiedEmail: boolean;
   walletMode: ServiceWalletMode;
+  storeSessionClientHashes: boolean;
 }>;
 
 /**
@@ -138,6 +146,21 @@ export type IdentitySession = Readonly<{
   lastSeenAt: Date;
 }>;
 
+/**
+ * One live session of the caller's account, for display in a sessions list.
+ * It carries no hash, address or token: only what a list shows.
+ */
+export type ListedSession = Readonly<{
+  id: string;
+  issuedAt: Date;
+  lastSeenAt: Date;
+  expiresAt: Date;
+  /** The coarse label stored at sign-in, or `null` when none was supplied. */
+  clientLabel: string | null;
+  /** True on the row of the session whose token made the call. */
+  current: boolean;
+}>;
+
 /** Returned once, at creation. Only the hash is ever persisted. */
 export type IssuedSession = Readonly<{
   session: IdentitySession;
@@ -173,8 +196,29 @@ export type RequestContext = Readonly<{
   /** Pre-hashed by the caller; the service never stores a raw IP. */
   ipHash?: string;
   userAgentHash?: string;
+  /**
+   * A coarse, display-only description of the client, such as
+   * "Firefox on macOS", stored on the session a call issues (register and
+   * login). It must match the column's CHECK, `^[A-Za-z0-9 .()-]{1,64}$`: 1 to
+   * 64 ASCII letters, digits, spaces, `.`, `(`, `)` or `-`. Any other value is
+   * dropped, never an error, and the session is issued without a label. Never
+   * pass a raw User-Agent.
+   */
+  clientLabel?: string;
   now?: Date;
 }>;
+
+/** The `<p>_sessions_client_label` CHECK (migration 6), character for character. */
+export const clientLabelPattern = /^[A-Za-z0-9 .()-]{1,64}$/u;
+
+/**
+ * Returns `value` when it is a storable client label, otherwise `undefined`.
+ * Package-internal: the router and the service share it, so both drop exactly
+ * what the database would refuse.
+ */
+export function acceptedClientLabel(value: unknown): string | undefined {
+  return typeof value === "string" && clientLabelPattern.test(value) ? value : undefined;
+}
 
 export type EmailVerificationRequest = Readonly<{
   username: string;

@@ -102,8 +102,13 @@ browser-facing deployment must set it. See
 
 What database access does yield: normalized usernames, display names, emails
 and their verification state, wallet addresses, public keys, codec ids,
-fingerprints, service/account public salts, hashed session tokens, hashed IP and
-user-agent values supplied by the caller, and audit rows. In `random-vault` mode
+fingerprints, service/account public salts, hashed session tokens; per session,
+hashed IP and user-agent values supplied by the caller (unless
+`storeSessionClientHashes` is `false`) and an optional coarse client label;
+rate-limit buckets derived from the caller's IP hash; and audit rows. An unkeyed
+IP hash, and a bucket derived from one, can be reversed by enumerating the IPv4
+space; a host that wants no reversible IP-derived data at rest should key its
+`hashRequestIp` with a server secret. In `random-vault` mode
 it also yields encrypted vaults and revisions. An operator with write access can suspend accounts,
 delete sessions, and enroll an attacker-controlled public key against an
 existing account — so wallet enrollment records deserve the same monitoring as
