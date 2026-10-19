@@ -21,6 +21,7 @@ import {
 } from "./email.js";
 import { IdentityError, enumerationSensitiveCodes } from "./errors.js";
 import {
+  acceptedClientLabel,
   challengePurposes,
   type AuthenticatedIdentity,
   type ChallengePurpose,
@@ -57,6 +58,23 @@ export type IdentityRouterOptions = Readonly<{
    * Never trust an account ID supplied in the request without verifying ownership.
    * Without this hook, pre-login vault downloads are disabled. */
   authorizeVaultRead?: (request: Request) => Promise<string | null>;
+  /**
+   * Returns a coarse, display-only label for the client, such as
+   * "Firefox on macOS", computed by the host from the request (typically from
+   * an allowlist of browser and OS families). It is called only for the two
+   * routes that issue a session, `POST /accounts` and `POST /sessions`, and is
+   * stored on that session. A result outside `^[A-Za-z0-9 .()-]{1,64}$`, or a
+   * hook that throws, stores no label and never fails the sign-in. Never
+   * return the raw User-Agent.
+   */
+  clientLabel?: (request: Request) => string | undefined;
+  /**
+   * Mounts the caller's account-wide session routes: `GET /sessions` (list),
+   * `DELETE /sessions` (revoke every other session) and `DELETE /sessions/{id}`
+   * (revoke one other session). Default `false`: without it those paths answer
+   * as unrouted (405 on `/sessions`, 404 on `/sessions/{id}`).
+   */
+  accountSecurityRoutes?: boolean;
 }>;
 
 /** 64 KiB. Every accepted body here is a handful of short strings. */
@@ -76,9 +94,18 @@ type RouterContext = Readonly<{
   hashRequestIp: ((request: Request) => string | undefined) | null;
   emailVerification: EmailVerificationDelivery | null;
   authorizeVaultRead: IdentityRouterOptions["authorizeVaultRead"];
+  clientLabel: ((request: Request) => string | undefined) | null;
+  routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>>;
+  /** The `/sessions/{id}` methods, or null while the account routes are off. */
+  sessionByIdRoute: ReadonlyMap<string, RouteHandler> | null;
 }>;
 
-type RouteHandler = (ctx: RouterContext, request: Request) => Promise<Response>;
+/** `routeParameter` is the `{id}` of `/sessions/{id}`; no other route takes one. */
+type RouteHandler = (
+  ctx: RouterContext,
+  request: Request,
+  routeParameter?: string,
+) => Promise<Response>;
 
 /**
  * Transport-level failures that predate the service call. Kept separate from
@@ -128,6 +155,16 @@ export function createIdentityRouter(
   if (options.emailVerification !== undefined) {
     assertEmailVerificationDelivery(options.emailVerification);
   }
+  if (options.clientLabel !== undefined && typeof options.clientLabel !== "function") {
+    throw new TypeError("clientLabel must be a function.");
+  }
+  if (
+    options.accountSecurityRoutes !== undefined &&
+    typeof options.accountSecurityRoutes !== "boolean"
+  ) {
+    throw new TypeError("accountSecurityRoutes must be a boolean.");
+  }
+  const accountSecurityRoutes = options.accountSecurityRoutes ?? false;
 
   const ctx: RouterContext = Object.freeze({
     service,
@@ -142,6 +179,9 @@ export function createIdentityRouter(
     hashRequestIp: options.hashRequestIp ?? null,
     emailVerification: options.emailVerification ?? null,
     authorizeVaultRead: options.authorizeVaultRead,
+    clientLabel: options.clientLabel ?? null,
+    routes: accountSecurityRoutes ? routesWithAccountSecurity : routes,
+    sessionByIdRoute: accountSecurityRoutes ? sessionByIdRoute : null,
   });
 
   return async function handleIdentityRequest(request: Request): Promise<Response> {
@@ -158,7 +198,16 @@ async function dispatch(ctx: RouterContext, request: Request): Promise<Response>
   if (route === null) {
     return notFound();
   }
-  const methods = routes.get(route);
+  let methods = ctx.routes.get(route);
+  let routeParameter: string | undefined;
+  if (methods === undefined && ctx.sessionByIdRoute !== null) {
+    // Exact routes win, so `/sessions/current` stays sign-out.
+    const match = /^\/sessions\/([^/]+)$/u.exec(route);
+    if (match !== null) {
+      methods = ctx.sessionByIdRoute;
+      routeParameter = match[1];
+    }
+  }
   if (methods === undefined) {
     return notFound();
   }
@@ -171,7 +220,7 @@ async function dispatch(ctx: RouterContext, request: Request): Promise<Response>
     );
   }
   assertOriginAllowed(ctx, request);
-  return handler(ctx, request);
+  return handler(ctx, request, routeParameter);
 }
 
 function notFound(): Response {
@@ -313,15 +362,40 @@ function clearSessionCookie(ctx: RouterContext): string {
   return parts.join("; ");
 }
 
-function requestContext(ctx: RouterContext, request: Request): RequestContext {
+/**
+ * `issuesSession` is true only on the two routes that open a session, so the
+ * host's label hook runs where its result is stored and nowhere else.
+ */
+function requestContext(
+  ctx: RouterContext,
+  request: Request,
+  issuesSession = false,
+): RequestContext {
   const ipHash = ctx.hashRequestIp?.(request);
   const userAgent = request.headers.get("user-agent");
+  const clientLabel = issuesSession ? hostClientLabel(ctx, request) : undefined;
   return {
     ...(ipHash !== undefined && ipHash !== "" ? { ipHash } : {}),
     ...(userAgent !== null && userAgent !== ""
       ? { userAgentHash: bytesToHex(sha256(utf8(userAgent))) }
       : {}),
+    ...(clientLabel !== undefined ? { clientLabel } : {}),
   };
+}
+
+/**
+ * The label is display-only metadata, so neither an invalid value nor a
+ * failing hook may cost the user their sign-in: both store no label.
+ */
+function hostClientLabel(ctx: RouterContext, request: Request): string | undefined {
+  if (ctx.clientLabel === null) {
+    return undefined;
+  }
+  try {
+    return acceptedClientLabel(ctx.clientLabel(request));
+  } catch {
+    return undefined;
+  }
 }
 
 async function readBodyBytes(request: Request): Promise<Uint8Array> {
@@ -541,7 +615,7 @@ async function handleRegister(ctx: RouterContext, request: Request): Promise<Res
     ...(email !== undefined ? { email } : {}),
     ...(body["vault"] !== undefined ? { vault: readVault(body["vault"]) } : {}),
   };
-  const result = await ctx.service.register(input, requestContext(ctx, request));
+  const result = await ctx.service.register(input, requestContext(ctx, request, true));
   return sessionResponse(
     ctx,
     { account: result.account, wallet: result.wallet },
@@ -557,7 +631,7 @@ async function handleLogin(ctx: RouterContext, request: Request): Promise<Respon
     challengeId: requireString(body, "challengeId"),
     signature: requireString(body, "signature"),
   };
-  const result = await ctx.service.login(input, requestContext(ctx, request));
+  const result = await ctx.service.login(input, requestContext(ctx, request, true));
   return sessionResponse(ctx, { account: result.account }, result.session, 200);
 }
 
@@ -611,6 +685,47 @@ async function handleRevokeSession(
     throw error;
   }
   return jsonResponse({ revoked: true }, 200, headers);
+}
+
+function requireRequestToken(ctx: RouterContext, request: Request): string {
+  const token = tokenFromRequest(ctx, request);
+  if (token === null) {
+    throw new IdentityError("Request carries no session token.", "session-not-found");
+  }
+  return token;
+}
+
+async function handleListSessions(ctx: RouterContext, request: Request): Promise<Response> {
+  const sessions = await ctx.service.listSessions(
+    requireRequestToken(ctx, request),
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ sessions });
+}
+
+async function handleRevokeOtherSessions(
+  ctx: RouterContext,
+  request: Request,
+): Promise<Response> {
+  const result = await ctx.service.revokeOtherSessions(
+    requireRequestToken(ctx, request),
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ revokedSessionIds: result.revokedSessionIds });
+}
+
+async function handleRevokeSessionById(
+  ctx: RouterContext,
+  request: Request,
+  sessionId?: string,
+): Promise<Response> {
+  const token = requireRequestToken(ctx, request);
+  const result = await ctx.service.revokeSessionById(
+    token,
+    sessionId ?? "",
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ revoked: result.revoked });
 }
 
 async function handleGetAccount(ctx: RouterContext, request: Request): Promise<Response> {
@@ -755,6 +870,29 @@ const routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
     "/email-verifications/confirm",
     new Map<string, RouteHandler>([["POST", handleConfirmEmailVerification]]),
   ],
+]);
+
+/**
+ * The same table with the opt-in account routes: `/sessions` gains the list
+ * and revoke-others methods beside login. Built once, never per request.
+ */
+const routesWithAccountSecurity: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
+  string,
+  ReadonlyMap<string, RouteHandler>
+>([
+  ...routes,
+  [
+    "/sessions",
+    new Map<string, RouteHandler>([
+      ["POST", handleLogin],
+      ["GET", handleListSessions],
+      ["DELETE", handleRevokeOtherSessions],
+    ]),
+  ],
+]);
+
+const sessionByIdRoute: ReadonlyMap<string, RouteHandler> = new Map<string, RouteHandler>([
+  ["DELETE", handleRevokeSessionById],
 ]);
 
 /**

@@ -24,6 +24,108 @@ and the commit history.
   `createRandomAccountWallet`): a random key runs no password derivation and
   so has no application secret to derive a wallet from.
 
+### Session management
+
+A sessions list and signing out of other sessions, for the caller's own
+account. **Additive at runtime and opt-in:** the new routes are off unless
+configured, existing routes, responses and session objects gain no field, no
+`IdentityErrorCode` is added and `enumerationSensitiveCodes` is unchanged.
+Derivation, every profile, codec, transcript and vector are untouched; no
+vector is added. The breaking changes, a deploy order and TypeScript-only
+edges, are listed at the end of this section.
+
+- **Migration 6 `session-client-labels`**: one statement,
+  `ALTER TABLE <p>_sessions ADD COLUMN IF NOT EXISTS client_label text
+  CONSTRAINT <p>_sessions_client_label CHECK (client_label IS NULL OR
+  client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')`. One statement so that concurrent
+  runners serialize on the table lock and a re-run skips the column and its
+  constraint together. No index is added, so the `last_seen_at` update of every
+  `authenticate` stays a HOT update. Run `migrate()` before serving this
+  version: `register` and `login` write the column and fail on a schema without
+  it.
+- **`RequestContext.clientLabel?: string`** (new optional field): a coarse,
+  display-only client label stored on the session that `register` or `login`
+  issues. A value outside the CHECK is dropped, never an error.
+- **`IdentityRouterOptions.clientLabel?: (request: Request) => string |
+  undefined`** (new optional field): the host's label hook, called only on
+  `POST /accounts` and `POST /sessions`. An invalid result or a throwing hook
+  stores no label and never fails the sign-in. A non-function is refused with a
+  `TypeError` when the router is created.
+- **`IdentityRouterOptions.accountSecurityRoutes?: boolean`** (new optional
+  field, **default `false`**): mounts the opt-in routes `GET /sessions` (list),
+  `DELETE /sessions` (revoke every other session) and `DELETE /sessions/{id}`
+  (revoke one other session). Off, those paths answer 405 and 404 as before. A
+  non-boolean is refused with a `TypeError`.
+- **`IdentityServiceConfig.storeSessionClientHashes?: boolean`** (new optional
+  field, default `true`, unchanged behavior): `false` writes NULL to new
+  sessions' `ip_hash` and `user_agent_hash`; rate limits still hash
+  `RequestContext.ipHash`. A non-boolean is refused with
+  `invalid-service-profile`. `ResolvedIdentityServiceConfig` gains the
+  required field `storeSessionClientHashes: boolean`, and the exported
+  `identityServiceDefaults` gains `storeSessionClientHashes: true`.
+- **New `IdentityService` methods**, each one statement that authenticates the
+  caller's token like `authenticate` (`session-not-found`, `session-expired`):
+  - `listSessions(token, context?)`: `readonly ListedSession[]`, the account's
+    live sessions, most recently active first, at most 50, display only. It
+    slides the caller's `last_seen_at` and always includes the caller's row.
+  - `liveSessionIds(token, context?)`: every live session id of the account,
+    uncapped, for reconciliation; not routed.
+  - `revokeSessionById(token, sessionId, context?)`: `{ revoked }`. Another
+    account's session, an unknown id and an already revoked or expired session
+    all answer `{ revoked: false }`; the caller's own id and a non-UUID are
+    `invalid-request`. Audit `session.revoke` with `{ scope: "other" }`.
+  - `revokeOtherSessions(token, context?)`: `{ revokedSessionIds }`, keeping the
+    caller's session. Audit `session.revoke-others` with
+    `{ scope: "others", revoked }`.
+  The revoke statements never lock the caller's own row; `revokeSessionById`
+  locks at most its target and `revokeOtherSessions` locks the account's other
+  live sessions in id order, so concurrent revocations, two sessions revoking
+  each other included, cannot deadlock one another.
+- **Lock order of the existing multi-row session statements** (no signature
+  change): `revokeAllSessions` now also locks its rows in id order before
+  revoking them, so it and `revokeOtherSessions` take locks in one order, and
+  `pruneExpired` deletes only dead session rows that no other statement holds
+  locked (`FOR UPDATE SKIP LOCKED`), leaving a locked row for the next run
+  instead of waiting on it. A plain multi-row `UPDATE` locks rows in scan
+  order, which `authenticate` traffic reorders between snapshots, so two
+  overlapping multi-row revocations of one account (released versions: two
+  `revokeAllSessions` calls) could fail with PostgreSQL `40P01 deadlock
+  detected`.
+- **New type export** `ListedSession` from `web2-ish-self-custody/server`:
+  `{ id, issuedAt, lastSeenAt, expiresAt, clientLabel: string | null, current }`.
+- Tests: `test/server/sessions.integration.test.ts` (real PostgreSQL: migration
+  6 re-run and from two concurrent runners, listing, revocation, the label and
+  hashes, pruning, concurrent mutual revocation, the id-order lock of
+  `revokeOtherSessions` and `revokeAllSessions` observed through a held row,
+  six concurrent `revokeOtherSessions` under `authenticate` traffic with no
+  error but `session-not-found`, `pruneExpired` skipping a locked row, the
+  routes) and
+  `test/server/router-sessions.test.ts` (no database: routing, option
+  validation, the label hook). The migration pins in the other server suites
+  become `[1..6]`.
+- Docs: `docs/SERVER_API.md` "Session management (opt-in)", the
+  `<p>_sessions` schema, configuration, "Not exposed over HTTP" and the custody
+  lists; the README's server notes.
+
+#### Breaking changes
+
+All but the first are TypeScript-only: none changes runtime behavior for an
+existing deployment that has run migration 6.
+
+- **Deploy order.** `register` and `login` write `client_label`, so they fail
+  on a schema without migration 6. Run `migrate()` before this version serves
+  traffic.
+- **Hand-written `IdentityService` implementations and test doubles:** the
+  interface gains four required methods (`listSessions`, `liveSessionIds`,
+  `revokeSessionById`, `revokeOtherSessions`). Services made by
+  `createIdentityService` and the adapters already have them.
+- **`ResolvedIdentityServiceConfig`** gains the required field
+  `storeSessionClientHashes`, so a hand-built one (for example one passed to
+  `identityMigrations` or `runIdentityMigrations` without
+  `resolveIdentityServiceConfig`) needs it.
+- An exact-equality assertion on `identityServiceDefaults` or on a resolved
+  config sees the new key.
+
 ## v0.10.1-alpha.0 — 2026-10-18 (alpha pre-release)
 
 Application secrets, and a sign-in profile with a Kalvora wallet from a master

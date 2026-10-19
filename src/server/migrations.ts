@@ -418,6 +418,24 @@ export function identityMigrations(
            ADD COLUMN IF NOT EXISTS vault_revision integer NOT NULL DEFAULT 1`,
       ]),
     }),
+    Object.freeze({
+      version: 6,
+      name: "session-client-labels",
+      statements: Object.freeze([
+        // A coarse, display-only client description per session, deleted with
+        // its row by `pruneExpired`. One statement on purpose, like migration
+        // 4: a separate DROP/ADD CONSTRAINT pair is not safe for concurrent
+        // runners (the loser gets "constraint already exists" on every retry),
+        // whereas ADD COLUMN IF NOT EXISTS serializes on the table lock and
+        // skips the column and its constraint together on a re-run.
+        // No index: `authenticate()` rewrites `last_seen_at` on every request,
+        // and an index containing it would end HOT updates for that write.
+        // Listing filters through `<p>_sessions_account_idx`.
+        `ALTER TABLE ${p}_sessions ADD COLUMN IF NOT EXISTS client_label text
+           CONSTRAINT ${p}_sessions_client_label
+           CHECK (client_label IS NULL OR client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')`,
+      ]),
+    }),
   ]);
 }
 

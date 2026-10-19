@@ -7,6 +7,7 @@ import type {
   IdentityWallet,
   IssuedEmailVerification,
   IssuedSession,
+  ListedSession,
   LoginInput,
   PublishedDerivationProfile,
   RegistrationInput,
@@ -83,7 +84,51 @@ export interface IdentityService {
 
   revokeSession(token: string, context?: RequestContext): Promise<void>;
 
+  /** Server-only: revokes every live session of the account, the caller's included. */
   revokeAllSessions(accountId: string, context?: RequestContext): Promise<number>;
+
+  /*
+   * Session management for the caller's own account. Each method takes the
+   * caller's token and checks it in the same single statement as its work: a
+   * missing, unknown or revoked token is `session-not-found` and an expired one
+   * `session-expired`, as with `authenticate`. Only `listSessions` also slides
+   * the caller's `last_seen_at`. The revocations never lock the caller's own
+   * row: `revokeSessionById` locks at most its target, and
+   * `revokeOtherSessions` locks the account's other live sessions in id order
+   * (as `revokeAllSessions` does), so concurrent revocations, two sessions
+   * revoking each other included, cannot deadlock one another. None of them is
+   * reachable over HTTP unless the router's `accountSecurityRoutes` option is
+   * on, and `liveSessionIds` never is.
+   */
+
+  /**
+   * The account's live sessions for display: at most 50, most recently active
+   * first, the caller's always included and flagged `current`. Never use it to
+   * decide which sessions exist; that is `liveSessionIds`.
+   */
+  listSessions(token: string, context?: RequestContext): Promise<readonly ListedSession[]>;
+
+  /** Every live session id of the caller's account, the caller's included, uncapped. */
+  liveSessionIds(token: string, context?: RequestContext): Promise<readonly string[]>;
+
+  /**
+   * Revokes one other live session of the caller's account. A session of
+   * another account, an unknown id, and a session already revoked or expired
+   * all answer `{ revoked: false }`, so the answer reveals nothing. The
+   * caller's own session id is `invalid-request`: signing out is
+   * `revokeSession`. A malformed id is `invalid-request`.
+   */
+  revokeSessionById(
+    token: string,
+    sessionId: string,
+    context?: RequestContext,
+  ): Promise<{ revoked: boolean }>;
+
+  /** Revokes every live session of the caller's account except the caller's. */
+  revokeOtherSessions(
+    token: string,
+    context?: RequestContext,
+  ): Promise<{ revokedSessionIds: readonly string[] }>;
 
   getAccount(accountId: string): Promise<IdentityAccount>;
 
@@ -110,7 +155,11 @@ export interface IdentityService {
     context?: RequestContext,
   ): Promise<{ email: string; usernameNormalized: string; verifiedAt: Date }>;
 
-  /** Deletes expired challenges, verifications, and sessions. */
+  /**
+   * Deletes expired challenges, verifications, and sessions. A dead session
+   * whose row another statement holds locked is skipped, never waited on;
+   * the next run deletes it.
+   */
   pruneExpired(context?: RequestContext): Promise<{
     challenges: number;
     sessions: number;

@@ -4,7 +4,7 @@ import type { DerivationProfile } from "../../src/profile.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
 import { identityMigrations } from "../../src/server/migrations.js";
-import type { ResolvedIdentityServiceConfig } from "../../src/server/types.js";
+import { clientLabelPattern, type ResolvedIdentityServiceConfig } from "../../src/server/types.js";
 
 const config = resolveIdentityServiceConfig({
   serviceProfileId: "acme.identity",
@@ -269,6 +269,46 @@ describe("generated migration SQL", () => {
       "recovery",
     ]) {
       expect(sql.toLowerCase()).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("migration 6, session client labels", () => {
+  const migration = migrations.find((candidate) => candidate.version === 6);
+
+  it("is one ADD COLUMN IF NOT EXISTS statement carrying its CHECK", () => {
+    expect(migration?.name).toBe("session-client-labels");
+    // One statement: a DROP/ADD CONSTRAINT pair would race between concurrent
+    // runners, and the runner's retry would re-run the losing ADD until it gave up.
+    expect(migration?.statements).toHaveLength(1);
+    const statement = (migration?.statements[0] ?? "").replace(/\s+/gu, " ").trim();
+    expect(statement).toBe(
+      "ALTER TABLE acme_id_sessions ADD COLUMN IF NOT EXISTS client_label text " +
+        "CONSTRAINT acme_id_sessions_client_label " +
+        "CHECK (client_label IS NULL OR client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')",
+    );
+  });
+
+  it("checks exactly what the service accepts before writing", () => {
+    // The service drops a label the CHECK would refuse; the two must not drift.
+    const statement = migration?.statements[0] ?? "";
+    expect(statement).toContain(`client_label ~ '${clientLabelPattern.source}'`);
+    for (const accepted of ["Firefox on macOS", "Samsung Internet on Android", "Other on Other", "a", "a".repeat(64), "Chrome (beta) 1.2-x"]) {
+      expect(clientLabelPattern.test(accepted)).toBe(true);
+    }
+    for (const refused of ["", "a".repeat(65), "Firefox; macOS", "Firefox\non macOS", "Firefox on macOS\n", "Ünïcode", "<script>", "a_b", "a/b", "a\tb"]) {
+      expect(clientLabelPattern.test(refused)).toBe(false);
+    }
+  });
+
+  it("adds no index, so the per-request last_seen_at update stays a HOT update", () => {
+    for (const statement of migration?.statements ?? []) {
+      expect(statement).not.toMatch(/CREATE\s+(UNIQUE\s+)?INDEX/iu);
+    }
+    for (const statement of statements) {
+      if (/CREATE\s+(UNIQUE\s+)?INDEX/iu.test(statement)) {
+        expect(statement).not.toContain("last_seen_at");
+      }
     }
   });
 });

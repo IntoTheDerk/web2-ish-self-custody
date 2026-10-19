@@ -50,6 +50,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
       walletMode: "service-deterministic",
+      storeSessionClientHashes: true,
     });
     // The very object, not a copy: the codec identity has to survive resolution
     // or the service would encode addresses with something else.
@@ -78,6 +79,7 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
       walletMode: "service-deterministic",
+      storeSessionClientHashes: true,
     });
     expect(Object.isFrozen(identityServiceDefaults)).toBe(true);
   });
@@ -105,6 +107,37 @@ describe("resolveIdentityServiceConfig defaults", () => {
       resolveIdentityServiceConfig(withOverride({ requireVerifiedEmail: false }))
         .requireVerifiedEmail,
     ).toBe(false);
+  });
+});
+
+describe("resolveIdentityServiceConfig storeSessionClientHashes", () => {
+  it("defaults to true, so existing deployments keep storing the hashes", () => {
+    expect(resolveIdentityServiceConfig(minimal).storeSessionClientHashes).toBe(true);
+    // An explicit undefined, as a spread of an optional value delivers it.
+    const unset = { ...minimal, storeSessionClientHashes: undefined } as unknown as IdentityServiceConfig;
+    expect(resolveIdentityServiceConfig(unset).storeSessionClientHashes).toBe(true);
+  });
+
+  it("keeps an explicit true or false", () => {
+    for (const storeSessionClientHashes of [true, false]) {
+      expect(
+        resolveIdentityServiceConfig(withOverride({ storeSessionClientHashes }))
+          .storeSessionClientHashes,
+      ).toBe(storeSessionClientHashes);
+    }
+  });
+
+  it("refuses a non-boolean rather than reading it as truthy", () => {
+    // A string "false" would otherwise keep the hashes a deployment opted out of.
+    for (const value of ["false", "true", 0, 1, null, {}]) {
+      expectIdentityError(
+        () =>
+          resolveIdentityServiceConfig(
+            withOverride({ storeSessionClientHashes: value as never }),
+          ),
+        "invalid-service-profile",
+      );
+    }
   });
 });
 
