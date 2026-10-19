@@ -11,8 +11,9 @@ That is the legacy default. New deployments can select
 `walletMode: "per-account-deterministic"` or `"random-vault"`. See
 [Account wallet modes](WALLET_MODES.md) for configuration, new client helpers,
 authorized vault download/update routes, and vault password changes and recovery.
-Deterministic password changes, key reassignment, and account recovery are the
-integrating platform's responsibility; this service provides no such workflow.
+In the deterministic modes the service offers opt-in sign-in-key rotation and
+recovery keys ([account changes](#account-changes-and-recovery-keys-opt-in)),
+both off unless configured.
 `/profile` reports `walletMode`; in either new mode use `/challenges`'s
 `walletSetup`, not the service salt, to create the wallet.
 
@@ -60,6 +61,8 @@ for both, and the enrolled key is a wallet only under a chain wallet profile.
 - append-only audit rows
 - immutable account UUID/salt setup and wallet policy (migration 5)
 - encrypted vaults and revisions, only when `walletMode` is `random-vault`
+- with recovery keys enabled, each account's recovery public keys (raw Ed25519,
+  with status and times) and SHA-256 digests of recovery tokens (migration 7)
 
 ### What the server never holds
 
@@ -77,7 +80,8 @@ for both, and the enrolled key is a wallet only under a chain wallet profile.
   The sign-in profile is served only in the deterministic modes;
   `resolveIdentityServiceConfig` refuses it with `random-vault`
 
-There is no password column. There is no recovery table. In the deterministic
+There is no password column, and no recovery secret: the recovery tables hold
+public keys and token digests only. In the deterministic
 modes no input to any method in `IdentityService` carries secret wallet
 material, so there is no code path in which the service could store it even by
 mistake. In `random-vault` mode registration and `updateWalletVault` accept a
@@ -587,6 +591,11 @@ Returns `{ "account": { … } }`. Submitting an `email` that differs from the
 stored one clears `emailVerifiedAt`; the new address must be verified again.
 Resubmitting the same address leaves verification intact.
 
+This route (and `updateAccount`) changes the email with the session alone and
+reports nothing to `onSecurityEvent`. A host that treats the email as a
+security channel refuses `email` here and changes it only through the signed
+[`changeEmail`](#methods).
+
 Errors: `invalid-display-name`, `invalid-email` (400).
 
 ### `POST /email-verifications`
@@ -729,10 +738,13 @@ three from code that already holds operator trust:
 
 `listSessions`, `revokeSessionById` and `revokeOtherSessions` are routed only
 with `accountSecurityRoutes` ([Session management](#session-management-opt-in)).
+None of the [account changes](#account-changes-and-recovery-keys-opt-in) is
+routed, `revokeRecoveryKeys(accountId)` above all: it takes an account id and
+belongs to operator tooling.
 
 ```ts
 const removed = await service.pruneExpired();
-// { challenges, sessions, emailVerifications, rateLimits }
+// { challenges, sessions, emailVerifications, rateLimits, recoveryTokens, auditEvents }
 ```
 
 ### Error envelope
@@ -769,10 +781,13 @@ Service codes, from `IdentityError`:
 | `invalid-service-profile` | 500 |
 | `invalid-signature` | 401 |
 | `invalid-username` | 400 |
+| `key-unchanged` | 409 |
 | `rate-limited` | 429 |
 | `service-profile-missing` | 503 |
 | `session-expired` | 401 |
 | `session-not-found` | 401 |
+| `stale-key` | 409 |
+| `wallet-conflict` | 409 |
 | `wallet-mismatch` | 409 |
 | `wallet-registered` | 409 |
 
@@ -793,6 +808,197 @@ stable surface:
 
 An unexpected throw never reaches the client in any form: it becomes
 `internal-error` with a fixed message.
+
+## Account changes and recovery keys (opt-in)
+
+Ten `IdentityService` methods change what signs in to an account or report on
+it. None is routed by `createIdentityRouter`: a host calls them from its own
+routes, around its own statements if it has any, and answers a recovery with
+`createSessionResponder` ([below](#answering-a-recovery-from-a-host-route)).
+Every change is authorized by signatures over the
+[account-change message](PROTOCOL.md#part-4--the-account-change-message) for a
+`rotation` challenge of the account's username (`POST /challenges` with
+`purpose: "rotation"`, unchanged), verified strictly
+([below](#strict-verification)).
+
+### Opt-ins, modes and status
+
+| rule | rotation | email change | recovery-key enrollment | removal, status, events | recovery begin, authenticate, complete | `revokeRecoveryKeys` |
+| --- | --- | --- | --- | --- | --- | --- |
+| opt-in (`accountSecurity`, both default `false`) | `signInKeyRotation` | none | `recoveryKeys` | none | `recoveryKeys` | none |
+| wallet mode | deterministic modes only | any | deterministic modes only | any | deterministic modes only | any |
+| account status | `active` | `active` | `active` | `active` | `active` | any (operator control) |
+
+A refused opt-in or mode is `invalid-request` before any SQL runs. In
+`random-vault` mode a password change is a vault re-wrap and the vault has its
+own recovery code ([wallet modes](WALLET_MODES.md)). The status is checked when
+the method reads the account and again inside its statement, under the account
+row's lock, so a suspension that commits while a change waits refuses it. A
+suspended account's caller gets `invalid-signature` ("Account is not active."),
+as at login.
+
+### Methods
+
+| method | signed by | effect, in one statement |
+| --- | --- | --- |
+| `rotateSignInKey(token, { challengeId, newKey: { address, publicKey }, authorizerSignature, subjectSignature }, context?)` | the current key (authorizer) and `newKey` (subject) | updates the account's one enrolled-key row in place (address, `address_normalized`, public key, fingerprint; its id and creation time stay), revokes every other live session (the caller's stays), audits `account.key-rotate { method: "password", revokedSessions, sessionId }`. Returns `{ wallets, revokedSessionIds }`. |
+| `changeEmail(token, { challengeId, email, authorizerSignature }, context?)` | the current key | sets the email, clearing `email_verified_at` when the address changes (as `updateAccount` does), audits `account.email-change { emailChanged, verificationCleared, sessionId }`. Returns `{ account, previousVerifiedEmail }`: the replaced address when it was verified, for the host to notify. It is never audited. Unlike [`PATCH /accounts/me`](#patch-accountsme) and `updateAccount`, which need only a session, it needs the enrolled key's signature. |
+| `enrollRecoveryKey(token, { challengeId, recoveryPublicKey, authorizerSignature, subjectSignature }, context?)` | the current key and the recovery key | makes the key the account's one `active` recovery key, marks the previous one `removed`, which makes its tokens unusable, and stamps the ones it sees revoked ([tokens](#p_account_recoveries-migration-7)), audits `account.recovery-key.enroll { replaced, sessionId }`. Enrolling the active key again changes nothing (`changed: false`); a key the service has seen in any other state, on any account, is `invalid-public-key`. Returns `{ recoveryKey, changed }`. |
+| `removeRecoveryKey(token, { challengeId, authorizerSignature }, context?)` | the current key | marks the active key `removed`, which makes its tokens unusable, stamps the ones it sees revoked, audits `account.recovery-key.remove { revokedTokens, sessionId }`. Returns `{ removed }`. |
+| `recoveryStatus(token, context?)` | — | `{ recoveryKey }`: the active key, else the most recent key when it was `used` (prompt for a new one), else `null`. |
+| `beginRecovery({ username, challengeId, recoveryPublicKey, signature }, context?)` | the recovery key | proves the key for the username and spends nothing: issues a recovery token (32 random bytes, 15 minutes, stored as SHA-256, good for one completion) and revokes the account's earlier live token, audits `account.recovery-begin { method: "recovery-key", supersededTokens }`. Returns `{ accountId, recoveryToken, expiresAt }`. |
+| `authenticateRecovery(recoveryToken, context?)` | — | resolves a live token (unspent, unrevoked, unexpired, its key `active`, the account `active`): `{ accountId, usernameNormalized, expiresAt }`. |
+| `completeRecovery(recoveryToken, { challengeId, newKey, authorizerSignature, subjectSignature }, context?)` | the recovery key (authorizer) and `newKey` (subject) | replaces the enrolled key with `newKey`, marks the recovery key `used` and the token completed, revokes **every** session, issues a new one with `context.clientLabel`, audits `account.recover { method: "recovery-key", revokedSessions, sessionId }`. Returns `{ account, wallets, session, revokedSessionIds }`. |
+| `listSecurityEvents(token, context?)` | — | the account's last 20 audit events as `{ id, action, createdAt, clientLabel }`: no metadata, IP, key or address. `clientLabel` is the label of the session that acted or was issued, while that session's row exists. |
+| `revokeRecoveryKeys(accountId, context?)` | — (server-only) | marks the active recovery key `removed`, which makes every token of the account unusable, and stamps the ones it sees revoked, whatever the account's status, audits `account.recovery-key.revoke { revoked, revokedTokens }`. Returns the number of keys removed. |
+
+The challenge is consumed in its own statement before any signature is
+checked, as login's is, and must be for the account's username. The username
+never changes: a different username is a different account.
+
+**Why an in-place update.** Login tries every enrolled-key row of an account.
+Keeping the old row with a revocation mark would need a filter in login,
+`listWallets` and the address-uniqueness rule; one row per account leaves all
+three unchanged. A rotation or recovery therefore requires the account to have
+exactly one enrolled key (`wallet-conflict` otherwise), which every account the
+service registers has. The old address cannot be taken by another account: it
+derives from this account's username.
+
+### Strict verification
+
+Every account-change signature must be 128 lowercase hex characters and pass
+RFC 8032's strict checks (S < L, canonical A and R, A not of small order) and
+noble's `zip215: false` verification. Every submitted public key (`newKey`, a
+recovery key, and at registration the enrolled key) must be a canonical
+encoding of a point that is not of small order, or it is `invalid-public-key`
+before any account lookup, so the answer says nothing about any account. Under
+noble's default rule, which login's `verifyChallengeSignature` keeps, a
+small-order key with R = identity and S = 0 verifies for every message; such a
+key can no longer be registered.
+
+### Errors
+
+| code | HTTP | when |
+| --- | --- | --- |
+| `invalid-signature` | 401 | a bad signature, a challenge of another username, a suspended account; every recovery failure an unauthenticated caller can cause (unknown username, no or another recovery key, a spent, revoked or expired token) |
+| `key-unchanged` | 409 | `newKey` is the key already enrolled |
+| `stale-key` | 409 | the enrolled key changed after the change was signed (another change won) |
+| `wallet-conflict` | 409 | the account does not have exactly one enrolled key |
+| `wallet-registered` | 409 | `newKey` is enrolled for another account |
+| `invalid-public-key` | 400 | a non-canonical or small-order key, a malformed recovery key, or a recovery key enrolled before |
+| `invalid-request` | 400 | the opt-in or the mode refuses the method, or a malformed input |
+| `invalid-email` | 400 | `changeEmail`: the address is not one `normalizeEmail` accepts |
+| `invalid-address` | 400 | a `newKey` whose address does not match its public key |
+| `invalid-username` | 400 | `beginRecovery`: the username does not normalize |
+| `challenge-not-found` | 404 | the `rotation` challenge does not exist |
+| `challenge-expired` | 410 | the `rotation` challenge has expired |
+| `challenge-consumed` | 409 | the `rotation` challenge was already used |
+| `invalid-purpose` | 400 | the challenge was issued for another purpose |
+| `rate-limited` | 429 | `account-change` or `recovery-begin` |
+
+None of these methods is routed, so a host maps these codes in its own routes
+(`identityErrorStatus(code)` gives the status). None of the input and challenge
+codes depends on whether the account exists: the inputs are checked before any
+lookup, and a challenge is issued and consumed alike for every username.
+
+`enumerationSensitiveCodes` is unchanged: recovery failures reuse
+`invalid-signature`, and `key-unchanged` and `stale-key` need a session or a
+recovery token. A token or session failure is `session-not-found` or
+`session-expired`, as with `authenticate`.
+
+### Statements and lock order
+
+Each change is one statement that re-checks, under row locks, the session (or
+recovery token), the account's status and the enrolled key the signature was
+checked against. Every statement takes its locks in one order, and never
+`FOR UPDATE` on the account row:
+
+1. the account row: `FOR SHARE` (`FOR NO KEY UPDATE` for the email change);
+2. the enrolled-key row;
+3. the recovery key, then the recovery token;
+4. sessions, in id order (`FOR NO KEY UPDATE`), never the caller's own row;
+5. inserts: a new session, the audit row.
+
+`revokeOtherSessions` and `revokeAllSessions` lock sessions in id order and then
+insert their audit row, whose foreign key takes `FOR KEY SHARE` on the account
+row. `FOR KEY SHARE` conflicts with none of the account locks above, so a
+revocation never waits on an account change, and both lock sessions in the same
+order. `authenticate` locks one session row and nothing after it; login only
+inserts. Had a rotation taken the account `FOR UPDATE` and then waited on a
+session row held by a revoke-others, that revoke-others' audit insert would have
+waited on the account: a deadlock. `accountChanges.integration.test.ts` drives
+exactly that interleaving with a lock holder and fails with PostgreSQL 40P01
+when the account lock is `FOR UPDATE`.
+
+Two rotations at once: both read the same current key; one statement updates
+the row, the other's guard then fails and it answers `stale-key`. Two begins at
+once: the unique live-token index refuses the second insert and its retry, on a
+fresh snapshot, revokes the first token, so at most one token is ever live. Two
+completions with one token: one wins; the other finds the key `used`. A begin
+that holds the recovery key while an enrollment, a removal or
+`revokeRecoveryKeys` retires it: the retirement waits on the key, then marks it
+`removed`, but its token update runs on a snapshot taken before the begin
+committed, so the begin's new token is left unstamped (and the audit's
+`revokedTokens` does not count it). That token is refused all the same,
+because every reader of a token requires its key to be `active`; the next
+begin stamps it, or `pruneExpired` deletes it.
+
+**A residual race.** A login that read and verified the old key issues its
+session only while that key is still enrolled, checked in the session's insert
+statement. A login whose insert runs while the rotation's statement runs can
+still keep a session, because neither statement can see the other's rows. The
+window is one statement long; the sessions list shows the session, and
+revoking other sessions ends it.
+
+### Account-change rate limits
+
+| rule | limit | subject |
+| --- | --- | --- |
+| `account-change` | 10 per 300 s | hashed IP and account id: every signed change of the account, recovery completion included |
+| `recovery-begin` | 5 per 3,600 s | hashed IP and normalized username |
+| `recovery-begin-ip` | 20 per 3,600 s | hashed IP, only when the host supplies one |
+
+They are counted before the challenge is consumed, so a refused attempt still
+counts. A recovery token is 256 bits and needs no limit of its own.
+
+### The security-event hook
+
+`onSecurityEvent` (config) receives `{ action, accountId, occurredAt,
+clientLabel, revokedSessions?, previousVerifiedEmail? }` after the statement of
+`account.key-rotate`, `account.email-change` (when the address changed),
+`account.recovery-key.enroll` (when it changed), `account.recovery-key.remove`,
+`account.recovery-key.revoke`, `account.recovery-begin`, `account.recover` and
+`session.revoke-others` (when it revoked a session) has committed. The service
+awaits it for at most 3 seconds and ignores what it throws, so a slow or failing
+notice provider never fails or rolls back a change. A host that sends notices
+from its own route after its own statements can leave it unset.
+
+### Answering a recovery from a host route
+
+`createSessionResponder(service, options)` returns `(payload, issued, status =
+200) => Response`, the router's own session response: with the same `service`
+and the same options as `createIdentityRouter`, the cookie (name, `Domain`,
+`Max-Age` = `sessionTtlSeconds`, `Path=/; HttpOnly; Secure; SameSite=Lax`) or,
+with `useCookies: false`, the token in the body, are the router's byte for
+byte. It validates the cookie options as the router does.
+
+```ts
+const respond = createSessionResponder(service, routerOptions);
+const recovered = await service.completeRecovery(recoveryToken, input, context);
+return respond({ account: recovered.account }, recovered.session, 200);
+```
+
+### Audit retention
+
+With `auditRetentionDays`, `pruneExpired` deletes this service's `account.*`
+and `session.*` audit rows older than that many days. Other audit rows
+(`email.*`, `wallet.*`) are kept. Unset keeps every audit row, as before. A row
+whose account was deleted (`account_id` is `ON DELETE SET NULL`) names no
+service profile, so no service's retention prunes it, and one service never
+prunes another's rows on a shared prefix: an operator that deletes an account
+deletes its audit rows first (`DELETE FROM <p>_audit_events WHERE account_id =
+$1`). Recovery-token rows are deleted one day after they expire, whatever
+the retention.
 
 ## Challenge message format
 
@@ -1098,7 +1304,46 @@ upsert so behavior is identical on both transports.
 `id uuid` (PK), `account_id` (FK, `ON DELETE SET NULL`), `action`,
 `metadata jsonb`, `created_at`. Append-only by convention. `action` is 1–64
 characters. `metadata` is for operational context such as a challenge purpose or
-a revocation reason; it must never carry credential material.
+a revocation reason; it carries operational values (field names, counts, session
+and profile ids, purposes, methods and scopes, and for
+`email.verification-start` the address's domain), never credential material, a
+key, a wallet address or a full email address. A row written by a session's own action, or
+by an action that issued a session, names that session in `sessionId`, which is
+how `listSecurityEvents` shows its label while the session row exists.
+`pruneExpired` deletes this service's `account.*` and `session.*` rows older
+than `auditRetentionDays` when that is set ([audit retention](#audit-retention)).
+
+### `<p>_account_recovery_keys` (migration 7)
+
+`id uuid` (PK), `account_id` (FK, cascade), `service_profile_id` (FK),
+`public_key` (64 lowercase hex), `status` (`active`, `used` or `removed`),
+`created_at`, `used_at`, `removed_at`. CHECKs tie `used_at` to `used` and
+`removed_at` to `removed`. `UNIQUE (service_profile_id, public_key)` keeps every
+key the service has seen, so none is enrolled twice, and the partial unique
+index `<p>_account_recovery_keys_active_idx` on `(account_id) WHERE status =
+'active'` allows one active key per account. Used and removed keys are kept, so
+`<p>_account_recovery_keys_account_idx` on `(account_id, created_at DESC)`
+serves `recoveryStatus` and the account-delete cascade without scanning every
+key the service has enrolled.
+
+### `<p>_account_recoveries` (migration 7)
+
+`id uuid` (PK), `account_id` (FK, cascade), `recovery_key_id` (FK, cascade),
+`token_hash text UNIQUE` (64 lowercase hex), `created_at`, `expires_at`,
+`completed_at`, `revoked_at`, `CHECK (expires_at > created_at)`. A live token is
+neither completed nor revoked; a **usable** token is live, unexpired, and its
+recovery key is `active`. Every method that reads a token applies all of these,
+and code that reads this table directly must too: a begin that overlaps a key's
+retirement can leave a live row whose key is `removed`
+([details](#statements-and-lock-order)). The partial index
+`<p>_account_recoveries_live_idx` on `(account_id) WHERE completed_at IS NULL
+AND revoked_at IS NULL` is **unique**: two overlapping begins cannot both see
+the other's new row to revoke it, so only the index can keep one live token per
+account. `<p>_account_recoveries_key_idx` on `(recovery_key_id)` serves a
+retired key's tokens and the cascade from a deleted key. `pruneExpired` deletes
+a row a day after it expires. Each of migration 7's six statements is one
+`CREATE … IF NOT EXISTS` with its constraints inline, safe to re-run and to run
+from concurrent runners.
 
 ### There is no salt adoption
 
@@ -1137,6 +1382,10 @@ type IdentityServiceConfig = {
   emailVerificationMaxAttempts?: number;
   requireVerifiedEmail?: boolean;
   storeSessionClientHashes?: boolean;
+  walletMode?: "service-deterministic" | "per-account-deterministic" | "random-vault";
+  accountSecurity?: { signInKeyRotation?: boolean; recoveryKeys?: boolean };
+  onSecurityEvent?: (event: SecurityEventNotice) => void | Promise<void>;
+  auditRetentionDays?: number;
 };
 ```
 
@@ -1168,6 +1417,9 @@ which throws `invalid-service-profile` rather than silently clamping:
 | `emailVerificationMaxAttempts` | 5 |
 | `requireVerifiedEmail` | `false` |
 | `storeSessionClientHashes` | `true`; `false` writes `NULL` to a new session's `ip_hash` and `user_agent_hash` ([`<p>_sessions`](#p_sessions)); a value that is not a boolean is refused |
+| `accountSecurity` | `{ signInKeyRotation: false, recoveryKeys: false }`; each a strict boolean, an unknown key refused ([account changes](#account-changes-and-recovery-keys-opt-in)) |
+| `onSecurityEvent` | none; a function, awaited for at most 3 s after a change commits ([the hook](#the-security-event-hook)) |
+| `auditRetentionDays` | none (audit rows are kept); an integer from 1 to 36,500 ([audit retention](#audit-retention)) |
 
 ### Vercel + Neon
 
@@ -1292,7 +1544,9 @@ is gated on a database URL environment variable and skips without one, so CI
 stays offline by default. The other suites under `test/server/*.integration.test.ts`
 use the same gate; `sessions.integration.test.ts` covers migration 6 (re-run and
 concurrent runners), the client label and hashes, listing and revocation, and
-the session routes. `pg` and `@types/pg` are devDependencies only; moving
+the session routes, and `accountChanges.integration.test.ts` covers migration 7,
+every account change, the status and mode rules, the rate limits, the hook, and
+the lock order against concurrent revocations. `pg` and `@types/pg` are devDependencies only; moving
 either into `dependencies` would defeat the injected-client design.
 
 ## Threat notes
@@ -1311,7 +1565,9 @@ the message `Authentication failed.`:
 - `wallet-mismatch` — the key is not enrolled for this account
 
 `enumerationSensitiveCodes` is the exported set the router consults; route code
-must never hardcode the list. The service-level codes stay distinct for logging,
+must never hardcode the list. The account changes add no code to it: every
+recovery failure an unauthenticated caller can cause is `invalid-signature`, and
+`key-unchanged` and `stale-key` need a session or a recovery token. The service-level codes stay distinct for logging,
 which is where the distinction is actually useful.
 
 Registration cannot hide existence: `account-exists` is a real `409`, because a
@@ -1336,6 +1592,11 @@ A fixed window is not a token bucket: a burst straddling a window boundary can
 deliver up to two windows' worth of requests. Size the window accordingly, and
 do not treat this table as a substitute for an edge rate limiter or DDoS
 protection. It exists to bound credential guessing, not traffic.
+
+Account changes and recovery begins have rules of their own
+([account-change rate limits](#account-change-rate-limits)): `account-change`, 10 per
+300 s per hashed IP and account; `recovery-begin`, 5 per hour per hashed IP and
+username; and `recovery-begin-ip`, 20 per hour per hashed IP.
 
 Starting an email verification is bounded three ways, each per hour: 5 per
 normalized username and address pair, 8 per recipient address whatever the
@@ -1414,9 +1675,14 @@ tokens, hashed IPs and hashed user agents on session rows (where
 caller-supplied IP hash (kept until `pruneExpired` removes them, 24 hours after
 their last update), session client labels, and audit rows; suspend accounts; delete
 sessions; and — with write access — enroll an attacker-controlled public key
-against an existing account. That last one is the real insider risk in this
-design and deserves the same monitoring as any other privileged write. Alert on
-inserts into `<p>_account_wallets`.
+against an existing account, or plant an attacker-controlled recovery key and
+recover the account with it. Those are the real insider risk in this design and
+deserve the same monitoring as any other privileged write. Alert on any INSERT
+into `<p>_account_wallets`, any UPDATE of its `public_key` or `address`, and any
+INSERT or `status` change in `<p>_account_recovery_keys`, when no audit row of
+`account.register`, `account.key-rotate`, `account.recover` or
+`account.recovery-key.*` for the same account carries the same `created_at`
+(each statement writes its audit row with its own clock).
 
 **Cannot:** recover, derive, reconstruct, decrypt, or sign with any user's
 enrolled key or wallet without that user's password or, in `random-vault` mode,

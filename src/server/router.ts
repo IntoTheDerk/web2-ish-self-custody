@@ -138,10 +138,27 @@ export function jsonResponse(
   });
 }
 
-export function createIdentityRouter(
-  service: IdentityService,
-  options: IdentityRouterOptions = {},
-): (request: Request) => Promise<Response> {
+/**
+ * Answers with a freshly issued session exactly as the router's register and
+ * login routes do: `payload` plus `session`, and either the cookie
+ * (`Set-Cookie`, the token withheld from the body) or, with
+ * `useCookies: false`, the token in the body. `status` defaults to 200.
+ */
+export type SessionResponder = (
+  payload: Readonly<Record<string, unknown>>,
+  issued: IssuedSession,
+  status?: number,
+) => Response;
+
+/** The router's cookie settings, validated once. */
+type CookieSettings = Readonly<{
+  service: IdentityService;
+  cookieName: string;
+  cookieDomain: string | undefined;
+  useCookies: boolean;
+}>;
+
+function cookieSettings(service: IdentityService, options: IdentityRouterOptions): CookieSettings {
   const cookieName = options.cookieName ?? "__Host-w2sc_session";
   if (!cookieNamePattern.test(cookieName)) {
     throw new TypeError("cookieName must be a valid cookie token.");
@@ -152,6 +169,35 @@ export function createIdentityRouter(
   if (cookieName.startsWith("__Host-") && options.cookieDomain !== undefined) {
     throw new TypeError("A __Host- prefixed cookie cannot declare a Domain attribute.");
   }
+  return Object.freeze({
+    service,
+    cookieName,
+    cookieDomain: options.cookieDomain,
+    useCookies: options.useCookies ?? true,
+  });
+}
+
+/**
+ * The router's session response, for a host route that issues a session
+ * outside the router (for example around `completeRecovery`, between its own
+ * statements). Pass the same service and the same options as to
+ * `createIdentityRouter`: the cookie's name, `Domain`, `Max-Age` (the
+ * service's `sessionTtlSeconds`) and attributes, and the bearer body, are
+ * then byte for byte the router's.
+ */
+export function createSessionResponder(
+  service: IdentityService,
+  options: IdentityRouterOptions = {},
+): SessionResponder {
+  const settings = cookieSettings(service, options);
+  return (payload, issued, status = 200) => sessionResponse(settings, payload, issued, status);
+}
+
+export function createIdentityRouter(
+  service: IdentityService,
+  options: IdentityRouterOptions = {},
+): (request: Request) => Promise<Response> {
+  const { cookieName } = cookieSettings(service, options);
   if (options.emailVerification !== undefined) {
     assertEmailVerificationDelivery(options.emailVerification);
   }
@@ -331,7 +377,7 @@ function tokenFromRequest(ctx: RouterContext, request: Request): string | null {
   return ctx.useCookies ? cookieValue(request, ctx.cookieName) : null;
 }
 
-function serializeSessionCookie(ctx: RouterContext, token: string): string {
+function serializeSessionCookie(ctx: CookieSettings, token: string): string {
   const parts = [
     `${ctx.cookieName}=${encodeURIComponent(token)}`,
     "Path=/",
@@ -553,7 +599,7 @@ async function authenticateRequest(
  * echoing it would hand it straight back.
  */
 function sessionResponse(
-  ctx: RouterContext,
+  ctx: CookieSettings,
   payload: Readonly<Record<string, unknown>>,
   issued: IssuedSession,
   status: number,

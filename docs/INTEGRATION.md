@@ -165,8 +165,11 @@ changed, deriving from the new credentials produces a *different* wallet, so the
 client must open the vault instead.
 
 This adopts vault storage for that wallet. An integration that stays with
-deterministic derivation implements its own password-change, key-reassignment,
-and account-recovery workflows; the SDK does not provide them.
+deterministic derivation changes a password by rebinding the account to the new
+password's key with the identity service's opt-in sign-in-key rotation, and can
+recover an account with its opt-in recovery keys
+([server API](SERVER_API.md#account-changes-and-recovery-keys-opt-in)); both
+give the account a new key and never recover the old one.
 
 In both cases:
 
@@ -254,7 +257,10 @@ Rules for the pattern:
   operation, not at sign-in.
 - **A password change is a new wallet,** and so is any move to a new sign-in
   profile, unless the host restores a backed-up master seed. The sign-in key
-  changes too, and the host re-enrolls it.
+  changes too, and the host rebinds the account to it with `rotateSignInKey`
+  (opt-in, `accountSecurity.signInKeyRotation`), signing the
+  [account-change message](PROTOCOL.md#part-4--the-account-change-message)
+  with the old and the new sign-in key in the same worker.
 - **The offline-guessing exposure stays.** The enrolled sign-in public key is a
   password oracle at scrypt cost, and so is the wallet's address once it is
   public to anyone who also knows the username and the public salt. A correct

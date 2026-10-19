@@ -16,10 +16,12 @@ export type IdentityErrorCode =
   | "invalid-service-profile"
   | "invalid-signature"
   | "invalid-username"
+  | "key-unchanged"
   | "rate-limited"
   | "service-profile-missing"
   | "session-expired"
   | "session-not-found"
+  | "stale-key"
   | "wallet-mismatch"
   | "wallet-conflict"
   | "wallet-registered";
@@ -42,10 +44,16 @@ const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze(
   "invalid-service-profile": 500,
   "invalid-signature": 401,
   "invalid-username": 400,
+  // A rotation or recovery that names the key already enrolled. Only a caller
+  // with a session or a recovery token gets this far, so it reveals nothing.
+  "key-unchanged": 409,
   "rate-limited": 429,
   "service-profile-missing": 503,
   "session-expired": 401,
   "session-not-found": 401,
+  // The enrolled key changed between the read that built the signed message
+  // and the statement that would act on it: another change won.
+  "stale-key": 409,
   "wallet-mismatch": 409,
   "wallet-conflict": 409,
   "wallet-registered": 409,

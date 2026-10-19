@@ -44,9 +44,11 @@ Choose `walletMode: "per-account-deterministic"` to recreate a signing identity
 from credentials and a saved account salt, or `"random-vault"` to encrypt a random
 key and preserve it through password changes. These identities can be used
 without holding funds; the platform handles fee sponsorship separately.
-The SDK supports password changes only for vaults. Platforms using deterministic
-wallets implement their own password-change and account-recovery workflows.
-See the [account wallet modes guide](docs/WALLET_MODES.md).
+A vault keeps its key through a password change. With deterministic keys a new
+password is a new key, and the identity service can rebind the account to it
+(opt-in sign-in-key rotation) or recover the account with a recovery key the
+user enrolled (opt-in recovery keys). See the
+[account wallet modes guide](docs/WALLET_MODES.md).
 
 - **No stored plaintext secrets.** Passwords, plaintext seeds, private keys,
   recovery codes and application secrets stay on the client; no server holds a
@@ -335,7 +337,10 @@ to the scoped signer.
 ## Wallet vault and recovery code
 
 Deterministic derivation alone cannot survive a password change: a new password
-is a new wallet, and a forgotten password is a lost one. A wallet vault
+is a new wallet, and a forgotten password is a lost one. (The identity service's
+opt-in [account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)
+can rebind an account to the new password's key, or recover the account with a
+recovery key, but the old key stays lost.) A wallet vault
 (`src/vault.ts`, since v0.5.0) decouples the two by storing the seed encrypted
 under two independent wrappers.
 
@@ -471,8 +476,10 @@ than a convention hardcoded in the server.
 | single-use challenge nonces, SHA-256 hashes of session tokens and email codes, append-only audit rows | |
 | per session: hashes of the user agent and of the caller's IP (unless `storeSessionClientHashes` is `false`) and an optional coarse client label | |
 | rate-limit buckets derived from the caller's IP hash, whatever `storeSessionClientHashes` says, until `pruneExpired` removes them 24 hours after their last update | |
+| with recovery keys enabled, recovery public keys and SHA-256 digests of recovery tokens | |
 
-There is no password column and no recovery table. In the deterministic modes,
+There is no password column, and the recovery tables hold public keys and
+token digests only. In the deterministic modes,
 under a chain wallet profile a stolen database gives an attacker exactly what
 any holder of a public address already has. Under the sign-in profile it also
 gives an offline password oracle, the enrolled sign-in public key, for every
@@ -580,7 +587,11 @@ email-verification TTLs, `requireVerifiedEmail`, and `storeSessionClientHashes`.
 A sessions list with signing out of one or every other session is opt-in: the
 router's `accountSecurityRoutes` option mounts it, and its `clientLabel` hook
 stores a coarse label per session (see
-[Session management](docs/SERVER_API.md#session-management-opt-in)).
+[Session management](docs/SERVER_API.md#session-management-opt-in)). Sign-in-key
+rotation, the signed email change, recovery keys and the security-event list are
+service methods a host routes itself; `accountSecurity` turns on rotation and
+recovery keys (see
+[Account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)).
 
 ### Email verification delivery
 
@@ -755,6 +766,9 @@ before defining either.
 | `assertCodecRoundTrip(codec, publicKeyBytes)` | function | throws unless `decodePublicKey` inverts `encodePublicKey` |
 | `deriveIdentityFromSeed(seed, codec)` | function | public identity for an existing 32-byte Ed25519 seed |
 | `normalizeUsername(username)` | function | the exact username normalization derivation applies |
+| `buildAccountChangeMessage(input)` | function | the ten-line [account-change message](docs/PROTOCOL.md#part-4--the-account-change-message) a client signs to change its account |
+| `normalizeEmail(address)` | function | the identity service's email normalization, for an `email:` subject |
+| `ACCOUNT_CHANGE_DOMAIN` / `accountChangeActions` | constant / list | `"web2-ish-self-custody account change v1"` and this release's six actions |
 | `signInEd25519ExternalSalt` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v1`: service-salted sign-in key, not a wallet ([sign-in profile](#a-sign-in-key-separate-from-the-wallet)) |
 | `signInEd25519Codec` | `IdentityCodec` | `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits, decoded strictly |
 | `signInHkdfEd25519` | `KeyDerivation` | `hkdf-sha256-sign-in-key-v1`: the sign-in profile's HKDF-SHA256 step |
@@ -766,7 +780,7 @@ before defining either.
 | `generateRecoveryCode` / `normalizeRecoveryCode` | functions | vault recovery codes |
 | `WALLET_VAULT_FORMAT` | constant | `"web2-ish-self-custody-wallet-vault-v1"` |
 
-Exported types: `AccountWalletMode`, `AccountWalletSetup`, `CreateWalletVaultOptions`, `DerivationContext`,
+Exported types: `AccountChangeAction`, `AccountChangeMessageInput`, `AccountWalletMode`, `AccountWalletSetup`, `CreateWalletVaultOptions`, `DerivationContext`,
 `DerivationCredentials`, `DerivationProfile`, `DerivedIdentity`,
 `DerivedWallet`, `IdentityCodec`, `KeyDerivation`, `ProfileDomains`,
 `SaltPolicy`, `SealedBox`, `SeedIdentity`, and `WalletVault`.
@@ -790,7 +804,7 @@ There is no private-key export anywhere in the package.
 | group | exports |
 | --- | --- |
 | service | `createIdentityService`, `createNeonIdentityService`, `createPgIdentityService` |
-| transport | `createIdentityRouter`, `jsonResponse`, `nodeRequestListener` |
+| transport | `createIdentityRouter`, `createSessionResponder`, `jsonResponse`, `nodeRequestListener` |
 | SQL drivers | `neonDriver`, `pgDriver` |
 | challenges | `CHALLENGE_DOMAIN`, `buildChallengeMessage`, `canonicalWalletIdentity`, `verifyChallengeSignature` |
 | email delivery | `createEmailSender`, `createResendEmailSender`, `createPostmarkEmailSender`, `createSendGridEmailSender`, `emailProviders`, `deliverEmailVerification`, `assertEmailVerificationDelivery`, `renderVerificationEmail`, `resolveVerificationEmailTheme`, `formatVerificationCode`, `parseMailbox`, `escapeHtml`, `EmailDeliveryError` |
@@ -837,6 +851,14 @@ their own profile.
 - **A sign-in key is still an oracle.** Under the sign-in profile the service
   holds no wallet, but the enrolled sign-in public key tests password guesses
   just as a wallet address does, and a correct guess gives the wallet too.
+- **Account changes need the password, not a session.** Sign-in-key rotation,
+  the signed email change (`changeEmail`) and recovery-key changes each need a
+  fresh, strictly verified signature by the enrolled key. `updateAccount` and
+  `PATCH /accounts/me` still change the email with a session alone and report
+  nothing to `onSecurityEvent`, so a host that treats the email as a security
+  channel refuses `email` there and changes it only through `changeEmail`. A
+  recovery key is a full account credential, single use, and the service holds
+  only its public half.
 - **Pin the profile in source.** A client that accepts a profile id, codec id,
   or KDF parameters from a server has handed that server a downgrade lever.
 - **Isolate derivation.** Run it in a fresh dedicated worker, one derivation at
@@ -863,8 +885,9 @@ holds public identity material and, in vault mode, encrypted vaults.
   password; the only recovery path is the recovery code of a wallet vault
   created *before* the password was lost.
 - Recover a vault whose password and recovery code are both lost.
-- Manage deterministic password changes, key reassignment, or account recovery.
-  Integrating platforms implement those workflows themselves.
+- Recover a deterministic key. The identity service's opt-in sign-in-key
+  rotation and recovery keys rebind an account to a new key; nothing recovers
+  the old one or what was derived from it.
 - Preserve a derived wallet when the username, password, context, salt, or
   profile changes. (A vault preserves the seed across password changes, but
   re-deriving from new credentials still yields a different wallet.)

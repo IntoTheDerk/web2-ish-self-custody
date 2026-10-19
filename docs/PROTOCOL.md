@@ -1,6 +1,6 @@
 # Protocol
 
-This document is the wire specification. It has three parts:
+This document is the wire specification. It has four parts:
 
 1. **The generic transcript** — the rule every profile follows, parameterized
    over that profile's domain-separation strings, salt policy, KDF parameters,
@@ -10,9 +10,12 @@ This document is the wire specification. It has three parts:
    master seed.
 3. **The sign-in profile** — the chain-neutral profile whose key signs in to an
    identity service and is not a wallet on any chain.
+4. **The account-change message** — the bytes a client signs to change its own
+   identity-service account: rotate its enrolled key, change its email, enroll
+   or remove a recovery key, or recover the account with one.
 
 Someone should be able to reimplement any part from this document alone: part 1
-to support a new chain, parts 2 and 3 to reproduce the committed vectors byte
+to support a new chain, parts 2 to 4 to reproduce the committed vectors byte
 for byte. Where this document and the committed source disagree, the source and
 the vectors are the contract.
 
@@ -429,6 +432,13 @@ change that needs one. An application that derives a key of lasting value from
 a secret, such as the wallet of [Part 3](#part-3--the-sign-in-profile), inherits
 the profile's versioning.
 
+The [account-change message](#part-4--the-account-change-message) is versioned
+by its domain, `web2-ish-self-custody account change v1`. Changing the line
+layout, an existing action's authorizer or subject form, or a principal's
+encoding is a new domain string (`… v2`) with its own vector, never an edit. A
+release may add new actions and principal forms under v1, each with new vector
+cases; it never changes an existing case.
+
 Adding a profile or a chain is not a migration. Moving an existing user onto a
 different one is, and it needs an enrollment step.
 
@@ -668,11 +678,16 @@ and seals it using the existing wallet-vault-v1 envelope. The profile supplies
 the codec and wrapper KDF parameters. Its deterministic entropy transcript and
 optional key-derivation step are not applied to this random seed.
 
-Password changes are supported through vault rewrapping, which preserves the
-encrypted seed and its identity. Deterministic derivation with a different
-password produces a different wallet; the SDK defines no protocol for
-reassigning an account to that key or recovering a deterministic account.
-Those workflows belong to the integrating platform.
+In `random-vault` mode a password change is a vault re-wrap, which preserves
+the encrypted seed and its identity. In the deterministic modes a different
+password derives a different key. The identity service can rebind the account
+to it, and can recover an account with a recovery key, through two opt-in
+operations authorized by signatures over the
+[account-change message](#part-4--the-account-change-message): sign-in-key
+rotation and recovery keys. Both replace the enrolled key; neither recovers the
+old one, and `random-vault` mode refuses both. A platform that keys other state
+on the enrolled key, such as an on-chain permission held by a wallet, updates
+that state itself.
 
 Application secrets and the sign-in profile follow the same split. In
 `per-account-deterministic` mode the account salt is the `external-32` salt of
@@ -922,3 +937,189 @@ fixture's, then recomputes, with no code shared with this package:
   that no secret equals the Kalvora profile's secret for the same label.
 
 The same assurance boundary applies as for the other vectors.
+
+---
+
+# Part 4 — the account-change message
+
+`buildAccountChangeMessage`, `normalizeEmail`, `ACCOUNT_CHANGE_DOMAIN` and
+`accountChangeActions` are exported from the core entry, which imports no
+server code and no chain SDK, so a browser worker builds the exact bytes it
+signs from typed fields. The identity service builds the same bytes from its
+own records and verifies the signatures over them
+([server API](SERVER_API.md#account-changes-and-recovery-keys-opt-in)).
+
+## Why a message of its own
+
+The login challenge binds a purpose, a username and a nonce, and is signed by
+the one enrolled key. An account change needs more: it names what authorizes it
+(the current key, or a recovery key) and what it is about (a new key, an email
+address, a recovery key), and some changes are signed by two keys. One message
+serves every action:
+
+- a single domain, `web2-ish-self-custody account change v1`, with ten lines
+  where the login challenge has eight under another domain, so neither can be
+  taken for the other;
+- the service profile, application and network, as the challenge binds them;
+- the action, so a signature for one action is useless for another;
+- the normalized username and the `rotation` challenge's nonce and expiry, so
+  each signature is single-use and short-lived;
+- a typed authorizer and a typed subject, each in the one form its action
+  allows.
+
+## Format
+
+Ten lines joined by `\n` (U+000A), UTF-8, no trailing newline, no BOM:
+
+```text
+line 1   web2-ish-self-custody account change v1
+line 2   <serviceProfileId>
+line 3   <applicationId>
+line 4   <networkId>
+line 5   <action>
+line 6   <usernameNormalized>
+line 7   <nonceHex>      the `rotation` challenge's 32-byte nonce, 64 lowercase hex
+line 8   <expiresAt>     the challenge's expiry, ISO-8601 UTC with milliseconds
+line 9   <authorizer>
+line 10  <subject>
+```
+
+## Actions
+
+| action | authorizer | subject | who signs |
+| --- | --- | --- | --- |
+| `sign-in-key-rotation` | `key:<current>` | `key:<new>` | both keys |
+| `email-change` | `key:<current>` | `email:<normalized address>` | the key |
+| `recovery-key-enrollment` | `key:<current>` | `recovery-key:<hex>` | both keys |
+| `recovery-key-removal` | `key:<current>` | `none` | the key |
+| `recovery-begin` | `recovery-key:<hex>` | `none` | the recovery key |
+| `recovery-reset` | `recovery-key:<hex>` | `key:<new>` | both keys |
+
+A key that authorizes signs, and a subject that is a key signs too (proof of
+possession), so nobody can rebind an account to, or enroll, a key they do not
+hold. A later release may add actions; it never changes these
+([versioning](#versioning)).
+
+## Principals
+
+- `key:` followed by the deployment codec's `encodePublicKey` of the enrolled
+  key: `key:S_<64 hex>` under the sign-in profile, `key:A_<base58>` under the
+  Kalvora profile. The builder accepts 1 to 160 printable ASCII characters
+  after `key:`.
+- `recovery-key:` followed by the recovery key's raw 32-byte Ed25519 public key
+  as 64 lowercase hex characters. A recovery key is a plain Ed25519 key that
+  the application derives from whatever recovery secret it gives its user; the
+  service stores only its public half.
+- `email:` followed by `normalizeEmail(address)`: trimmed, lowercased, at most
+  254 characters, a plain `local@domain` address with an ASCII DNS-style
+  domain and a local part of at most 64 characters with no whitespace, no C0
+  or C1 control character and no DEL, so it never holds a line break. The
+  builder refuses an address that is not already normalized.
+- `none`.
+
+`buildAccountChangeMessage` refuses, with `DerivationError` `invalid-message`:
+a line break (LF, CR, VT, FF, NEL, LS or PS) in any field, an action not in the
+table, a username that is not already normalized, a nonce that is not 64
+lowercase hex characters, a service profile, application or network id outside
+`^[a-z0-9][a-z0-9._:-]{0,79}$`, an invalid `Date`, and an authorizer or subject
+in any form but its action's. `normalizeEmail` refuses with `invalid-email`.
+
+## Building it on a client
+
+The client asks for a `rotation` challenge for the username (`POST /challenges`
+with `purpose: "rotation"`), and takes the fields from the response and from
+`GET /profile`:
+
+```ts
+import { buildAccountChangeMessage } from "web2-ish-self-custody";
+
+const lines = challenge.message.split("\n"); // the 8-line login-format challenge
+const message = buildAccountChangeMessage({
+  serviceProfileId: profile.serviceProfileId,
+  applicationId: profile.applicationId,
+  networkId: profile.networkId,
+  action: "sign-in-key-rotation",
+  usernameNormalized: challenge.usernameNormalized,
+  nonceHex: lines[6],                      // line 7
+  expiresAt: new Date(challenge.expiresAt),
+  authorizer: `key:${currentKey.publicKey}`,
+  subject: `key:${newKey.publicKey}`,
+});
+// Sign the UTF-8 bytes of `message` with each key the action names.
+```
+
+The client never signs the challenge's own 8-line message for an account
+change. It builds this one from fields it has checked, so a server cannot make
+it sign anything else.
+
+## Signatures and strict verification
+
+Each signature is Ed25519 (RFC 8032, pure) over the message's UTF-8 bytes, sent
+as exactly 128 lowercase hex characters. The service verifies each one strictly:
+
+- S < L, the group order (a malleated S + L is refused);
+- A and R are canonical encodings: y < p, and no x = 0 with the sign bit set;
+- A is not one of the eight points of small order;
+
+and then calls noble's `ed25519.verify` with `zip215: false`, which applies the
+same rules again. The checks are not optional: under the permissive ZIP-215
+rule (noble's default) a small-order public key with R = identity and S = 0
+verifies for every message, and so does OpenSSL 3.5's Ed25519 verification
+(`cryptography` 46.0.3 over OpenSSL 3.5.4 accepts the vector's small-order
+case; OpenSSL 4.0, as bundled with Node 24.21, refuses it). The login challenge
+keeps its existing verification; what it can no longer meet is such a key,
+because registration, rotation, recovery-key enrollment and recovery all refuse
+a submitted public key that is not canonical or is of small order
+(`invalid-public-key`).
+
+## Challenge binding
+
+Every account change consumes one `rotation` challenge for the account's
+username, in its own statement, before any signature is checked; the challenge
+is single-use and expires (300 s by default). A challenge is consumed by exactly
+one operation, and because line 5 names the action, its signatures authorize
+only that action.
+
+## Account-change vector
+
+`vectors/account-change-v1.json` fixes, for the service profile
+`example-account-v1` and the sign-in vector's application, network and
+username:
+
+- the context: a fixed nonce and expiry;
+- three keys: `current`, the committed sign-in vector's key (its credentials);
+  `next`, the sign-in key of a second password under the same username and
+  salt; and `recovery`, an Ed25519 key whose seed is SHA-256 of a fixed label;
+- one case per action, with its principals, its message bytes and a signature
+  by each key the action names (Ed25519 is deterministic);
+- four signatures that verify **false** strictly, each failing exactly one
+  check: a small-order A with R = identity and S = 0 (`acceptedUnderZip215`:
+  true), a non-canonical A and a non-canonical R (both y = p + 3, a point that
+  is not of small order), and the current key's rotation signature with S + L.
+
+Like every vector here, it is never regenerated.
+
+## Independent verification of the account-change vector
+
+`scripts/verify_account_change_vector.py` reproduces the vector with the
+standard library and `cryptography` alone, sharing no code with this package.
+It loads the sign-in vector by explicit path and requires the shared credential
+fields to match, then:
+
+- derives `current` and `next` from their credentials (the sign-in transcript,
+  scrypt and the HKDF key step), checks `current` against the sign-in vector,
+  and derives `recovery` from its label;
+- rebuilds every message field by field and checks each action's principal
+  forms and keys;
+- re-signs every signature and verifies it, applying the strict checks (S < L,
+  canonical A and R, A not one of the eight small-order encodings, compared
+  byte for byte) before `cryptography`'s verification;
+- requires each negative case to fail exactly the check its `reason` names and
+  to verify false;
+- checks each `acceptedUnderZip215` flag against its own ZIP-215 verification
+  in pure-Python curve arithmetic, whose base-point order and small-order list
+  it checks first, as it checks its HKDF against RFC 5869 and `cryptography`'s
+  Ed25519 against RFC 8032.
+
+`npm run verify:vectors:python` runs it after the external-salt verifier, and
+`npm run verify:ci`'s "python vectors" gate runs both.
