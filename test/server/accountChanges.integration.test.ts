@@ -50,7 +50,7 @@ const prefix = `wac_${suffix}`;
 const concurrencyPrefix = `wam_${suffix}`;
 const serviceProfileId = `w2sc-account-${suffix}`;
 const tables = [
-  "account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events",
+  "account_resets", "account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events",
   "rate_limits", "email_verifications", "sessions", "auth_challenges", "account_wallets", "accounts",
   "service_profile_bootstrap", "service_profiles", "schema_migrations",
 ];
@@ -335,7 +335,7 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   }, 60_000);
 
   afterAll(async () => {
@@ -748,7 +748,13 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
 
       const audit = await auditRows(accountId, "account.email-change");
       expect(audit.map((row) => row["metadata"])).toEqual([
-        { emailChanged: true, verificationCleared: true, sessionId: session.session.id },
+        {
+          emailChanged: true,
+          verificationCleared: true,
+          emailResetDisabled: false,
+          closedResets: 0,
+          sessionId: session.session.id,
+        },
       ]);
       expect(JSON.stringify(audit)).not.toContain("@");
       expect(eventsFor(accountId).filter((event) => event.action === "account.email-change")).toEqual([

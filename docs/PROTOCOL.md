@@ -437,7 +437,9 @@ by its domain, `web2-ish-self-custody account change v1`. Changing the line
 layout, an existing action's authorizer or subject form, or a principal's
 encoding is a new domain string (`… v2`) with its own vector, never an edit. A
 release may add new actions and principal forms under v1, each with new vector
-cases; it never changes an existing case.
+cases in a new vector file; it never changes an existing case or edits a
+released vector file. Account resets added five actions and four principal
+forms this way, in `vectors/account-change-resets-v1.json`.
 
 Adding a profile or a chain is not a migration. Moving an existing user onto a
 different one is, and it needs an enrollment step.
@@ -681,11 +683,11 @@ optional key-derivation step are not applied to this random seed.
 In `random-vault` mode a password change is a vault re-wrap, which preserves
 the encrypted seed and its identity. In the deterministic modes a different
 password derives a different key. The identity service can rebind the account
-to it, and can recover an account with a recovery key, through two opt-in
-operations authorized by signatures over the
+to it, and can recover an account with a recovery key, an emailed code or a
+signed-in reset, through opt-in operations authorized over the
 [account-change message](#part-4--the-account-change-message): sign-in-key
-rotation and recovery keys. Both replace the enrolled key; neither recovers the
-old one, and `random-vault` mode refuses both. A platform that keys other state
+rotation, recovery keys and account resets. Each replaces the enrolled key;
+none recovers the old one, and `random-vault` mode refuses them all. A platform that keys other state
 on the enrolled key, such as an on-chain permission held by a wallet, updates
 that state itself.
 
@@ -965,7 +967,9 @@ serves every action:
 - the normalized username and the `rotation` challenge's nonce and expiry, so
   each signature is single-use and short-lived;
 - a typed authorizer and a typed subject, each in the one form its action
-  allows.
+  allows. The authorizer is what authorizes the change: a key that signs, or,
+  for a reset, the reset itself (an emailed code, or the elapsed wait of one
+  session), which the service checks and which does not sign.
 
 ## Format
 
@@ -994,11 +998,21 @@ line 10  <subject>
 | `recovery-key-removal` | `key:<current>` | `none` | the key |
 | `recovery-begin` | `recovery-key:<hex>` | `none` | the recovery key |
 | `recovery-reset` | `recovery-key:<hex>` | `key:<new>` | both keys |
+| `reauthentication` | `key:<current>` | `host:<label>` | the key |
+| `email-reset-setting` | `key:<current>` | `setting:on` or `setting:off` | the key |
+| `signed-in-reset-setting` | `key:<current>` | `setting:on` or `setting:off` | the key |
+| `email-reset` | `email:<resetId>` | `key:<new>` | the new key only |
+| `signed-in-reset` | `session-reset:<resetId>` | `key:<new>` | the new key only |
 
-A key that authorizes signs, and a subject that is a key signs too (proof of
-possession), so nobody can rebind an account to, or enroll, a key they do not
-hold. A later release may add actions; it never changes these
-([versioning](#versioning)).
+The first six arrived with account changes and recovery keys, the last five
+with account resets. A key that authorizes signs, and a subject that is a key
+signs too (proof of possession), so nobody can rebind an account to, or enroll,
+a key they do not hold. A reset's authorizer is not a key: for `email-reset`
+the emailed code is the authorization and for `signed-in-reset` the elapsed
+wait from the same session (or an emailed code), both checked by the service,
+so only the new key signs. A setting's subject binds its value, so a signature
+that turns a setting off cannot turn it on. A later release may add actions; it
+never changes these ([versioning](#versioning)).
 
 ## Principals
 
@@ -1015,6 +1029,16 @@ hold. A later release may add actions; it never changes these
   domain and a local part of at most 64 characters with no whitespace, no C0
   or C1 control character and no DEL, so it never holds a line break. The
   builder refuses an address that is not already normalized.
+- `email:` followed by a reset id, the authorizer of `email-reset` only: a UUID
+  in lowercase hex (`8-4-4-4-12`), as the service issues it. A reset id holds
+  no `@`, so it is never a valid address, and each action allows only one of
+  the two `email:` forms.
+- `session-reset:` followed by a reset id, the authorizer of
+  `signed-in-reset` only.
+- `setting:on` or `setting:off`, the subject of the two setting actions.
+- `host:` followed by a label, the subject of `reauthentication`: 3 to 80
+  characters from `[a-z0-9._:-]`, starting with a letter or digit. It is the
+  host's constant for what the reauthentication unlocks, never user data.
 - `none`.
 
 `buildAccountChangeMessage` refuses, with `DerivationError` `invalid-message`:
@@ -1099,6 +1123,28 @@ username:
 
 Like every vector here, it is never regenerated.
 
+## Account-reset vector
+
+`vectors/account-change-resets-v1.json` holds the five actions of account
+resets, added beside the first vector rather than into it (a released vector
+is never edited, [versioning](#versioning)). Over the first vector's context
+and its `current` and `next` keys (named by public key and principal, not
+repeated), it fixes:
+
+- two reset ids, each the version-4 UUID formed from SHA-256 of a fixed label,
+  and a generic host label, `example-host-action-v1`;
+- one case per message: `reauthentication`, each setting action with
+  `setting:on` and with `setting:off`, `email-reset` and `signed-in-reset`,
+  each with its message bytes and a signature by each key its action names
+  (the `current` key for the first five, the `next` key alone for the two
+  resets);
+- twenty principals that every builder must refuse, each with the one field
+  it refuses: labels that are too short, too long, uppercase or start with a
+  dash, a setting other than `on` or `off`, an address or an uppercase id as an
+  `email-reset` authorizer, either reset's authorizer in the other's form, a
+  key authorizing a reset, and `host:`, `setting:` and a reset id in actions
+  that do not take them.
+
 ## Independent verification of the account-change vector
 
 `scripts/verify_account_change_vector.py` reproduces the vector with the
@@ -1120,6 +1166,15 @@ fields to match, then:
   in pure-Python curve arithmetic, whose base-point order and small-order list
   it checks first, as it checks its HKDF against RFC 5869 and `cryptography`'s
   Ed25519 against RFC 8032.
+
+The same script then loads `vectors/account-change-resets-v1.json` by explicit
+path and requires its context and keys to be the first vector's, recomputes
+both reset ids from their labels, rebuilds each message, re-signs and verifies
+each signature as above, requires each action's case count and roles (both
+values of each setting; the new key alone for a reset), and requires each
+refused principal to fail exactly its named field's form under the script's
+own form rules, with every new form and every new action refused at least
+once.
 
 `npm run verify:vectors:python` runs it after the external-salt verifier, and
 `npm run verify:ci`'s "python vectors" gate runs both.

@@ -99,6 +99,12 @@ export type {
 
 export { challengePurposes } from "./types.js";
 export type {
+  AccountResetCompletionInput,
+  AccountResetDelivery,
+  AccountResetSettingInput,
+  AccountResetSettingName,
+  AccountResetSettings,
+  AccountResetStatus,
   AccountSecurityOptions,
   AuthenticatedIdentity,
   AuthenticatedRecovery,
@@ -112,12 +118,16 @@ export type {
   IdentityServiceConfig,
   IdentitySession,
   IdentityWallet,
+  IssuedAccountReset,
   IssuedEmailVerification,
   IssuedRecovery,
   IssuedSession,
+  IssuedSignedInReset,
   ListedSession,
   LoginInput,
+  PendingSignedInReset,
   PublishedDerivationProfile,
+  ReauthenticationInput,
   RecoveryBeginInput,
   RecoveryCompletionInput,
   RecoveryKeyEnrollmentInput,
@@ -131,6 +141,8 @@ export type {
   SecurityEventHook,
   SecurityEventNotice,
   ServiceWalletMode,
+  SignedInResetCompletionInput,
   SignInKeyRotationInput,
   StoredWalletVault,
+  VerifiedReauthentication,
 } from "./types.js";

@@ -8,7 +8,8 @@ import {
   verifyChallengeSignature,
 } from "./challenge.js";
 import { resolveIdentityServiceConfig } from "./config.js";
-import { accountChangeOperations } from "./accountChanges.js";
+import { accountChangeOperations, type RateLimitName } from "./accountChanges.js";
+import { accountResetOperations } from "./accountResets.js";
 import { assertStrictEd25519PublicKey } from "./accountChangeSignature.js";
 import { accountWalletOperations } from "./accountWallets.js";
 import type { IdentityService } from "./contract.js";
@@ -121,6 +122,29 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
   // Beginning a recovery: per caller and username, and per caller alone.
   recoveryBegin: Object.freeze({ id: "recovery-begin", limit: 5, windowSeconds: 3_600 }),
   recoveryBeginIp: Object.freeze({ id: "recovery-begin-ip", limit: 20, windowSeconds: 3_600 }),
+  // Starting an account recovery by email: per username, whoever asks, by
+  // hour and by day, and per caller alone. A username's buckets count every
+  // request, whether or not the account exists or a code is sent, so the
+  // limits answer alike for every username.
+  accountResetStart: Object.freeze({ id: "account-reset-start", limit: 3, windowSeconds: 3_600 }),
+  accountResetStartDay: Object.freeze({
+    id: "account-reset-start-day",
+    limit: 10,
+    windowSeconds: 86_400,
+  }),
+  accountResetStartIp: Object.freeze({ id: "account-reset-start-ip", limit: 20, windowSeconds: 3_600 }),
+  // The codes an account recovery by email sends to one address, whatever
+  // the username. Counted only inside the start's statement, for an eligible
+  // account, and read by nothing else: sharing email verification's
+  // recipient bucket would let `startEmailVerification`'s 429 reveal that a
+  // start found an eligible account at that address, and would let anyone
+  // who knows the address silence its reset codes with verification
+  // requests.
+  accountResetRecipient: Object.freeze({
+    id: "account-reset-recipient",
+    limit: 8,
+    windowSeconds: 3_600,
+  }),
 });
 
 function requireRule(name: string): RateLimitRule {
@@ -193,6 +217,32 @@ function assertSessionToken(token: unknown): string {
 
 function rateLimitIpHash(context: RequestContext | undefined): string {
   return sanitizeContextHash(context?.ipHash) ?? RATE_LIMIT_MISSING_IP_HASH;
+}
+
+/**
+ * Whether the session `s` of the account `a` started a pending signed-in
+ * reset (in a statement with a `clock` CTE). A reset is pending only while
+ * the account's signed-in reset is on, as it completes only then. A read,
+ * never a lock: the revocations that use it keep their lock order. It runs
+ * through the live-reset index.
+ */
+function resetPendingSql(p: string): string {
+  return `(a.signed_in_reset_enabled AND EXISTS (
+            SELECT 1 FROM ${p}_account_resets r
+             WHERE r.account_id = s.account_id
+               AND r.session_id = s.id
+               AND r.kind = 'signed-in'
+               AND r.completed_at IS NULL
+               AND r.aborted_at IS NULL
+               AND r.expires_at > (SELECT at FROM clock)
+          ))`;
+}
+
+function resetPendingRevocation(): IdentityError {
+  return new IdentityError(
+    "This session started a password reset that is still pending; it cannot sign out other sessions until the reset completes or is aborted.",
+    "reset-pending",
+  );
 }
 
 export function createIdentityService(
@@ -423,6 +473,11 @@ export function createIdentityService(
    * account's keys must not leave the old key's login a session it could not
    * revoke. That leaves a window of one overlapping statement, which the
    * sessions list shows and revoke-others closes (docs/SERVER_API.md).
+   *
+   * The same statement aborts the account's pending signed-in reset: a
+   * sign-in with the password proves it is not forgotten. It locks that one
+   * reset row and no session, so it closes no cycle with a reset completion
+   * (reset, then sessions) or a revocation (sessions only).
    */
   const issueSession = async (
     accountId: string,
@@ -430,7 +485,7 @@ export function createIdentityService(
     metadata: Readonly<Record<string, string | number | boolean | null>>,
     context: RequestContext | undefined,
     verifiedPublicKey: string,
-  ): Promise<IssuedSession> => {
+  ): Promise<Readonly<{ issued: IssuedSession; abortedResets: number; occurredAt: Date }>> => {
     const token = generateSessionToken();
     const client = sessionClientColumns(context);
     const rows = await sql.query(
@@ -457,8 +512,30 @@ export function createIdentityService(
                      clock.at
                 FROM clock, new_session
               RETURNING 1
+            ),
+            aborted_resets AS (
+              UPDATE ${p}_account_resets r
+                 SET aborted_at = (SELECT at FROM clock)
+                FROM new_session
+               WHERE r.account_id = new_session.account_id
+                 AND r.kind = 'signed-in'
+                 AND r.completed_at IS NULL
+                 AND r.aborted_at IS NULL
+                 AND r.expires_at > (SELECT at FROM clock)
+               RETURNING r.id, r.account_id
+            ),
+            logged_abort AS (
+              INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+              SELECT aborted_resets.account_id, 'account.signed-in-reset.abort',
+                     jsonb_build_object('abortedBy', 'login', 'sessionId', new_session.id),
+                     (SELECT at FROM clock)
+                FROM aborted_resets, new_session
+              RETURNING 1
             )
-       SELECT id, account_id, issued_at, expires_at, last_seen_at FROM new_session`,
+       SELECT id, account_id, issued_at, expires_at, last_seen_at,
+              (SELECT count(*) FROM aborted_resets)::int AS aborted_resets,
+              (SELECT at FROM clock) AS occurred_at
+         FROM new_session`,
       [
         requestNow(context),
         accountId,
@@ -480,7 +557,11 @@ export function createIdentityService(
           "invalid-signature",
         ),
     );
-    return Object.freeze({ session: mapSession(row, ""), token });
+    return Object.freeze({
+      issued: Object.freeze({ session: mapSession(row, ""), token }),
+      abortedResets: integerColumn(row, "aborted_resets"),
+      occurredAt: instantColumn(row, "occurred_at"),
+    });
   };
 
   const loadAccount = async (accountId: string): Promise<IdentityAccount> => {
@@ -590,17 +671,28 @@ export function createIdentityService(
     );
   };
 
-  const accountChanges = accountChangeOperations({
+  const recipientRule = requireRule("accountResetRecipient");
+  const accountChangeDependencies = Object.freeze({
     sql,
     config: resolved,
     p,
     normalizeUsername,
-    rateLimit: (rule, subject, context) => enforceRateLimit(requireRule(rule), subject, context),
+    rateLimit: (rule: RateLimitName, subject: readonly string[], context: RequestContext | undefined) =>
+      enforceRateLimit(requireRule(rule), subject, context),
     rateLimitIpHash,
     consumeChallenge,
     sessionFailure,
     sessionClientColumns,
+    recipientCap: Object.freeze({
+      ruleId: recipientRule.id,
+      limit: recipientRule.limit,
+      windowSeconds: recipientRule.windowSeconds,
+      // `enforceRateLimit`'s bucket text for the subject [address], up to the address.
+      bucketPrefix: `${[RATE_LIMIT_BUCKET_DOMAIN, serviceProfileId, recipientRule.id].join("\n")}\n`,
+    }),
   });
+  const accountChanges = accountChangeOperations(accountChangeDependencies);
+  const accountResets = accountResetOperations(accountChangeDependencies);
 
   let cachedDerivationProfile: PublishedDerivationProfile | null = null;
 
@@ -1033,14 +1125,19 @@ export function createIdentityService(
         throw invalidSignature;
       }
 
-      const session = await issueSession(
+      const issued = await issueSession(
         account.id,
         "account.login",
         { profileId: resolved.profile.id, challengePurpose: challenge.purpose },
         context,
         verified,
       );
-      return Object.freeze({ account, session });
+      if (issued.abortedResets > 0) {
+        await accountChanges.notify("account.signed-in-reset.abort", account.id, issued.occurredAt, context, {
+          abortedBy: "login",
+        });
+      }
+      return Object.freeze({ account, session: issued.issued });
     },
 
     async authenticate(
@@ -1292,10 +1389,12 @@ export function createIdentityService(
       // deadlock.
       // The target must be another live session of the caller's own account;
       // every other case matches no row and answers the same `false`.
+      // A session that started a pending signed-in reset revokes nothing
+      // (`reset-pending`): the other sessions are where the reset shows.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
               caller AS (
-                SELECT s.id, s.account_id
+                SELECT s.id, s.account_id, ${resetPendingSql(p)} AS reset_pending
                   FROM ${p}_sessions s
                   JOIN ${p}_accounts a
                     ON a.id = s.account_id AND a.service_profile_id = $3::text
@@ -1310,6 +1409,7 @@ export function createIdentityService(
                  WHERE s.id = $4::uuid
                    AND s.account_id = caller.account_id
                    AND s.id <> caller.id
+                   AND NOT caller.reset_pending
                    AND s.revoked_at IS NULL
                    AND s.expires_at > (SELECT at FROM clock)
                  RETURNING s.id, s.account_id
@@ -1322,7 +1422,8 @@ export function createIdentityService(
                   FROM revoked, caller
                 RETURNING 1
               )
-         SELECT caller.id AS caller_id, (SELECT count(*) FROM revoked)::int AS revoked
+         SELECT caller.id AS caller_id, caller.reset_pending,
+                (SELECT count(*) FROM revoked)::int AS revoked
            FROM caller`,
         [tokenHash, nowParam, serviceProfileId, targetId, metadataJson({ scope: "other" })],
       );
@@ -1336,6 +1437,9 @@ export function createIdentityService(
           "That is the calling session; sign out with revokeSession instead.",
           "invalid-request",
         );
+      }
+      if (booleanColumn(row, "reset_pending")) {
+        throw resetPendingRevocation();
       }
       return Object.freeze({ revoked: integerColumn(row, "revoked") === 1 });
     },
@@ -1354,10 +1458,12 @@ export function createIdentityService(
       // drops a row another statement revoked first, and the caller's own row
       // is read, never locked, so two sessions revoking each other both end
       // revoked.
+      // A session that started a pending signed-in reset revokes nothing
+      // (`reset-pending`), so it cannot sign out the sessions that show it.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
               caller AS (
-                SELECT s.id, s.account_id
+                SELECT s.id, s.account_id, ${resetPendingSql(p)} AS reset_pending
                   FROM ${p}_sessions s
                   JOIN ${p}_accounts a
                     ON a.id = s.account_id AND a.service_profile_id = $3::text
@@ -1370,6 +1476,7 @@ export function createIdentityService(
                   FROM ${p}_sessions s, caller
                  WHERE s.account_id = caller.account_id
                    AND s.id <> caller.id
+                   AND NOT caller.reset_pending
                    AND s.revoked_at IS NULL
                    AND s.expires_at > (SELECT at FROM clock)
                  ORDER BY s.id
@@ -1392,10 +1499,11 @@ export function createIdentityService(
                        ),
                        (SELECT at FROM clock)
                   FROM caller
+                 WHERE NOT caller.reset_pending
                 RETURNING 1
               )
-         SELECT caller.id AS caller_id, caller.account_id, (SELECT at FROM clock) AS occurred_at,
-                revoked.id AS revoked_id
+         SELECT caller.id AS caller_id, caller.account_id, caller.reset_pending,
+                (SELECT at FROM clock) AS occurred_at, revoked.id AS revoked_id
            FROM caller
            LEFT JOIN revoked ON true
           ORDER BY revoked.id`,
@@ -1404,6 +1512,9 @@ export function createIdentityService(
       const first = optionalRow(rows);
       if (first === null) {
         throw await sessionFailure(tokenHash, nowParam);
+      }
+      if (booleanColumn(first, "reset_pending")) {
+        throw resetPendingRevocation();
       }
       const revokedSessionIds = Object.freeze(
         rows
@@ -1432,6 +1543,15 @@ export function createIdentityService(
     completeRecovery: accountChanges.completeRecovery,
     listSecurityEvents: accountChanges.listSecurityEvents,
     revokeRecoveryKeys: accountChanges.revokeRecoveryKeys,
+
+    setAccountResetSetting: accountResets.setAccountResetSetting,
+    accountResetStatus: accountResets.accountResetStatus,
+    startAccountReset: accountResets.startAccountReset,
+    completeAccountReset: accountResets.completeAccountReset,
+    startSignedInReset: accountResets.startSignedInReset,
+    abortSignedInReset: accountResets.abortSignedInReset,
+    completeSignedInReset: accountResets.completeSignedInReset,
+    verifyReauthentication: accountResets.verifyReauthentication,
 
     async getAccount(accountId: string): Promise<IdentityAccount> {
       return loadAccount(accountId);
@@ -1468,28 +1588,65 @@ export function createIdentityService(
         return loadAccount(id);
       }
 
+      // An address change here is the same interlock as in `changeEmail`:
+      // account recovery by email goes off and its live codes, sent to the
+      // old address, are closed, so a session alone can never point the
+      // recovery channel at another inbox. The account row is locked first
+      // (FOR NO KEY UPDATE, as `changeEmail` locks it), then the resets.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($5::timestamptz, now()) AS at),
+              prior AS (
+                SELECT id, email, email_reset_enabled
+                  FROM ${p}_accounts
+                 WHERE id = $1::uuid AND service_profile_id = $2::text
+                   FOR NO KEY UPDATE
+              ),
               updated AS (
-                UPDATE ${p}_accounts
+                UPDATE ${p}_accounts a
                    SET display_name = CASE
                          WHEN $7::boolean THEN NULL
-                         ELSE COALESCE($3::text, display_name)
+                         ELSE COALESCE($3::text, a.display_name)
                        END,
-                       email = COALESCE($4::text, email),
+                       email = COALESCE($4::text, a.email),
                        email_verified_at = CASE
-                         WHEN $4::text IS NOT NULL AND $4::text IS DISTINCT FROM email
+                         WHEN $4::text IS NOT NULL AND $4::text IS DISTINCT FROM a.email
                          THEN NULL
-                         ELSE email_verified_at
+                         ELSE a.email_verified_at
+                       END,
+                       email_reset_enabled = CASE
+                         WHEN $4::text IS NOT NULL AND $4::text IS DISTINCT FROM a.email
+                         THEN false
+                         ELSE a.email_reset_enabled
                        END,
                        updated_at = (SELECT at FROM clock)
-                 WHERE id = $1::uuid AND service_profile_id = $2::text
-                 RETURNING id, service_profile_id, username_normalized, display_name,
-                           email, email_verified_at, status, created_at, updated_at
+                  FROM prior
+                 WHERE a.id = prior.id
+                 RETURNING a.id, a.service_profile_id, a.username_normalized, a.display_name,
+                           a.email, a.email_verified_at, a.status, a.created_at, a.updated_at,
+                           a.email IS DISTINCT FROM prior.email AS email_changed,
+                           prior.email_reset_enabled AND NOT a.email_reset_enabled
+                             AS email_reset_disabled
+              ),
+              closed_resets AS (
+                UPDATE ${p}_account_resets r
+                   SET aborted_at = (SELECT at FROM clock)
+                  FROM updated
+                 WHERE r.account_id = updated.id
+                   AND updated.email_changed
+                   AND r.kind = 'email'
+                   AND r.completed_at IS NULL
+                   AND r.aborted_at IS NULL
+                   AND r.expires_at > (SELECT at FROM clock)
+                 RETURNING r.id
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                SELECT updated.id, 'account.update', $6::jsonb, (SELECT at FROM clock)
+                SELECT updated.id, 'account.update',
+                       $6::jsonb || jsonb_build_object(
+                         'emailResetDisabled', updated.email_reset_disabled,
+                         'closedResets', (SELECT count(*) FROM closed_resets)
+                       ),
+                       (SELECT at FROM clock)
                 FROM updated
                 RETURNING 1
               )
@@ -1720,6 +1877,7 @@ export function createIdentityService(
       emailVerifications: number;
       rateLimits: number;
       recoveryTokens: number;
+      accountResets: number;
       auditEvents: number;
     }> {
       // Dead sessions are deleted only if no other statement holds their row
@@ -1772,6 +1930,21 @@ export function createIdentityService(
                  )
                  RETURNING 1
               ),
+              -- A reset row likewise, whatever its state: its outcome is in
+              -- the audit rows.
+              expired_resets AS (
+                DELETE FROM ${p}_account_resets
+                 WHERE id IN (
+                   SELECT r.id
+                     FROM ${p}_account_resets r
+                    WHERE r.expires_at <= (SELECT at FROM clock) - interval '1 day'
+                      AND r.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF r SKIP LOCKED
+                 )
+                 RETURNING 1
+              ),
               -- Only with auditRetentionDays: this service's account and
               -- session events older than it. A row whose account was
               -- deleted (account_id SET NULL) names no service profile, so no
@@ -1791,6 +1964,7 @@ export function createIdentityService(
                 (SELECT count(*) FROM expired_verifications)::int AS email_verifications,
                 (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits,
                 (SELECT count(*) FROM expired_recoveries)::int AS recovery_tokens,
+                (SELECT count(*) FROM expired_resets)::int AS account_resets,
                 (SELECT count(*) FROM expired_audit)::int AS audit_events`,
         [
           requestNow(context),
@@ -1809,6 +1983,7 @@ export function createIdentityService(
         emailVerifications: integerColumn(row, "email_verifications"),
         rateLimits: integerColumn(row, "rate_limits"),
         recoveryTokens: integerColumn(row, "recovery_tokens"),
+        accountResets: integerColumn(row, "account_resets"),
         auditEvents: integerColumn(row, "audit_events"),
       };
     },

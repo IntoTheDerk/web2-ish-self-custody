@@ -5,10 +5,16 @@ import { utf8 } from "../encoding.js";
 /**
  * Server-side secret generation and hashing.
  *
- * Nothing here touches wallet material. Session tokens and verification codes
- * are bearer secrets the service mints, hands out once, and thereafter only
- * recognizes by digest: the plaintext is never persisted, so a database
- * disclosure yields nothing replayable.
+ * Nothing here touches wallet material. Session tokens, recovery tokens and
+ * codes are bearer secrets the service mints, hands out once, and thereafter
+ * only recognizes by digest: the plaintext is never persisted. The digests
+ * are unkeyed SHA-256, so what a database disclosure yields depends on the
+ * secret's size. A 256-bit token's digest yields nothing replayable. A
+ * reset code replaces the enrolled key, so it is 80 bits, beyond an offline
+ * search of its digest within its 15-minute life. An email verification
+ * code is 40 bits: its digest can be searched offline, but it proves only
+ * that an address received mail and replaces no key, and its attempt bound
+ * is what holds online.
  */
 
 const BASE64URL_ALPHABET =
@@ -20,9 +26,12 @@ const VERIFICATION_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SESSION_TOKEN_BYTES = 32;
 const NONCE_BYTES = 32;
 const VERIFICATION_CODE_LENGTH = 8;
+/** 16 symbols of 5 bits: 80 bits, typed in four groups of four. */
+const ACCOUNT_RESET_CODE_LENGTH = 16;
 
 const VERIFICATION_CODE_DOMAIN =
   "web2-ish-self-custody email verification code v1";
+const ACCOUNT_RESET_CODE_DOMAIN = "web2-ish-self-custody account reset code v1";
 
 function randomBytes(length: number): Uint8Array {
   const bytes = new Uint8Array(length);
@@ -72,22 +81,40 @@ export function hashSessionToken(token: string): string {
  * happen to agree, but the rejection bound keeps the code uniform if the
  * alphabet ever changes to a length that does not divide 256.
  */
-export function generateVerificationCode(): string {
+function generateCode(length: number): string {
   const alphabetLength = VERIFICATION_ALPHABET.length;
   const ceiling = 256 - (256 % alphabetLength);
   let code = "";
-  while (code.length < VERIFICATION_CODE_LENGTH) {
-    for (const byte of randomBytes(VERIFICATION_CODE_LENGTH)) {
+  while (code.length < length) {
+    for (const byte of randomBytes(length)) {
       if (byte >= ceiling) {
         continue;
       }
       code += VERIFICATION_ALPHABET.charAt(byte % alphabetLength);
-      if (code.length === VERIFICATION_CODE_LENGTH) {
+      if (code.length === length) {
         break;
       }
     }
   }
   return code;
+}
+
+/** An email verification code: 8 symbols (40 bits). */
+export function generateVerificationCode(): string {
+  return generateCode(VERIFICATION_CODE_LENGTH);
+}
+
+/**
+ * An account reset code: 16 symbols (80 bits) of the same alphabet. It
+ * replaces the enrolled key with no password, so its digest must not be
+ * searchable offline: 2^80 SHA-256 evaluations are far beyond any attacker
+ * within the code's 15 minutes, where 2^40 take about a minute on one GPU. A
+ * slow hash is not the answer, because a completion hashes the submitted code
+ * before any account-specific check, so an unauthenticated caller could spend
+ * the server's CPU with it.
+ */
+export function generateAccountResetCode(): string {
+  return generateCode(ACCOUNT_RESET_CODE_LENGTH);
 }
 
 /**
@@ -106,6 +133,21 @@ export function hashVerificationCode(
   return sha256Hex(
     [VERIFICATION_CODE_DOMAIN, serviceProfileId, verificationId, code].join("\n"),
   );
+}
+
+/**
+ * The stored form of an account-reset code: bound to its reset row, as a
+ * verification code is to its verification, under its own domain so that a
+ * digest of one kind never matches a row of the other.
+ *
+ * Callers must pass a code already reduced to the verification alphabet.
+ */
+export function hashAccountResetCode(
+  serviceProfileId: string,
+  resetId: string,
+  code: string,
+): string {
+  return sha256Hex([ACCOUNT_RESET_CODE_DOMAIN, serviceProfileId, resetId, code].join("\n"));
 }
 
 /**

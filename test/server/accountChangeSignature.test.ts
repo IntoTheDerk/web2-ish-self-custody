@@ -9,6 +9,7 @@ import {
 import { verifyChallengeSignature } from "../../src/server/challenge.js";
 import { IdentityError } from "../../src/server/errors.js";
 import vector from "../../vectors/account-change-v1.json" with { type: "json" };
+import resets from "../../vectors/account-change-resets-v1.json" with { type: "json" };
 
 /**
  * The strict verifier against the committed vector. Every positive signature
@@ -37,7 +38,7 @@ const smallOrder = [
 
 describe("verifyAccountChangeSignature", () => {
   it("verifies every committed signature under its signer's key", () => {
-    for (const entry of vector.cases) {
+    for (const entry of [...vector.cases, ...resets.cases]) {
       for (const signature of entry.signatures) {
         const key = publicKeys[signature.signer]!;
         expect(verifyAccountChangeSignature(signature.signatureHex, entry.messageUtf8, key)).toBe(true);

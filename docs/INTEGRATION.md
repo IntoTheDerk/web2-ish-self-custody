@@ -168,8 +168,9 @@ This adopts vault storage for that wallet. An integration that stays with
 deterministic derivation changes a password by rebinding the account to the new
 password's key with the identity service's opt-in sign-in-key rotation, and can
 recover an account with its opt-in recovery keys
-([server API](SERVER_API.md#account-changes-and-recovery-keys-opt-in)); both
-give the account a new key and never recover the old one.
+([server API](SERVER_API.md#account-changes-and-recovery-keys-opt-in)) or its
+opt-in account resets ([server API](SERVER_API.md#account-resets-opt-in)); each
+gives the account a new key and never recovers the old one.
 
 In both cases:
 

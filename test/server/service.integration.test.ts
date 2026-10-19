@@ -321,6 +321,7 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     // allowlist, so interpolating it into teardown DDL is safe.
     await driverHandle.driver.query(
       `DROP TABLE IF EXISTS
+         ${tablePrefix}_account_resets,
          ${tablePrefix}_account_recoveries,
          ${tablePrefix}_account_recovery_keys,
          ${tablePrefix}_wallet_setups,
@@ -347,7 +348,7 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL", () =>
     const { service, appliedVersions, driver } = h();
     // The service must reach PostgreSQL only through the portability seam.
     expect(["pg", "neon-http"]).toContain(driver.kind);
-    expect([...appliedVersions]).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect([...appliedVersions]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(await service.migrate()).toEqual([]);
   }, 60_000);
 

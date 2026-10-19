@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import { buildChallengeMessage } from "../../src/server/challenge.js";
 import {
   constantTimeEqualHex,
+  generateAccountResetCode,
   generateSessionToken,
   generateVerificationCode,
+  hashAccountResetCode,
   hashSessionToken,
   hashVerificationCode,
   randomNonceHex,
@@ -158,6 +160,42 @@ describe("email verification codes", () => {
         hashVerificationCode(serviceProfileId, otherVerificationId, code),
       ),
     ).toBe(false);
+  });
+});
+
+describe("account reset codes", () => {
+  /** Pinned like the verification domain: a stored digest outlives the code that made it. */
+  const accountResetCodeDomain = "web2-ish-self-custody account reset code v1";
+
+  it("draws 16 symbols of the unambiguous alphabet: 80 bits, which a leaked digest cannot be searched for", () => {
+    const observed = new Set<string>();
+    const codes = new Set<string>();
+    for (let index = 0; index < 256; index += 1) {
+      const code = generateAccountResetCode();
+      expect(code).toMatch(/^[A-HJ-NP-Z2-9]{16}$/u);
+      for (const character of code) observed.add(character);
+      codes.add(code);
+    }
+    expect(codes.size).toBe(256);
+    // The whole alphabet in practice (256 codes of 16 symbols), so 5 bits a symbol.
+    expect(observed.size).toBe(32);
+    // A reset code replaces the enrolled key with no password, and its digest
+    // is unkeyed SHA-256 over values a database row holds: at 40 bits one GPU
+    // searches it in about a minute, well inside the code's 15 minutes.
+    expect(Math.log2(observed.size) * 16).toBeGreaterThanOrEqual(80);
+  });
+
+  it("binds the code to its service profile and reset id, under a domain of its own", () => {
+    const serviceProfileId = "acme.identity";
+    const resetId = "6f1a2c48-4f4a-4f0b-8f2e-1a2b3c4d5e6f";
+    const code = generateAccountResetCode();
+    const hash = hashAccountResetCode(serviceProfileId, resetId, code);
+    expect(hash).toMatch(sha256Pattern);
+    expect(hash).toBe(sha256Hex([accountResetCodeDomain, serviceProfileId, resetId, code].join("\n")));
+    expect(hashAccountResetCode(serviceProfileId, "9c0d5e13-72b3-4c1a-9a77-0b1c2d3e4f50", code)).not.toBe(hash);
+    expect(hashAccountResetCode("acme.identity.staging", resetId, code)).not.toBe(hash);
+    // A verification digest of the same id and code never matches a reset's.
+    expect(hashVerificationCode(serviceProfileId, resetId, code)).not.toBe(hash);
   });
 });
 

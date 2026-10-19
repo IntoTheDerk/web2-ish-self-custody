@@ -10,13 +10,16 @@ import {
   type DerivationErrorCode,
 } from "../src/index.js";
 import vector from "../vectors/account-change-v1.json" with { type: "json" };
+import resets from "../vectors/account-change-resets-v1.json" with { type: "json" };
 
 /**
  * The account-change message from the core entry, against the committed
- * vector (reproduced independently by scripts/verify_account_change_vector.py)
+ * vectors (reproduced independently by scripts/verify_account_change_vector.py)
  * and against every refusal the builder owes a signer: a client builds these
  * bytes from typed fields, so the builder is what keeps it from signing
- * anything else.
+ * anything else. `account-change-v1.json` holds the six actions of account
+ * changes and recovery keys; `account-change-resets-v1.json`, added beside it
+ * because a released vector is never edited, the five of account resets.
  */
 
 const context = vector.context;
@@ -51,8 +54,12 @@ function expectCode(run: () => unknown, code: DerivationErrorCode): void {
 describe("buildAccountChangeMessage", () => {
   it("reproduces every committed message byte for byte", () => {
     expect(vector.format).toBe(ACCOUNT_CHANGE_DOMAIN);
-    expect(vector.cases.map((entry) => entry.action).sort()).toEqual([...accountChangeActions].sort());
-    for (const entry of vector.cases) {
+    expect(resets.format).toBe(ACCOUNT_CHANGE_DOMAIN);
+    expect(resets.context).toEqual(vector.context);
+    const actions = new Set([...vector.cases, ...resets.cases].map((entry) => entry.action));
+    expect([...actions].sort()).toEqual([...accountChangeActions].sort());
+    expect(vector.cases.map((entry) => entry.action)).toEqual(accountChangeActions.slice(0, 6));
+    for (const entry of [...vector.cases, ...resets.cases]) {
       const built = buildAccountChangeMessage(
         input({ action: entry.action, authorizer: entry.authorizer, subject: entry.subject }),
       );
@@ -71,7 +78,7 @@ describe("buildAccountChangeMessage", () => {
     expect(built.endsWith("\n")).toBe(false);
   });
 
-  it("defines exactly this release's six actions", () => {
+  it("defines exactly this release's eleven actions, the released six first", () => {
     expect(accountChangeActions).toEqual([
       "sign-in-key-rotation",
       "email-change",
@@ -79,8 +86,40 @@ describe("buildAccountChangeMessage", () => {
       "recovery-key-removal",
       "recovery-begin",
       "recovery-reset",
+      "reauthentication",
+      "email-reset-setting",
+      "signed-in-reset-setting",
+      "email-reset",
+      "signed-in-reset",
     ]);
     expect(Object.isFrozen(accountChangeActions)).toBe(true);
+  });
+
+  it("refuses every principal the resets vector lists as refused, and only its named field", () => {
+    expect(resets.refusedPrincipals.length).toBeGreaterThan(0);
+    for (const entry of resets.refusedPrincipals) {
+      const fields = { action: entry.action as AccountChangeAction, authorizer: entry.authorizer, subject: entry.subject };
+      expectCode(() => buildAccountChangeMessage(input(fields)), "invalid-message");
+      // The other field alone is fine: the same action with a valid value in
+      // the refused field builds.
+      const valid = [...vector.cases, ...resets.cases].find((candidate) => candidate.action === entry.action)!;
+      const repaired =
+        entry.refusedField === "authorizer"
+          ? { ...fields, authorizer: valid.authorizer }
+          : { ...fields, subject: valid.subject };
+      expect(() => buildAccountChangeMessage(input(repaired))).not.toThrow();
+    }
+  });
+
+  it("takes a host label of 3 to 80 characters from [a-z0-9._:-], starting with a letter or digit", () => {
+    const reauth = (subject: string) =>
+      buildAccountChangeMessage(input({ action: "reauthentication", authorizer: vector.keys.current.principal, subject }));
+    for (const label of ["abc", "a".repeat(80), "example.host:v1", "0ab", "a-b.c:d", "ab_c", "a__"]) {
+      expect(reauth(`host:${label}`).split("\n")[9]).toBe(`host:${label}`);
+    }
+    for (const label of ["ab", "a".repeat(81), ".abc", ":abc", "-abc", "_abc", "abC", "ab c", "ab/c", "ab\u00e9c", ""]) {
+      expectCode(() => reauth(`host:${label}`), "invalid-message");
+    }
   });
 
   it("refuses a line break in any field", () => {
@@ -103,15 +142,13 @@ describe("buildAccountChangeMessage", () => {
     expectCode(() => buildAccountChangeMessage(input({ action: "sign-in-key-rotation\nemail-change" })), "invalid-message");
   });
 
-  it("refuses an unknown action, including the next release's", () => {
+  it("refuses an unknown action", () => {
     for (const action of [
       "wallet-rotation",
-      "reauthentication",
-      "email-reset-setting",
-      "signed-in-reset-setting",
-      "email-reset",
-      "signed-in-reset",
       "recovery-secret-read",
+      "session-reset",
+      "Email-reset",
+      "reauthentication ",
       "toString",
       "__proto__",
       "",
@@ -143,8 +180,12 @@ describe("buildAccountChangeMessage", () => {
       { action: "recovery-begin", authorizer: recovery, subject: key },
       { action: "recovery-reset", authorizer: key, subject: key },
       { action: "recovery-reset", authorizer: recovery, subject: recovery },
-      // `host:` arrives with `reauthentication` in the next release.
+      // `host:` belongs to `reauthentication`, `setting:` to the setting actions.
       { action: "recovery-key-removal", authorizer: key, subject: "host:example-label" },
+      { action: "sign-in-key-rotation", authorizer: key, subject: "setting:on" },
+      { action: "email-reset-setting", authorizer: recovery, subject: "setting:on" },
+      { action: "signed-in-reset-setting", authorizer: key, subject: "none" },
+      { action: "reauthentication", authorizer: key, subject: key },
       { action: "sign-in-key-rotation", authorizer: "key:", subject: key },
       { action: "sign-in-key-rotation", authorizer: "key:has space", subject: key },
       { action: "sign-in-key-rotation", authorizer: `key:${"x".repeat(161)}`, subject: key },

@@ -7,11 +7,12 @@ The SDK permits a client to recreate a signing identity from credentials without
 Alternatively, random-vault mode encrypts a randomly generated seed. See
 [Wallet modes](WALLET_MODES.md) for its storage and access-control requirements.
 In that mode password changes and recovery-code unlocking are vault features.
-In the deterministic modes the identity service offers two opt-in account
+In the deterministic modes the identity service offers opt-in account
 changes, off by default: sign-in-key rotation and recovery keys
-([account changes](#account-changes)). Each rebinds the account to a new key
-and never recovers the old one; a platform that keys other state on the old
-key, such as an on-chain permission, retires it there itself.
+([account changes](#account-changes)), and account recovery by email and the
+signed-in reset ([account resets](#account-resets)). Each rebinds the account
+to a new key and never recovers the old one; a platform that keys other state
+on the old key, such as an on-chain permission, retires it there itself.
 
 ## Fundamental tradeoff
 
@@ -37,7 +38,7 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 ## Failure modes
 
-The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which a rotation (while the old password is known) or a recovery key (afterwards) replaces at the service, if the deployment enables them; neither recovers the old key or anything derived from it. A sign-in key holds no funds.
+The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which a rotation (while the old password is known) or a recovery key, an emailed reset code or a signed-in reset (afterwards) replaces at the service, if the deployment enables them; neither recovers the old key or anything derived from it. A sign-in key holds no funds.
 
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
 - Lost vault password and lost recovery code: permanent wallet loss.
@@ -94,8 +95,28 @@ each is authorized by signatures over the
 | The server is trusted for account control | An operator with database write access can bind any key or recovery key, as it always could bind any enrolled key; audit rows and the alerts in [SERVER_API.md](SERVER_API.md#what-an-operator-with-database-access-can-and-cannot-do) make that visible, not impossible. |
 | Uniform refusals | Every recovery failure an unauthenticated caller can cause is one `invalid-signature`; no code is added to `enumerationSensitiveCodes`. |
 
+## Account resets
+
+`startAccountReset`, `completeAccountReset`, `startSignedInReset`,
+`abortSignedInReset`, `completeSignedInReset`, `setAccountResetSetting` and
+`verifyReauthentication` (migration 8). The resets need their opt-ins,
+`accountSecurity.emailReset` and `accountSecurity.signedInReset`, both off by
+default ([server API](SERVER_API.md#account-resets-opt-in)).
+
+| property | consequence |
+| --- | --- |
+| The email inbox becomes a credential | With account recovery by email on, whoever reads the account's verified inbox can replace the enrolled key with a 15-minute, 5-attempt code and no password. The code is 80 bits, so a database read of its SHA-256 digest does not yield it within those 15 minutes. It is off for every account until its owner turns it on with a signature by the key and a verified email. |
+| A session becomes a credential after a wait | With the signed-in reset (on for every account once the deployment opts in), a stolen session can replace the enrolled key after 72 hours unless another session aborts it or the owner signs in with the password or changes it. The password change aborts it even when made on the session that started it, which a rotation keeps, so a stolen copy of the owner's own session cannot outlast a new password. While it waits, that session cannot sign out the others (`reset-pending`), and the start is reported to `onSecurityEvent` with `availableAt` so the owner can be told. A start from a session that expires before the wait ends is refused, and no session is extended. Turning it off needs the key's signature and another reset method; a reset counts as pending, and completes, only while it is on. |
+| Reset is not key recovery | As with a recovery key, a reset binds a new key and recovers nothing derived from the old password. |
+| The email-change interlock | Any address change, signed or not (`updateAccount` too), turns account recovery by email off and closes its live codes in the same statement, so a session alone cannot point the recovery channel at another inbox; a code also stops working once the address is re-verified after it was sent. |
+| The settings bind their value | A setting is changed only by a fresh signature over `setting:on` or `setting:off`, so a stolen session cannot turn either reset on or off, and a signature for one value or one setting is useless for another. |
+| Uniform start | `startAccountReset` answers every username with a fresh reset id and the same expiry, in the same statements, whether or not a code is issued; its username limits count every request. Its per-recipient cap is a bucket of its own that nothing else reads, so email verification's `429` for an address neither reveals a start that found an eligible account there nor silences that account's codes. The delivery, and so the response time, is the host's: it must pad every response to one fixed time and never surface a delivery failure. |
+| Uniform refusals | Every failure of `completeAccountReset` an unauthenticated caller can cause is one `invalid-signature`; no code is added to `enumerationSensitiveCodes`. |
+| Reauthentication is a proof, not a change | `verifyReauthentication` proves a fresh current-password run for a host label and audits it (`account.reauth`); what it unlocks is the host's own statement. |
+| One statement, one lock order | Each reset is one statement that re-checks its code or wait, the session, the status and the enrolled key under row locks, in the account changes' lock order with the resets before the sessions. The abort, the password login and the password change lock the reset row the completion locks, so each stops it race-free; revoking the initiating session stops it except for a completion already in flight. A setting change cannot see a reset that a start inserted while it waited, so a change of a setting closes that kind's open resets in either direction. |
+
 ## Server boundary
 
-A deterministic service (`service-deterministic` or `per-account-deterministic`) stores public identity, profile ID, the public salt (the service's, or one per account), session records, and one-use challenges, and, with recovery keys enabled, recovery public keys and SHA-256 digests of recovery tokens. It does not need a seed, private key, wallet password, recovery code, application secret, or encrypted vault. Random-vault mode additionally stores encrypted vaults, retrievable only after platform authorization; a stolen vault permits offline password guessing. In no mode does the SDK send a plaintext seed, private key, wallet password, recovery code, or application secret to the server. Under the sign-in profile the public identity it stores is the sign-in key's, and it needs nothing about the user's wallet. The sign-in profile is served only in the deterministic modes; `random-vault` mode refuses it.
+A deterministic service (`service-deterministic` or `per-account-deterministic`) stores public identity, profile ID, the public salt (the service's, or one per account), session records, and one-use challenges, and, with recovery keys enabled, recovery public keys and SHA-256 digests of recovery tokens, and, with account resets, each account's two reset settings and SHA-256 digests of reset codes (80 bits, so a read of the digests does not yield a live code). It does not need a seed, private key, wallet password, recovery code, application secret, or encrypted vault. Random-vault mode additionally stores encrypted vaults, retrievable only after platform authorization; a stolen vault permits offline password guessing. In no mode does the SDK send a plaintext seed, private key, wallet password, recovery code, or application secret to the server. Under the sign-in profile the public identity it stores is the sign-in key's, and it needs nothing about the user's wallet. The sign-in profile is served only in the deterministic modes; `random-vault` mode refuses it.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.
