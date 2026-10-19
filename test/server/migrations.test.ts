@@ -4,7 +4,7 @@ import type { DerivationProfile } from "../../src/profile.js";
 import { resolveIdentityServiceConfig } from "../../src/server/config.js";
 import { IdentityError, type IdentityErrorCode } from "../../src/server/errors.js";
 import { identityMigrations } from "../../src/server/migrations.js";
-import type { ResolvedIdentityServiceConfig } from "../../src/server/types.js";
+import { clientLabelPattern, type ResolvedIdentityServiceConfig } from "../../src/server/types.js";
 
 const config = resolveIdentityServiceConfig({
   serviceProfileId: "acme.identity",
@@ -266,9 +266,119 @@ describe("generated migration SQL", () => {
       "secret_key",
       "private_key",
       "ciphertext",
-      "recovery",
+      "recovery_code",
+      "recovery_secret",
+      "phrase",
     ]) {
       expect(sql.toLowerCase()).not.toContain(forbidden);
+    }
+    // Migration 7's recovery tables hold a public key and a token digest only.
+    for (const table of ["acme_id_account_recovery_keys", "acme_id_account_recoveries"]) {
+      const created = statementContaining(`CREATE TABLE IF NOT EXISTS ${table} (`);
+      expect(created).not.toMatch(/\b(token|secret|code)\s+(text|bytea)/u);
+    }
+  });
+});
+
+describe("migration 7, account recovery keys", () => {
+  const migration = migrations.find((candidate) => candidate.version === 7);
+  const normalized = (statement: string): string => statement.replace(/\s+/gu, " ").trim();
+
+  it("is six CREATE ... IF NOT EXISTS statements with their constraints inline", () => {
+    expect(migration?.name).toBe("account-recovery-keys");
+    const statements = (migration?.statements ?? []).map(normalized);
+    expect(statements).toHaveLength(6);
+    expect(statements.map((statement) => statement.split(" (")[0])).toEqual([
+      "CREATE TABLE IF NOT EXISTS acme_id_account_recovery_keys",
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_recovery_keys_active_idx ON acme_id_account_recovery_keys",
+      "CREATE INDEX IF NOT EXISTS acme_id_account_recovery_keys_account_idx ON acme_id_account_recovery_keys",
+      "CREATE TABLE IF NOT EXISTS acme_id_account_recoveries",
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_recoveries_live_idx ON acme_id_account_recoveries",
+      "CREATE INDEX IF NOT EXISTS acme_id_account_recoveries_key_idx ON acme_id_account_recoveries",
+    ]);
+    // No ALTER, DROP or separate ADD CONSTRAINT that a concurrent runner could lose.
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\b(ALTER|DROP|ADD CONSTRAINT)\b/u);
+    }
+  });
+
+  it("pins the documented columns and checks", () => {
+    const [keys, active, history, recoveries, live, byKey] = (migration?.statements ?? []).map(normalized);
+    expect(keys).toContain("account_id uuid NOT NULL REFERENCES acme_id_accounts(id) ON DELETE CASCADE");
+    expect(keys).toContain(
+      "service_profile_id text NOT NULL REFERENCES acme_id_service_profiles(service_profile_id)",
+    );
+    expect(keys).toContain("CHECK (public_key ~ '^[0-9a-f]{64}$')");
+    expect(keys).toContain("CHECK (status IN ('active', 'used', 'removed'))");
+    expect(keys).toContain("CHECK ((status = 'used') = (used_at IS NOT NULL))");
+    expect(keys).toContain("CHECK ((status = 'removed') = (removed_at IS NOT NULL))");
+    expect(keys).toContain("UNIQUE (service_profile_id, public_key)");
+    expect(active).toBe(
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_recovery_keys_active_idx " +
+        "ON acme_id_account_recovery_keys (account_id) WHERE status = 'active'",
+    );
+    // Every account-id foreign key has an index, as the other tables' do:
+    // used and removed keys accumulate, so recoveryStatus and the cascade
+    // must not scan them all.
+    expect(history).toBe(
+      "CREATE INDEX IF NOT EXISTS acme_id_account_recovery_keys_account_idx " +
+        "ON acme_id_account_recovery_keys (account_id, created_at DESC)",
+    );
+    expect(recoveries).toContain(
+      "recovery_key_id uuid NOT NULL REFERENCES acme_id_account_recovery_keys(id) ON DELETE CASCADE",
+    );
+    expect(recoveries).toContain("token_hash text NOT NULL UNIQUE");
+    expect(recoveries).toContain("CHECK (token_hash ~ '^[0-9a-f]{64}$')");
+    expect(recoveries).toContain("CHECK (expires_at > created_at)");
+    // UNIQUE, not a plain index: only an index can keep two overlapping
+    // begins from leaving two live tokens (see migrations.ts).
+    expect(live).toBe(
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_recoveries_live_idx " +
+        "ON acme_id_account_recoveries (account_id) WHERE completed_at IS NULL AND revoked_at IS NULL",
+    );
+    expect(byKey).toBe(
+      "CREATE INDEX IF NOT EXISTS acme_id_account_recoveries_key_idx " +
+        "ON acme_id_account_recoveries (recovery_key_id)",
+    );
+  });
+});
+
+describe("migration 6, session client labels", () => {
+  const migration = migrations.find((candidate) => candidate.version === 6);
+
+  it("is one ADD COLUMN IF NOT EXISTS statement carrying its CHECK", () => {
+    expect(migration?.name).toBe("session-client-labels");
+    // One statement: a DROP/ADD CONSTRAINT pair would race between concurrent
+    // runners, and the runner's retry would re-run the losing ADD until it gave up.
+    expect(migration?.statements).toHaveLength(1);
+    const statement = (migration?.statements[0] ?? "").replace(/\s+/gu, " ").trim();
+    expect(statement).toBe(
+      "ALTER TABLE acme_id_sessions ADD COLUMN IF NOT EXISTS client_label text " +
+        "CONSTRAINT acme_id_sessions_client_label " +
+        "CHECK (client_label IS NULL OR client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')",
+    );
+  });
+
+  it("checks exactly what the service accepts before writing", () => {
+    // The service drops a label the CHECK would refuse; the two must not drift.
+    const statement = migration?.statements[0] ?? "";
+    expect(statement).toContain(`client_label ~ '${clientLabelPattern.source}'`);
+    for (const accepted of ["Firefox on macOS", "Samsung Internet on Android", "Other on Other", "a", "a".repeat(64), "Chrome (beta) 1.2-x"]) {
+      expect(clientLabelPattern.test(accepted)).toBe(true);
+    }
+    for (const refused of ["", "a".repeat(65), "Firefox; macOS", "Firefox\non macOS", "Firefox on macOS\n", "Ünïcode", "<script>", "a_b", "a/b", "a\tb"]) {
+      expect(clientLabelPattern.test(refused)).toBe(false);
+    }
+  });
+
+  it("adds no index, so the per-request last_seen_at update stays a HOT update", () => {
+    for (const statement of migration?.statements ?? []) {
+      expect(statement).not.toMatch(/CREATE\s+(UNIQUE\s+)?INDEX/iu);
+    }
+    for (const statement of statements) {
+      if (/CREATE\s+(UNIQUE\s+)?INDEX/iu.test(statement)) {
+        expect(statement).not.toContain("last_seen_at");
+      }
     }
   });
 });

@@ -8,9 +8,27 @@ import {
   verifyChallengeSignature,
 } from "./challenge.js";
 import { resolveIdentityServiceConfig } from "./config.js";
+import { accountChangeOperations } from "./accountChanges.js";
+import { assertStrictEd25519PublicKey } from "./accountChangeSignature.js";
+import { accountWalletOperations } from "./accountWallets.js";
 import type { IdentityService } from "./contract.js";
 import { IdentityError } from "./errors.js";
 import { runIdentityMigrations } from "./migrations.js";
+import {
+  assertUuid,
+  booleanColumn,
+  mapAccount,
+  mapSession,
+  mapWallet,
+  metadataJson,
+  normalizeEmail,
+  requestNow,
+  sanitizeContextHash,
+  sqlStateOf,
+  uuidPattern,
+  walletCurve,
+  type ConsumedChallenge,
+} from "./records.js";
 import {
   instantColumn,
   integerColumn,
@@ -32,6 +50,7 @@ import {
   randomNonceHex,
 } from "./tokens.js";
 import {
+  acceptedClientLabel,
   challengePurposes,
   type AuthenticatedIdentity,
   type ChallengePurpose,
@@ -39,10 +58,10 @@ import {
   type IdentityAccount,
   type IdentityChallenge,
   type IdentityServiceConfig,
-  type IdentitySession,
   type IdentityWallet,
   type IssuedEmailVerification,
   type IssuedSession,
+  type ListedSession,
   type LoginInput,
   type PublishedDerivationProfile,
   type RegistrationInput,
@@ -51,18 +70,15 @@ import {
 } from "./types.js";
 
 const tablePrefixPattern = /^[a-z][a-z0-9_]{0,31}$/u;
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const controlCharacters = /[\u0000-\u001f\u007f]/u;
-const emailPattern =
-  /^[^\s@<>"',;:\\]{1,64}@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/u;
 const nonAlphanumeric = /[^A-Z0-9]/gu;
 
 const MIN_USERNAME_LENGTH = 3;
 const MAX_USERNAME_LENGTH = 320;
 const MAX_DISPLAY_NAME_LENGTH = 120;
-const MAX_EMAIL_LENGTH = 254;
-const MAX_CONTEXT_HASH_LENGTH = 128;
+
+/** The most rows `listSessions` returns; `liveSessionIds` has no cap. */
+const MAX_LISTED_SESSIONS = 50;
 
 /** Rate-limit rows outlive their window only long enough to stay auditable. */
 const RATE_LIMIT_RETENTION_SECONDS = 86_400;
@@ -80,6 +96,8 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
   challenge: Object.freeze({ id: "challenge", limit: 20, windowSeconds: 300 }),
   register: Object.freeze({ id: "register", limit: 10, windowSeconds: 3_600 }),
   login: Object.freeze({ id: "login", limit: 15, windowSeconds: 300 }),
+  walletRead: Object.freeze({ id: "wallet-read", limit: 20, windowSeconds: 300 }),
+  walletIp: Object.freeze({ id: "wallet-ip", limit: 100, windowSeconds: 300 }),
   emailVerification: Object.freeze({
     id: "email-verification",
     limit: 5,
@@ -97,6 +115,12 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
     limit: 20,
     windowSeconds: 3_600,
   }),
+  // Every signed account change of one account (rotation, email change,
+  // recovery-key enrollment and removal, recovery completion), per caller.
+  accountChange: Object.freeze({ id: "account-change", limit: 10, windowSeconds: 300 }),
+  // Beginning a recovery: per caller and username, and per caller alone.
+  recoveryBegin: Object.freeze({ id: "recovery-begin", limit: 5, windowSeconds: 3_600 }),
+  recoveryBeginIp: Object.freeze({ id: "recovery-begin-ip", limit: 20, windowSeconds: 3_600 }),
 });
 
 function requireRule(name: string): RateLimitRule {
@@ -119,52 +143,6 @@ function assertTablePrefix(value: string): string {
     );
   }
   return value;
-}
-
-type MissingIdentifierCode =
-  | "account-not-found"
-  | "challenge-not-found"
-  | "email-verification-failed";
-
-/**
- * Identifiers are shape-checked before reaching a `::uuid` cast, so a
- * malformed id surfaces as its caller's own "not found" rather than as a
- * PostgreSQL 22P02 leaking out of the driver.
- */
-function assertUuid(value: string, code: MissingIdentifierCode): string {
-  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!uuidPattern.test(normalized)) {
-    throw new IdentityError("Malformed identifier.", code);
-  }
-  return normalized;
-}
-
-function booleanColumn(row: SqlRow, column: string): boolean {
-  const value = row[column];
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (value === "t" || value === "true") {
-    return true;
-  }
-  if (value === "f" || value === "false") {
-    return false;
-  }
-  throw new TypeError(`Expected boolean column "${column}".`);
-}
-
-function accountStatus(value: string): "active" | "suspended" {
-  if (value === "active" || value === "suspended") {
-    return value;
-  }
-  throw new IdentityError("Unknown account status.", "invalid-service-profile");
-}
-
-function walletCurve(value: string): "ed25519" {
-  if (value === "ed25519") {
-    return value;
-  }
-  throw new IdentityError("Unknown wallet curve.", "invalid-service-profile");
 }
 
 function assertChallengePurpose(value: string): ChallengePurpose {
@@ -193,99 +171,29 @@ function normalizeDisplayName(value: string): string {
   return candidate;
 }
 
-function normalizeEmail(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.length > MAX_EMAIL_LENGTH || !emailPattern.test(normalized)) {
-    throw new IdentityError("email is not a valid address.", "invalid-email");
+/**
+ * Session ids reach a `::uuid` cast, so they are shape-checked first. A
+ * malformed id is the caller's input error, which says nothing about whether
+ * any session exists.
+ */
+function assertSessionId(value: unknown): string {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!uuidPattern.test(normalized)) {
+    throw new IdentityError("sessionId must be a session id (a UUID).", "invalid-request");
   }
   return normalized;
 }
 
-/** Context hashes arrive pre-hashed; the service never sees a raw IP. */
-function sanitizeContextHash(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
+function assertSessionToken(token: unknown): string {
+  if (typeof token !== "string" || token.trim().length === 0) {
+    throw new IdentityError("Session token is missing.", "session-not-found");
   }
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_CONTEXT_HASH_LENGTH) {
-    return null;
-  }
-  return trimmed;
+  return token;
 }
 
 function rateLimitIpHash(context: RequestContext | undefined): string {
   return sanitizeContextHash(context?.ipHash) ?? RATE_LIMIT_MISSING_IP_HASH;
 }
-
-function requestNow(context: RequestContext | undefined): string | null {
-  const now = context?.now;
-  return now === undefined ? null : now.toISOString();
-}
-
-function metadataJson(
-  metadata: Readonly<Record<string, string | number | boolean | null>>,
-): string {
-  return JSON.stringify(metadata);
-}
-
-function sqlStateOf(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) {
-    return null;
-  }
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" ? code : null;
-}
-
-function mapAccount(row: SqlRow, prefix: string): IdentityAccount {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
-    usernameNormalized: textColumn(row, `${prefix}username_normalized`),
-    displayName: optionalTextColumn(row, `${prefix}display_name`),
-    email: optionalTextColumn(row, `${prefix}email`),
-    emailVerifiedAt: optionalInstantColumn(row, `${prefix}email_verified_at`),
-    status: accountStatus(textColumn(row, `${prefix}status`)),
-    createdAt: instantColumn(row, `${prefix}created_at`),
-    updatedAt: instantColumn(row, `${prefix}updated_at`),
-  });
-}
-
-function mapWallet(row: SqlRow, prefix: string): IdentityWallet {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    accountId: textColumn(row, `${prefix}account_id`),
-    serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
-    profileId: textColumn(row, `${prefix}profile_id`),
-    codecId: textColumn(row, `${prefix}codec_id`),
-    curve: walletCurve(textColumn(row, `${prefix}curve`)),
-    applicationId: textColumn(row, `${prefix}application_id`),
-    networkId: textColumn(row, `${prefix}network_id`),
-    address: textColumn(row, `${prefix}address`),
-    addressNormalized: textColumn(row, `${prefix}address_normalized`),
-    publicKey: textColumn(row, `${prefix}public_key`),
-    fingerprint: textColumn(row, `${prefix}fingerprint`),
-    isPrimary: booleanColumn(row, `${prefix}is_primary`),
-    createdAt: instantColumn(row, `${prefix}created_at`),
-  });
-}
-
-function mapSession(row: SqlRow, prefix: string): IdentitySession {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    accountId: textColumn(row, `${prefix}account_id`),
-    issuedAt: instantColumn(row, `${prefix}issued_at`),
-    expiresAt: instantColumn(row, `${prefix}expires_at`),
-    lastSeenAt: instantColumn(row, `${prefix}last_seen_at`),
-  });
-}
-
-type ConsumedChallenge = Readonly<{
-  id: string;
-  purpose: ChallengePurpose;
-  usernameNormalized: string;
-  nonceHex: string;
-  expiresAt: Date;
-}>;
 
 export function createIdentityService(
   sql: SqlDriver,
@@ -295,6 +203,7 @@ export function createIdentityService(
     resolveIdentityServiceConfig(config);
   const p = assertTablePrefix(resolved.tablePrefix);
   const serviceProfileId = resolved.serviceProfileId;
+  const accountWallets = accountWalletOperations(sql, resolved);
 
   const normalizeUsername = (username: string): string => {
     let normalized: string;
@@ -464,29 +373,89 @@ export function createIdentityService(
       expiresAt: challenge.expiresAt,
     });
 
+  /**
+   * What a new session row stores about its client. The hashes are kept only
+   * while `storeSessionClientHashes` is on; rate limits read the context
+   * directly and never these columns. A label the CHECK would refuse is
+   * dropped rather than failing the sign-in it describes.
+   */
+  const sessionClientColumns = (
+    context: RequestContext | undefined,
+  ): Readonly<{ ipHash: string | null; userAgentHash: string | null; clientLabel: string | null }> =>
+    Object.freeze({
+      ipHash: resolved.storeSessionClientHashes ? sanitizeContextHash(context?.ipHash) : null,
+      userAgentHash: resolved.storeSessionClientHashes
+        ? sanitizeContextHash(context?.userAgentHash)
+        : null,
+      clientLabel: acceptedClientLabel(context?.clientLabel) ?? null,
+    });
+
+  /**
+   * Why a token did not resolve to a live session: revoked or unknown is
+   * `session-not-found`, past its expiry `session-expired`. Read-only, and run
+   * only after the statement that needed the session found none.
+   */
+  const sessionFailure = async (
+    tokenHash: string,
+    nowParam: string | null,
+  ): Promise<IdentityError> => {
+    const existing = await sql.query(
+      `SELECT revoked_at,
+              expires_at <= COALESCE($2::timestamptz, now()) AS is_expired
+         FROM ${p}_sessions
+        WHERE token_hash = $1::text`,
+      [tokenHash, nowParam],
+    );
+    const session = optionalRow(existing);
+    if (session === null || optionalInstantColumn(session, "revoked_at") !== null) {
+      return new IdentityError("Session is not valid.", "session-not-found");
+    }
+    if (booleanColumn(session, "is_expired")) {
+      return new IdentityError("Session has expired.", "session-expired");
+    }
+    return new IdentityError("Session is not valid.", "session-not-found");
+  };
+
+  /**
+   * Issues a login session, only while `verifiedPublicKey` (the key whose
+   * signature the login just checked) is still an enrolled key of the
+   * account: a rotation or recovery that committed after the login read the
+   * account's keys must not leave the old key's login a session it could not
+   * revoke. That leaves a window of one overlapping statement, which the
+   * sessions list shows and revoke-others closes (docs/SERVER_API.md).
+   */
   const issueSession = async (
     accountId: string,
     action: string,
     metadata: Readonly<Record<string, string | number | boolean | null>>,
     context: RequestContext | undefined,
+    verifiedPublicKey: string,
   ): Promise<IssuedSession> => {
     const token = generateSessionToken();
+    const client = sessionClientColumns(context);
     const rows = await sql.query(
       `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
             new_session AS (
               INSERT INTO ${p}_sessions (
                 account_id, token_hash, issued_at, expires_at, last_seen_at,
-                ip_hash, user_agent_hash
+                ip_hash, user_agent_hash, client_label
               )
               SELECT $2::uuid, $3::text, clock.at,
                      date_trunc('milliseconds', clock.at + (interval '1 second' * $4::double precision)),
-                     clock.at, $5::text, $6::text
+                     clock.at, $5::text, $6::text, $9::text
               FROM clock
+              WHERE EXISTS (
+                SELECT 1 FROM ${p}_account_wallets w
+                 WHERE w.account_id = $2::uuid AND w.public_key = $10::text
+              )
               RETURNING id, account_id, issued_at, expires_at, last_seen_at
             ),
             logged AS (
               INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-              SELECT $2::uuid, $7::text, $8::jsonb, clock.at FROM clock
+              SELECT $2::uuid, $7::text,
+                     $8::jsonb || jsonb_build_object('sessionId', new_session.id),
+                     clock.at
+                FROM clock, new_session
               RETURNING 1
             )
        SELECT id, account_id, issued_at, expires_at, last_seen_at FROM new_session`,
@@ -495,15 +464,21 @@ export function createIdentityService(
         accountId,
         hashSessionToken(token),
         resolved.sessionTtlSeconds,
-        sanitizeContextHash(context?.ipHash),
-        sanitizeContextHash(context?.userAgentHash),
+        client.ipHash,
+        client.userAgentHash,
         action,
         metadataJson(metadata),
+        client.clientLabel,
+        verifiedPublicKey,
       ],
     );
     const row = requireSingleRow(
       rows,
-      () => new IdentityError("Session could not be issued.", "account-not-found"),
+      () =>
+        new IdentityError(
+          "Challenge signature did not verify against any registered wallet.",
+          "invalid-signature",
+        ),
     );
     return Object.freeze({ session: mapSession(row, ""), token });
   };
@@ -615,16 +590,31 @@ export function createIdentityService(
     );
   };
 
+  const accountChanges = accountChangeOperations({
+    sql,
+    config: resolved,
+    p,
+    normalizeUsername,
+    rateLimit: (rule, subject, context) => enforceRateLimit(requireRule(rule), subject, context),
+    rateLimitIpHash,
+    consumeChallenge,
+    sessionFailure,
+    sessionClientColumns,
+  });
+
   let cachedDerivationProfile: PublishedDerivationProfile | null = null;
 
-  return Object.freeze({
+  const service: IdentityService = Object.freeze<IdentityService>({
     config: resolved,
 
     async migrate(): Promise<readonly number[]> {
-      return runIdentityMigrations(sql, resolved);
+      const versions = await runIdentityMigrations(sql, resolved);
+      await accountWallets.checkPolicy();
+      return versions;
     },
 
     async derivationProfile(): Promise<PublishedDerivationProfile> {
+      await accountWallets.checkPolicy();
       if (cachedDerivationProfile !== null) {
         return cachedDerivationProfile;
       }
@@ -645,6 +635,7 @@ export function createIdentityService(
           ),
       );
       const profile: PublishedDerivationProfile = Object.freeze({
+        walletMode: resolved.walletMode,
         serviceProfileId: textColumn(row, "service_profile_id"),
         profileId: textColumn(row, "profile_id"),
         codecId: resolved.profile.codec.id,
@@ -689,8 +680,12 @@ export function createIdentityService(
         context,
       );
 
-      // Deliberately no account lookup: an unknown username must produce a
-      // challenge indistinguishable from a known one.
+      if (resolved.walletMode !== "service-deterministic") {
+        await enforceRateLimit(requireRule("walletIp"), [rateLimitIpHash(context)], context);
+      }
+      const walletSetup = await accountWallets.prepare(usernameNormalized);
+
+      // Both known and unknown usernames receive the same challenge shape.
       const nonceHex = randomNonceHex();
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($5::timestamptz, now()) AS at)
@@ -731,6 +726,7 @@ export function createIdentityService(
           expiresAt,
         }),
         expiresAt,
+        ...(walletSetup === undefined ? {} : { walletSetup }),
       });
     },
 
@@ -747,6 +743,10 @@ export function createIdentityService(
         publicKey: input.publicKey,
         address: input.address,
       });
+      // A small-order or non-canonical key could be "signed for" without any
+      // private key (noble's default zip215 rule accepts R = identity, S = 0
+      // under a small-order key), so it is never enrolled.
+      assertStrictEd25519PublicKey(wallet.publicKeyBytes);
       // Deliberately NOT defaulted to the username: an unset friendly name has
       // to stay distinguishable from one the user actually chose.
       const displayName =
@@ -759,6 +759,13 @@ export function createIdentityService(
         [rateLimitIpHash(context), usernameNormalized],
         context,
       );
+
+      const vault = resolved.walletMode === "random-vault"
+        ? accountWallets.validateVault(input.vault, usernameNormalized, wallet)
+        : null;
+      if (resolved.walletMode !== "random-vault" && input.vault !== undefined) {
+        throw new IdentityError("This wallet mode does not accept a vault.", "invalid-request");
+      }
 
       const emailVerifiedAt =
         email === null
@@ -795,7 +802,11 @@ export function createIdentityService(
         );
       }
 
+      // Invalid registration attempts must not allocate durable salt records.
+      // A valid challenge already provisioned this setup; preserve it exactly.
+      const walletSetup = await accountWallets.prepare(usernameNormalized);
       const token = generateSessionToken();
+      const client = sessionClientColumns(context);
       const parameters: readonly SqlParameter[] = [
         nowParam,
         serviceProfileId,
@@ -814,8 +825,8 @@ export function createIdentityService(
         fingerprint(wallet.address),
         hashSessionToken(token),
         resolved.sessionTtlSeconds,
-        sanitizeContextHash(context?.ipHash),
-        sanitizeContextHash(context?.userAgentHash),
+        client.ipHash,
+        client.userAgentHash,
         metadataJson({
           profileId: resolved.profile.id,
           curve: wallet.curve,
@@ -823,6 +834,9 @@ export function createIdentityService(
           emailProvided: email !== null,
           emailVerified: emailVerifiedAt !== null,
         }),
+        walletSetup?.accountId ?? null,
+        vault === null ? null : JSON.stringify(vault),
+        client.clientLabel,
       ];
 
       // Account, primary wallet, session, and audit row land in ONE statement:
@@ -834,10 +848,10 @@ export function createIdentityService(
           `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
                 new_account AS (
                   INSERT INTO ${p}_accounts (
-                    service_profile_id, username_normalized, display_name, email,
+                    id, service_profile_id, username_normalized, display_name, email,
                     email_verified_at, created_at, updated_at
                   )
-                  SELECT $2::text, $3::text, $4::text, $5::text, $6::timestamptz,
+                  SELECT COALESCE($21::uuid, gen_random_uuid()), $2::text, $3::text, $4::text, $5::text, $6::timestamptz,
                          clock.at, clock.at
                   FROM clock
                   RETURNING id, service_profile_id, username_normalized, display_name,
@@ -847,11 +861,11 @@ export function createIdentityService(
                   INSERT INTO ${p}_account_wallets (
                     account_id, service_profile_id, profile_id, codec_id, curve,
                     application_id, network_id, address, address_normalized,
-                    public_key, fingerprint, is_primary, created_at
+                    public_key, fingerprint, is_primary, created_at, vault
                   )
                   SELECT new_account.id, $2::text, $7::text, $8::text, $9::text,
                          $10::text, $11::text, $12::text, $13::text, $14::text,
-                         $15::text, true, clock.at
+                         $15::text, true, clock.at, $22::jsonb
                   FROM new_account, clock
                   RETURNING id, account_id, service_profile_id, profile_id, codec_id,
                             curve, application_id, network_id, address,
@@ -861,18 +875,20 @@ export function createIdentityService(
                 new_session AS (
                   INSERT INTO ${p}_sessions (
                     account_id, token_hash, issued_at, expires_at, last_seen_at,
-                    ip_hash, user_agent_hash
+                    ip_hash, user_agent_hash, client_label
                   )
                   SELECT new_account.id, $16::text, clock.at,
                          date_trunc('milliseconds', clock.at + (interval '1 second' * $17::double precision)),
-                         clock.at, $18::text, $19::text
+                         clock.at, $18::text, $19::text, $23::text
                   FROM new_account, clock
                   RETURNING id, account_id, issued_at, expires_at, last_seen_at
                 ),
                 logged AS (
                   INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                  SELECT new_account.id, 'account.register', $20::jsonb, clock.at
-                  FROM new_account, clock
+                  SELECT new_account.id, 'account.register',
+                         $20::jsonb || jsonb_build_object('sessionId', new_session.id),
+                         clock.at
+                  FROM new_account, new_session, clock
                   RETURNING 1
                 )
            SELECT a.id AS account_id,
@@ -990,7 +1006,7 @@ export function createIdentityService(
       }
 
       const message = challengeMessageFor(challenge);
-      let verified = false;
+      let verified: string | null = null;
       for (const row of rows) {
         const publicKey = optionalTextColumn(row, "wallet_public_key");
         const address = optionalTextColumn(row, "wallet_address");
@@ -1003,7 +1019,8 @@ export function createIdentityService(
             address,
           });
           if (verifyChallengeSignature(identity, message, input.signature)) {
-            verified = true;
+            // The stored text, which the session insert re-checks as enrolled.
+            verified = publicKey;
             break;
           }
         } catch {
@@ -1012,7 +1029,7 @@ export function createIdentityService(
           continue;
         }
       }
-      if (!verified) {
+      if (verified === null) {
         throw invalidSignature;
       }
 
@@ -1021,6 +1038,7 @@ export function createIdentityService(
         "account.login",
         { profileId: resolved.profile.id, challengePurpose: challenge.purpose },
         context,
+        verified,
       );
       return Object.freeze({ account, session });
     },
@@ -1064,21 +1082,7 @@ export function createIdentityService(
       );
       const row = optionalRow(rows);
       if (row === null) {
-        const existing = await sql.query(
-          `SELECT revoked_at,
-                  expires_at <= COALESCE($2::timestamptz, now()) AS is_expired
-             FROM ${p}_sessions
-            WHERE token_hash = $1::text`,
-          [tokenHash, nowParam],
-        );
-        const session = optionalRow(existing);
-        if (session === null || optionalInstantColumn(session, "revoked_at") !== null) {
-          throw new IdentityError("Session is not valid.", "session-not-found");
-        }
-        if (booleanColumn(session, "is_expired")) {
-          throw new IdentityError("Session has expired.", "session-expired");
-        }
-        throw new IdentityError("Session is not valid.", "session-not-found");
+        throw await sessionFailure(tokenHash, nowParam);
       }
 
       const account = mapAccount(row, "account_");
@@ -1104,7 +1108,9 @@ export function createIdentityService(
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                SELECT revoked.account_id, 'session.revoke', $3::jsonb, (SELECT at FROM clock)
+                SELECT revoked.account_id, 'session.revoke',
+                       $3::jsonb || jsonb_build_object('sessionId', revoked.id),
+                       (SELECT at FROM clock)
                 FROM revoked
                 RETURNING 1
               )
@@ -1133,19 +1139,29 @@ export function createIdentityService(
       context?: RequestContext,
     ): Promise<number> {
       const id = assertUuid(accountId, "account-not-found");
+      // Locks its rows in id order, like `revokeOtherSessions`, so the two
+      // multi-row revocations take their locks in one order.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($3::timestamptz, now()) AS at),
               acct AS (
                 SELECT id FROM ${p}_accounts
                  WHERE id = $1::uuid AND service_profile_id = $2::text
               ),
+              targets AS (
+                SELECT s.id
+                  FROM ${p}_sessions s
+                 WHERE s.account_id IN (SELECT id FROM acct)
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 ORDER BY s.id
+                 FOR NO KEY UPDATE OF s
+              ),
               revoked AS (
-                UPDATE ${p}_sessions
+                UPDATE ${p}_sessions s
                    SET revoked_at = (SELECT at FROM clock)
-                 WHERE account_id IN (SELECT id FROM acct)
-                   AND revoked_at IS NULL
-                   AND expires_at > (SELECT at FROM clock)
-                 RETURNING id
+                  FROM targets
+                 WHERE s.id = targets.id
+                 RETURNING s.id
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -1169,8 +1185,268 @@ export function createIdentityService(
       return integerColumn(row, "revoked");
     },
 
+    async listSessions(
+      token: string,
+      context?: RequestContext,
+    ): Promise<readonly ListedSession[]> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      // The caller's row is slid like `authenticate` does and always kept in
+      // the page, whatever the other rows' activity; the lateral read sees the
+      // pre-update snapshot, so the caller's new `last_seen_at` is substituted.
+      // The filter runs through `<p>_sessions_account_idx`; the few rows left
+      // are sorted in memory, deliberately without an index on `last_seen_at`.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                UPDATE ${p}_sessions s
+                   SET last_seen_at = (SELECT at FROM clock)
+                  FROM ${p}_accounts a
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                   AND a.id = s.account_id
+                   AND a.service_profile_id = $3::text
+                 RETURNING s.id, s.account_id, s.last_seen_at
+              )
+         SELECT l.id, l.issued_at, l.expires_at, l.client_label, l.is_current,
+                CASE WHEN l.is_current THEN caller.last_seen_at ELSE l.last_seen_at END
+                  AS seen_at
+           FROM caller
+           CROSS JOIN LATERAL (
+             SELECT s.id, s.issued_at, s.expires_at, s.last_seen_at, s.client_label,
+                    s.id = caller.id AS is_current
+               FROM ${p}_sessions s
+              WHERE s.account_id = caller.account_id
+                AND s.revoked_at IS NULL
+                AND s.expires_at > (SELECT at FROM clock)
+              ORDER BY s.id = caller.id DESC, s.last_seen_at DESC, s.id
+              LIMIT $4::integer
+           ) l
+          ORDER BY seen_at DESC, l.id`,
+        [tokenHash, nowParam, serviceProfileId, MAX_LISTED_SESSIONS],
+      );
+      if (rows.length === 0) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      return Object.freeze(
+        rows.map((row) =>
+          Object.freeze({
+            id: textColumn(row, "id"),
+            issuedAt: instantColumn(row, "issued_at"),
+            lastSeenAt: instantColumn(row, "seen_at"),
+            expiresAt: instantColumn(row, "expires_at"),
+            clientLabel: optionalTextColumn(row, "client_label"),
+            current: booleanColumn(row, "is_current"),
+          }),
+        ),
+      );
+    },
+
+    async liveSessionIds(
+      token: string,
+      context?: RequestContext,
+    ): Promise<readonly string[]> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              )
+         SELECT caller.id AS caller_id, s.id
+           FROM caller
+           LEFT JOIN ${p}_sessions s
+             ON s.account_id = caller.account_id
+            AND s.revoked_at IS NULL
+            AND s.expires_at > (SELECT at FROM clock)
+          ORDER BY s.issued_at, s.id`,
+        [tokenHash, nowParam, serviceProfileId],
+      );
+      if (rows.length === 0) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      return Object.freeze(
+        rows
+          .map((row) => optionalTextColumn(row, "id"))
+          .filter((id): id is string => id !== null),
+      );
+    },
+
+    async revokeSessionById(
+      token: string,
+      sessionId: string,
+      context?: RequestContext,
+    ): Promise<{ revoked: boolean }> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const targetId = assertSessionId(sessionId);
+      const nowParam = requestNow(context);
+      // The caller is read, not updated: the statement locks at most one row,
+      // the target, so two sessions revoking each other at once cannot
+      // deadlock.
+      // The target must be another live session of the caller's own account;
+      // every other case matches no row and answers the same `false`.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              ),
+              revoked AS (
+                UPDATE ${p}_sessions s
+                   SET revoked_at = (SELECT at FROM clock)
+                  FROM caller
+                 WHERE s.id = $4::uuid
+                   AND s.account_id = caller.account_id
+                   AND s.id <> caller.id
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 RETURNING s.id, s.account_id
+              ),
+              logged AS (
+                INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+                SELECT revoked.account_id, 'session.revoke',
+                       $5::jsonb || jsonb_build_object('sessionId', caller.id),
+                       (SELECT at FROM clock)
+                  FROM revoked, caller
+                RETURNING 1
+              )
+         SELECT caller.id AS caller_id, (SELECT count(*) FROM revoked)::int AS revoked
+           FROM caller`,
+        [tokenHash, nowParam, serviceProfileId, targetId, metadataJson({ scope: "other" })],
+      );
+      const row = optionalRow(rows);
+      if (row === null) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      if (textColumn(row, "caller_id") === targetId) {
+        // Nothing was changed: the UPDATE excludes the caller's own row.
+        throw new IdentityError(
+          "That is the calling session; sign out with revokeSession instead.",
+          "invalid-request",
+        );
+      }
+      return Object.freeze({ revoked: integerColumn(row, "revoked") === 1 });
+    },
+
+    async revokeOtherSessions(
+      token: string,
+      context?: RequestContext,
+    ): Promise<{ revokedSessionIds: readonly string[] }> {
+      const tokenHash = hashSessionToken(assertSessionToken(token));
+      const nowParam = requestNow(context);
+      // `targets` locks the rows in id order before the UPDATE touches them.
+      // A plain multi-row UPDATE locks in scan order, which follows each
+      // statement's snapshot of where the row versions sit; `authenticate`
+      // moves them, so two concurrent revoke-others could lock the same rows
+      // in different orders and deadlock. The lock's READ COMMITTED recheck
+      // drops a row another statement revoked first, and the caller's own row
+      // is read, never locked, so two sessions revoking each other both end
+      // revoked.
+      const rows = await sql.query(
+        `WITH clock AS (SELECT COALESCE($2::timestamptz, now()) AS at),
+              caller AS (
+                SELECT s.id, s.account_id
+                  FROM ${p}_sessions s
+                  JOIN ${p}_accounts a
+                    ON a.id = s.account_id AND a.service_profile_id = $3::text
+                 WHERE s.token_hash = $1::text
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+              ),
+              targets AS (
+                SELECT s.id
+                  FROM ${p}_sessions s, caller
+                 WHERE s.account_id = caller.account_id
+                   AND s.id <> caller.id
+                   AND s.revoked_at IS NULL
+                   AND s.expires_at > (SELECT at FROM clock)
+                 ORDER BY s.id
+                 FOR NO KEY UPDATE OF s
+              ),
+              revoked AS (
+                UPDATE ${p}_sessions s
+                   SET revoked_at = (SELECT at FROM clock)
+                  FROM targets
+                 WHERE s.id = targets.id
+                 RETURNING s.id
+              ),
+              logged AS (
+                INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+                SELECT caller.account_id, 'session.revoke-others',
+                       jsonb_build_object(
+                         'scope', 'others',
+                         'revoked', (SELECT count(*) FROM revoked),
+                         'sessionId', caller.id
+                       ),
+                       (SELECT at FROM clock)
+                  FROM caller
+                RETURNING 1
+              )
+         SELECT caller.id AS caller_id, caller.account_id, (SELECT at FROM clock) AS occurred_at,
+                revoked.id AS revoked_id
+           FROM caller
+           LEFT JOIN revoked ON true
+          ORDER BY revoked.id`,
+        [tokenHash, nowParam, serviceProfileId],
+      );
+      const first = optionalRow(rows);
+      if (first === null) {
+        throw await sessionFailure(tokenHash, nowParam);
+      }
+      const revokedSessionIds = Object.freeze(
+        rows
+          .map((row) => optionalTextColumn(row, "revoked_id"))
+          .filter((id): id is string => id !== null),
+      );
+      if (revokedSessionIds.length > 0) {
+        await accountChanges.notify(
+          "session.revoke-others",
+          textColumn(first, "account_id"),
+          instantColumn(first, "occurred_at"),
+          context,
+          { revokedSessions: revokedSessionIds.length },
+        );
+      }
+      return Object.freeze({ revokedSessionIds });
+    },
+
+    rotateSignInKey: accountChanges.rotateSignInKey,
+    changeEmail: accountChanges.changeEmail,
+    enrollRecoveryKey: accountChanges.enrollRecoveryKey,
+    removeRecoveryKey: accountChanges.removeRecoveryKey,
+    recoveryStatus: accountChanges.recoveryStatus,
+    beginRecovery: accountChanges.beginRecovery,
+    authenticateRecovery: accountChanges.authenticateRecovery,
+    completeRecovery: accountChanges.completeRecovery,
+    listSecurityEvents: accountChanges.listSecurityEvents,
+    revokeRecoveryKeys: accountChanges.revokeRecoveryKeys,
+
     async getAccount(accountId: string): Promise<IdentityAccount> {
       return loadAccount(accountId);
+    },
+
+    async getWalletVault(accountId, context) {
+      const id = assertUuid(accountId, "account-not-found");
+      await enforceRateLimit(requireRule("walletRead"), [rateLimitIpHash(context), id], context);
+      await enforceRateLimit(requireRule("walletIp"), [rateLimitIpHash(context)], context);
+      return accountWallets.getVault(id);
+    },
+
+    async updateWalletVault(token, vault, expectedRevision, context) {
+      await service.authenticate(token, context);
+      return accountWallets.updateVault(token, vault, expectedRevision, requestNow(context));
     },
 
     async updateAccount(
@@ -1443,7 +1719,12 @@ export function createIdentityService(
       sessions: number;
       emailVerifications: number;
       rateLimits: number;
+      recoveryTokens: number;
+      auditEvents: number;
     }> {
+      // Dead sessions are deleted only if no other statement holds their row
+      // lock (SKIP LOCKED): maintenance never waits on a revocation, so it can
+      // never close a deadlock with one. A skipped row goes on the next run.
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
               expired_challenges AS (
@@ -1454,10 +1735,15 @@ export function createIdentityService(
               ),
               dead_sessions AS (
                 DELETE FROM ${p}_sessions
-                 WHERE (expires_at <= (SELECT at FROM clock) OR revoked_at IS NOT NULL)
-                   AND account_id IN (
-                     SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
-                   )
+                 WHERE id IN (
+                   SELECT s.id
+                     FROM ${p}_sessions s
+                    WHERE (s.expires_at <= (SELECT at FROM clock) OR s.revoked_at IS NOT NULL)
+                      AND s.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF s SKIP LOCKED
+                 )
                  RETURNING 1
               ),
               expired_verifications AS (
@@ -1470,12 +1756,48 @@ export function createIdentityService(
                 DELETE FROM ${p}_rate_limits
                  WHERE updated_at <= (SELECT at FROM clock) - (interval '1 second' * $3::double precision)
                  RETURNING 1
+              ),
+              -- A recovery token row is kept one day past its expiry, then
+              -- deleted, unless another statement holds it locked.
+              expired_recoveries AS (
+                DELETE FROM ${p}_account_recoveries
+                 WHERE id IN (
+                   SELECT r.id
+                     FROM ${p}_account_recoveries r
+                    WHERE r.expires_at <= (SELECT at FROM clock) - interval '1 day'
+                      AND r.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF r SKIP LOCKED
+                 )
+                 RETURNING 1
+              ),
+              -- Only with auditRetentionDays: this service's account and
+              -- session events older than it. A row whose account was
+              -- deleted (account_id SET NULL) names no service profile, so no
+              -- service prunes it; the operator deletes it with the account.
+              expired_audit AS (
+                DELETE FROM ${p}_audit_events e
+                 WHERE $4::integer IS NOT NULL
+                   AND e.created_at <= (SELECT at FROM clock) - (interval '1 day' * $4::integer)
+                   AND (e.action LIKE 'account.%' OR e.action LIKE 'session.%')
+                   AND e.account_id IN (
+                     SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                   )
+                 RETURNING 1
               )
          SELECT (SELECT count(*) FROM expired_challenges)::int AS challenges,
                 (SELECT count(*) FROM dead_sessions)::int AS sessions,
                 (SELECT count(*) FROM expired_verifications)::int AS email_verifications,
-                (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits`,
-        [requestNow(context), serviceProfileId, RATE_LIMIT_RETENTION_SECONDS],
+                (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits,
+                (SELECT count(*) FROM expired_recoveries)::int AS recovery_tokens,
+                (SELECT count(*) FROM expired_audit)::int AS audit_events`,
+        [
+          requestNow(context),
+          serviceProfileId,
+          RATE_LIMIT_RETENTION_SECONDS,
+          resolved.auditRetentionDays,
+        ],
       );
       const row = requireSingleRow(
         rows,
@@ -1486,7 +1808,10 @@ export function createIdentityService(
         sessions: integerColumn(row, "sessions"),
         emailVerifications: integerColumn(row, "email_verifications"),
         rateLimits: integerColumn(row, "rate_limits"),
+        recoveryTokens: integerColumn(row, "recovery_tokens"),
+        auditEvents: integerColumn(row, "audit_events"),
       };
     },
   });
+  return service;
 }

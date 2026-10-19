@@ -217,6 +217,10 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL with th
     // `tablePrefix` is generated above and matches the migration allowlist.
     await driverHandle.driver.query(
       `DROP TABLE IF EXISTS
+         ${tablePrefix}_account_recoveries,
+         ${tablePrefix}_account_recovery_keys,
+         ${tablePrefix}_wallet_setups,
+         ${tablePrefix}_wallet_policy,
          ${tablePrefix}_audit_events,
          ${tablePrefix}_rate_limits,
          ${tablePrefix}_email_verifications,
@@ -237,9 +241,10 @@ describe.skipIf(driverHandle === null)("identity service over PostgreSQL with th
 
   it("migrates and publishes the sign-in profile", async () => {
     const { service, appliedVersions } = h();
-    expect([...appliedVersions]).toEqual([1, 2, 3, 4]);
+    expect([...appliedVersions]).toEqual([1, 2, 3, 4, 5, 6, 7]);
     const published = await service.derivationProfile();
     expect(published).toMatchObject({
+      walletMode: "service-deterministic",
       serviceProfileId,
       profileId: "web2ish-sign-in-ed25519-external-salt-v1",
       codecId: "web2ish-sign-in-ed25519-hex-v1",

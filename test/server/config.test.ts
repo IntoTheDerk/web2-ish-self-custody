@@ -49,6 +49,11 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationTtlSeconds: 900,
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
+      walletMode: "service-deterministic",
+      storeSessionClientHashes: true,
+      accountSecurity: { signInKeyRotation: false, recoveryKeys: false },
+      onSecurityEvent: null,
+      auditRetentionDays: null,
     });
     // The very object, not a copy: the codec identity has to survive resolution
     // or the service would encode addresses with something else.
@@ -76,6 +81,11 @@ describe("resolveIdentityServiceConfig defaults", () => {
       emailVerificationTtlSeconds: 900,
       emailVerificationMaxAttempts: 5,
       requireVerifiedEmail: false,
+      walletMode: "service-deterministic",
+      storeSessionClientHashes: true,
+      accountSecurity: { signInKeyRotation: false, recoveryKeys: false },
+      onSecurityEvent: null,
+      auditRetentionDays: null,
     });
     expect(Object.isFrozen(identityServiceDefaults)).toBe(true);
   });
@@ -106,7 +116,45 @@ describe("resolveIdentityServiceConfig defaults", () => {
   });
 });
 
+describe("resolveIdentityServiceConfig storeSessionClientHashes", () => {
+  it("defaults to true, so existing deployments keep storing the hashes", () => {
+    expect(resolveIdentityServiceConfig(minimal).storeSessionClientHashes).toBe(true);
+    // An explicit undefined, as a spread of an optional value delivers it.
+    const unset = { ...minimal, storeSessionClientHashes: undefined } as unknown as IdentityServiceConfig;
+    expect(resolveIdentityServiceConfig(unset).storeSessionClientHashes).toBe(true);
+  });
+
+  it("keeps an explicit true or false", () => {
+    for (const storeSessionClientHashes of [true, false]) {
+      expect(
+        resolveIdentityServiceConfig(withOverride({ storeSessionClientHashes }))
+          .storeSessionClientHashes,
+      ).toBe(storeSessionClientHashes);
+    }
+  });
+
+  it("refuses a non-boolean rather than reading it as truthy", () => {
+    // A string "false" would otherwise keep the hashes a deployment opted out of.
+    for (const value of ["false", "true", 0, 1, null, {}]) {
+      expectIdentityError(
+        () =>
+          resolveIdentityServiceConfig(
+            withOverride({ storeSessionClientHashes: value as never }),
+          ),
+        "invalid-service-profile",
+      );
+    }
+  });
+});
+
 describe("resolveIdentityServiceConfig profile validation", () => {
+  it("accepts both new modes and refuses unknown modes", () => {
+    for (const walletMode of ["per-account-deterministic", "random-vault"] as const) {
+      expect(resolveIdentityServiceConfig(withOverride({ walletMode })).walletMode).toBe(walletMode);
+    }
+    expectIdentityError(() => resolveIdentityServiceConfig(withOverride({ walletMode: "typo" as never })), "invalid-service-profile");
+  });
+
   it("accepts any external-salt profile, from any chain", () => {
     for (const profile of [kalvoraEd25519ExternalSalt, krypticExternalSalt]) {
       expect(resolveIdentityServiceConfig(withOverride({ profile })).profile).toBe(profile);
@@ -205,5 +253,73 @@ describe("resolveIdentityServiceConfig range validation", () => {
     expect(lower.challengeTtlSeconds).toBe(1);
     expect(lower.emailVerificationTtlSeconds).toBe(1);
     expect(lower.emailVerificationMaxAttempts).toBe(1);
+  });
+});
+
+describe("resolveIdentityServiceConfig account security options", () => {
+  it("defaults both opt-ins to false, no hook and no audit retention", () => {
+    const resolved = resolveIdentityServiceConfig(minimal);
+    expect(resolved.accountSecurity).toEqual({ signInKeyRotation: false, recoveryKeys: false });
+    expect(Object.isFrozen(resolved.accountSecurity)).toBe(true);
+    expect(resolved.onSecurityEvent).toBeNull();
+    expect(resolved.auditRetentionDays).toBeNull();
+  });
+
+  it("keeps each opt-in independently, and an empty object is both off", () => {
+    for (const signInKeyRotation of [true, false]) {
+      for (const recoveryKeys of [true, false]) {
+        expect(
+          resolveIdentityServiceConfig(withOverride({ accountSecurity: { signInKeyRotation, recoveryKeys } }))
+            .accountSecurity,
+        ).toEqual({ signInKeyRotation, recoveryKeys });
+      }
+    }
+    expect(resolveIdentityServiceConfig(withOverride({ accountSecurity: {} })).accountSecurity).toEqual({
+      signInKeyRotation: false,
+      recoveryKeys: false,
+    });
+  });
+
+  it("refuses a non-object, a non-boolean opt-in and a misspelt key", () => {
+    for (const accountSecurity of [true, "on", null, [], { signInKeyRotation: "true" }, { recoveryKeys: 1 },
+      { walletRotation: true }, { signInKeyRotation: true, recovery: true }]) {
+      expectIdentityError(
+        () => resolveIdentityServiceConfig({ ...minimal, accountSecurity } as unknown as IdentityServiceConfig),
+        "invalid-service-profile",
+      );
+    }
+  });
+
+  it("takes a function hook and refuses anything else", () => {
+    const hook = (): void => undefined;
+    expect(resolveIdentityServiceConfig(withOverride({ onSecurityEvent: hook })).onSecurityEvent).toBe(hook);
+    for (const onSecurityEvent of ["https://hook.example", {}, 1]) {
+      expectIdentityError(
+        () => resolveIdentityServiceConfig({ ...minimal, onSecurityEvent } as unknown as IdentityServiceConfig),
+        "invalid-service-profile",
+      );
+    }
+  });
+
+  it("bounds auditRetentionDays to an integer from 1 to 36,500", () => {
+    expect(resolveIdentityServiceConfig(withOverride({ auditRetentionDays: 395 })).auditRetentionDays).toBe(395);
+    expect(resolveIdentityServiceConfig(withOverride({ auditRetentionDays: 1 })).auditRetentionDays).toBe(1);
+    expect(resolveIdentityServiceConfig(withOverride({ auditRetentionDays: 36_500 })).auditRetentionDays).toBe(36_500);
+    for (const auditRetentionDays of [0, -1, 1.5, 36_501, "395", Number.NaN]) {
+      expectIdentityError(
+        () => resolveIdentityServiceConfig({ ...minimal, auditRetentionDays } as unknown as IdentityServiceConfig),
+        "invalid-service-profile",
+      );
+    }
+  });
+
+  it("resolves a resolved config to an equal one", () => {
+    const hook = (): void => undefined;
+    const resolved = resolveIdentityServiceConfig(
+      withOverride({ accountSecurity: { recoveryKeys: true }, onSecurityEvent: hook, auditRetentionDays: 30 }),
+    );
+    expect(resolveIdentityServiceConfig(resolved)).toEqual(resolved);
+    const unset = resolveIdentityServiceConfig(minimal);
+    expect(resolveIdentityServiceConfig(unset)).toEqual(unset);
   });
 });

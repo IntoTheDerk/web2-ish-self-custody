@@ -138,3 +138,25 @@ describe("the identity service under the sign-in profile", () => {
     );
   });
 });
+
+describe("the sign-in profile across wallet modes", () => {
+  const base = {
+    serviceProfileId: "example-account-v1",
+    profile: signInEd25519ExternalSalt,
+    applicationId: vector.applicationId,
+    networkId: vector.networkId,
+  };
+
+  it("is served in both deterministic modes", () => {
+    for (const walletMode of ["service-deterministic", "per-account-deterministic"] as const) {
+      expect(resolveIdentityServiceConfig({ ...base, walletMode }).walletMode).toBe(walletMode);
+    }
+  });
+
+  it("is refused in random-vault mode, which runs no password derivation", () => {
+    expectIdentityError(
+      () => resolveIdentityServiceConfig({ ...base, walletMode: "random-vault" }),
+      "invalid-service-profile",
+    );
+  });
+});

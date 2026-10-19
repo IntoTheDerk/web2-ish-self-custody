@@ -38,6 +38,7 @@
     "dist",
     "docs",
     "scripts/requirements-vector-verifier-ci.txt",
+    "scripts/verify_account_change_vector.py",
     "scripts/verify_kalvora_external_salt_vector.py",
     "vectors",
     "README.md",
@@ -50,7 +51,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:server:integration": "vitest run test/server/service.integration.test.ts",
-    "verify:vectors:python": "python3 scripts/verify_kalvora_external_salt_vector.py",
+    "verify:vectors:python": "python3 scripts/verify_kalvora_external_salt_vector.py && python3 scripts/verify_account_change_vector.py",
     "prepare": "npm run build",
     "prepack": "npm run verify",
     "verify": "npm run typecheck && npm test && npm run verify:vectors:python && npm run build",
@@ -75,7 +76,7 @@
     "bs58": "6.0.0"
   },
   "peerDependencies": {
-    "kalvora.js": "0.0.1-alpha.1"
+    "kalvora.js": "0.0.1-alpha.1 || 0.0.1-alpha.2"
   },
   "peerDependenciesMeta": {
     "kalvora.js": {
@@ -84,7 +85,7 @@
   },
   "devDependencies": {
     "@types/pg": "8.21.0",
-    "kalvora.js": "0.0.1-alpha.1",
+    "kalvora.js": "0.0.1-alpha.2",
     "pg": "8.22.0",
     "typescript": "5.9.3",
     "vitest": "4.1.10"

@@ -4,6 +4,15 @@
 
 The SDK permits a client to recreate a signing identity from credentials without persistent wallet-secret storage. It attempts to keep derived secret material within one short callback scope and to erase SDK-owned buffers afterward.
 
+Alternatively, random-vault mode encrypts a randomly generated seed. See
+[Wallet modes](WALLET_MODES.md) for its storage and access-control requirements.
+In that mode password changes and recovery-code unlocking are vault features.
+In the deterministic modes the identity service offers two opt-in account
+changes, off by default: sign-in-key rotation and recovery keys
+([account changes](#account-changes)). Each rebinds the account to a new key
+and never recovers the old one; a platform that keys other state on the old
+key, such as an on-chain permission, retires it there itself.
+
 ## Fundamental tradeoff
 
 The public key or wallet address is a password-verification oracle. An attacker can derive candidate identities offline until one matches. Scrypt increases the cost of each guess; it does not add entropy to a human password.
@@ -28,11 +37,11 @@ The strength policy therefore belongs to the application at the moment a passwor
 
 ## Failure modes
 
-The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which the application's own account recovery must replace; the SDK has none. A sign-in key holds no funds.
+The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which a rotation (while the old password is known) or a recovery key (afterwards) replaces at the service, if the deployment enables them; neither recovers the old key or anything derived from it. A sign-in key holds no funds.
 
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
 - Lost vault password and lost recovery code: permanent wallet loss.
-- Password or username change: different wallet identity.
+- Password or username change during deterministic derivation: different wallet identity; no automatic account update.
 - Profile/context change: different wallet identity.
 - External salt loss, rotation, or substitution: different wallet identity.
 - Weak password: feasible offline wallet recovery by an attacker.
@@ -67,8 +76,26 @@ The loss and change rows are about a wallet: the key a chain wallet profile deri
 | Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Released sign-in profiles therefore stay exported after they are retired. |
 | Bounded lifetime | `withKalvoraWalletFromMasterSeed` works on its own copy of the master seed and zeroes it, and zeroes the wallet key when its synchronous callback returns or throws. The master seed passed in stays the caller's: an application secret's own array is zeroed by `withDerivedWallet` when its callback returns, and any copy the caller made is the caller's to zero. |
 
+## Account changes
+
+`rotateSignInKey`, `changeEmail`, `enrollRecoveryKey`, `removeRecoveryKey`,
+`beginRecovery` and `completeRecovery` change what signs in to an account, so
+each is authorized by signatures over the
+[account-change message](PROTOCOL.md#part-4--the-account-change-message).
+
+| property | consequence |
+| --- | --- |
+| Strict Ed25519 | Every account-change signature is checked against RFC 8032's strict rules (S < L, canonical A and R, A not of small order) before noble's `zip215: false` verification. The permissive rule, and some OpenSSL releases (3.5.4, as bundled with `cryptography` 46.0.3), accept a small-order key with R = identity and S = 0 for every message; no submitted key of small order or in a non-canonical encoding is ever enrolled, at registration either. |
+| Proof of the password, not a session | A stolen session token alone cannot rotate the key, make a signed email change (`changeEmail`), or add or remove a recovery key: each needs a fresh signature by the enrolled key over a single-use challenge. `updateAccount` and the router's `PATCH /accounts/me` still change the email with a session alone and report nothing to `onSecurityEvent`; a host that treats the email as a security channel refuses `email` there and changes it only through `changeEmail`. A session can still list and revoke sessions. |
+| One statement | Each change re-checks its session or recovery token, the account's `active` status and the enrolled key under row locks, and revokes sessions in the same statement. A signed-in change whose enrolled key a rotation or a recovery moved before its statement locked the key is refused (`stale-key`), and of two completions of one recovery the second gets the uniform `invalid-signature`. Other concurrent changes apply one after the other ([details](SERVER_API.md#statements-and-lock-order)). |
+| Other sessions end | A rotation revokes every other session of the account and a recovery revokes every session. A login that verified the old key and whose final statement runs while the rotation's does can still keep its session; the sessions list shows it and revoking other sessions ends it. |
+| A recovery key is a full credential | With the username, it takes over the account login without the password. It is single use (`used` at completion), a new enrollment retires the previous one, and the operator can revoke it (`revokeRecoveryKeys`). Its secret never reaches the service; the application must make it high-entropy, because its public key is stored. |
+| Recovery is not key recovery | A completed recovery binds a new key. Under a chain wallet profile the old wallet is not recovered; under the sign-in profile a wallet derived from the old password is not either. Data an application sealed under the old password needs its own recovery path. |
+| The server is trusted for account control | An operator with database write access can bind any key or recovery key, as it always could bind any enrolled key; audit rows and the alerts in [SERVER_API.md](SERVER_API.md#what-an-operator-with-database-access-can-and-cannot-do) make that visible, not impossible. |
+| Uniform refusals | Every recovery failure an unauthenticated caller can cause is one `invalid-signature`; no code is added to `enumerationSensitiveCodes`. |
+
 ## Server boundary
 
-A server may store public identity, profile ID, public salt, session records, and one-use challenges. It does not need a seed, private key, wallet password, application secret, or encrypted vault. Under the sign-in profile the public identity it stores is the sign-in key's, and it needs nothing about the user's wallet.
+A deterministic service (`service-deterministic` or `per-account-deterministic`) stores public identity, profile ID, the public salt (the service's, or one per account), session records, and one-use challenges, and, with recovery keys enabled, recovery public keys and SHA-256 digests of recovery tokens. It does not need a seed, private key, wallet password, recovery code, application secret, or encrypted vault. Random-vault mode additionally stores encrypted vaults, retrievable only after platform authorization; a stolen vault permits offline password guessing. In no mode does the SDK send a plaintext seed, private key, wallet password, recovery code, or application secret to the server. Under the sign-in profile the public identity it stores is the sign-in key's, and it needs nothing about the user's wallet. The sign-in profile is served only in the deterministic modes; `random-vault` mode refuses it.
 
 A server pepper used to generate an external salt is not wallet custody, but it introduces server dependency and does not stop the server from testing password guesses against a known public identity.

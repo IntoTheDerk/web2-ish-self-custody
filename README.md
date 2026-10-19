@@ -1,8 +1,8 @@
 # web2-ish-self-custody
 
 **Sign in with a username and password. Hold your own keys.**
-Deterministic Ed25519 wallets derived in the browser, plus a portable identity
-service that never holds a secret.
+Ed25519 signing identities created in the browser, with a choice of per-account
+deterministic keys or random keys protected by an encrypted vault.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#versioning-and-releases)
@@ -10,7 +10,7 @@ service that never holds a secret.
 
 > **Security warning:** anyone who knows a public identity and its public salt can test password guesses offline. Deterministic password-derived custody is not equivalent to a randomly generated wallet seed. Use only high-entropy, password-manager-generated credentials and complete an independent security review before funded use.
 
-> **Alpha pre-release (`0.10.0-alpha.x`).** The bundled Kalvora chain is provided by the kalvora.js SDK, pinned at `0.0.1-alpha.1`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
+> **Alpha pre-release (`0.10.0-alpha.x`).** The bundled Kalvora chain is provided by the kalvora.js SDK; supported versions are exactly `0.0.1-alpha.1` and `0.0.1-alpha.2`, with development tests pinned to `0.0.1-alpha.2`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
 
 ## Contents
 
@@ -19,6 +19,7 @@ service that never holds a secret.
 - [The model](#the-model)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Account wallet modes](docs/WALLET_MODES.md)
 - [Wallet vault and recovery code](#wallet-vault-and-recovery-code)
 - [Random-seed identity](#random-seed-identity)
 - [Identity server](#identity-server)
@@ -39,20 +40,31 @@ People know how to sign in with a username and a password. Self-custody usually
 asks them to do something else entirely: write down a seed phrase, install an
 extension, or trust a custodian with their keys.
 
-This package keeps the web2 experience and drops the custodian. The same
-username and password recreate the same Ed25519 signing identity on any device,
-inside the browser, every time:
+Choose `walletMode: "per-account-deterministic"` to recreate a signing identity
+from credentials and a saved account salt, or `"random-vault"` to encrypt a random
+key and preserve it through password changes. These identities can be used
+without holding funds; the platform handles fee sponsorship separately.
+A vault keeps its key through a password change. With deterministic keys a new
+password is a new key, and the identity service can rebind the account to it
+(opt-in sign-in-key rotation) or recover the account with a recovery key the
+user enrolled (opt-in recovery keys). See the
+[account wallet modes guide](docs/WALLET_MODES.md).
 
-- **No stored secrets.** There is no seed, private key, password, password hash,
-  or encrypted key blob on any server. The wallet exists only while a callback
-  runs.
-- **No custodian.** The identity service holds only public material: a public
-  salt, public keys, addresses, and session hashes. A full database dump does
-  not yield a wallet.
+- **No stored plaintext secrets.** Passwords, plaintext seeds, private keys,
+  recovery codes and application secrets stay on the client; no server holds a
+  plaintext seed or private key, a password, or a password hash. The wallet
+  exists only while a callback runs.
+- **No custodian.** The identity service holds public material: a public salt
+  (one per service, or one per account), public keys, addresses, and session
+  hashes. `random-vault` mode also stores each account's encrypted vault, which
+  the service cannot open. A full database dump does not yield a wallet, but it
+  does allow offline password guessing against public keys or vaults, so every
+  mode depends on strong passwords.
 - **A sign-in key apart from the wallet, when you need one.** Under the
   chain-neutral [sign-in profile](#a-sign-in-key-separate-from-the-wallet) the
   key the service enrolls is not a wallet, and the wallet is an application
-  secret of the same password entry that the service never sees.
+  secret of the same password entry that the service never sees. It is served
+  in the deterministic wallet modes.
 - **One implementation.** Products that adopt it share one versioned,
   vector-tested implementation instead of each maintaining its own
   cryptographic copy.
@@ -174,14 +186,14 @@ package builds itself through its `prepare` script during the Git install.
 Node 22 or later is required.
 
 To use the Kalvora chain, also install
-[kalvora.js](https://github.com/IntoTheDerk/kalvora.js) at the exact version in
-this package's `peerDependencies`, currently `0.0.1-alpha.1`:
+[kalvora.js](https://github.com/IntoTheDerk/kalvora.js), pinned to either supported
+version: `0.0.1-alpha.1` or `0.0.1-alpha.2`. Development tests use `0.0.1-alpha.2`:
 
 ```json
 {
   "dependencies": {
     "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>",
-    "kalvora.js": "0.0.1-alpha.1"
+    "kalvora.js": "0.0.1-alpha.2"
   }
 }
 ```
@@ -325,7 +337,10 @@ to the scoped signer.
 ## Wallet vault and recovery code
 
 Deterministic derivation alone cannot survive a password change: a new password
-is a new wallet, and a forgotten password is a lost one. A wallet vault
+is a new wallet, and a forgotten password is a lost one. (The identity service's
+opt-in [account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)
+can rebind an account to the new password's key, or recover the account with a
+recovery key, but the old key stays lost.) A wallet vault
 (`src/vault.ts`, since v0.5.0) decouples the two by storing the seed encrypted
 under two independent wrappers.
 
@@ -414,8 +429,9 @@ Limits worth stating plainly:
   deterministic wallet. A strong vault password still matters.
 - The vault header (username, address, public key, application, network) is
   readable by whoever stores it. Only the seed and data key are encrypted.
-- The package does not persist, transmit, or back up vaults. Storage, access
-  control, and delivery of the recovery code to the user are the host's job.
+- Client helpers return vaults without persisting or transmitting them. The
+  optional identity service stores encrypted vaults in `random-vault` mode;
+  the host supplies access authorization, backups, and recovery-code delivery.
 
 See [Encrypted-vault integrations](docs/INTEGRATION.md#encrypted-vault-integrations).
 
@@ -453,18 +469,26 @@ than a convention hardcoded in the server.
 
 | the server holds | the server never holds |
 | --- | --- |
-| the per-service 32-byte public salt and the pinned scrypt parameters | a password, or any hash or transform of one other than the enrolled public key |
-| normalized usernames, display names, optional emails and verification state | a seed, private key, secret scalar, or application secret |
-| the enrolled key's public material: address, encoded public key, codec id, fingerprint (a wallet only under a chain wallet profile; a sign-in key under the sign-in profile) | a ciphertext, encrypted vault, or key-escrow blob |
+| the per-service or per-account 32-byte public salt and the pinned scrypt parameters | a password or recovery code, or any hash or transform of a password other than the enrolled public key and, in `random-vault` mode, the vault's password wrapper |
+| normalized usernames, display names, optional emails and verification state | a plaintext seed, private key, secret scalar, or application secret |
+| the enrolled key's public material: address, encoded public key, codec id, fingerprint (a wallet only under a chain wallet profile; a sign-in key under the sign-in profile) | in the deterministic modes, any ciphertext, encrypted vault, or key-escrow blob |
+| the encrypted vault and its revision, only in `random-vault` mode | |
 | single-use challenge nonces, SHA-256 hashes of session tokens and email codes, append-only audit rows | |
+| per session: hashes of the user agent and of the caller's IP (unless `storeSessionClientHashes` is `false`) and an optional coarse client label | |
+| rate-limit buckets derived from the caller's IP hash, whatever `storeSessionClientHashes` says, until `pruneExpired` removes them 24 hours after their last update | |
+| with recovery keys enabled, recovery public keys and SHA-256 digests of recovery tokens | |
 
-There is no password column and no recovery table. Under a chain wallet
-profile a stolen database gives an attacker exactly what any holder of a public
-address already has. Under the sign-in profile it also gives an offline
-password oracle, the enrolled sign-in public key, for every account, including
-accounts whose wallet address was never published. The work per guess is the
-same scrypt cost either way; see
+There is no password column, and the recovery tables hold public keys and
+token digests only. In the deterministic modes,
+under a chain wallet profile a stolen database gives an attacker exactly what
+any holder of a public address already has. Under the sign-in profile it also
+gives an offline password oracle, the enrolled sign-in public key, for every
+account, including accounts whose wallet address was never published. In
+`random-vault` mode the stored vault is that oracle for every account. The work
+per guess is the same scrypt cost in every case; see
 [the server API](docs/SERVER_API.md#why-a-stolen-database-yields-no-wallet).
+Configure vault download authorization and follow
+[the wallet modes guide](docs/WALLET_MODES.md).
 
 ### The challenge flow
 
@@ -559,7 +583,15 @@ successful run against a new database is the moment that service's public salt
 comes into existence, and the schema then refuses to change it: the database is
 the wallet namespace, so back it up. Schedule `service.pruneExpired()` for
 maintenance. Optional config includes `tablePrefix`, session, challenge, and
-email-verification TTLs, and `requireVerifiedEmail`.
+email-verification TTLs, `requireVerifiedEmail`, and `storeSessionClientHashes`.
+A sessions list with signing out of one or every other session is opt-in: the
+router's `accountSecurityRoutes` option mounts it, and its `clientLabel` hook
+stores a coarse label per session (see
+[Session management](docs/SERVER_API.md#session-management-opt-in)). Sign-in-key
+rotation, the signed email change, recovery keys and the security-event list are
+service methods a host routes itself; `accountSecurity` turns on rotation and
+recovery keys (see
+[Account changes](docs/SERVER_API.md#account-changes-and-recovery-keys-opt-in)).
 
 ### Email verification delivery
 
@@ -617,6 +649,8 @@ derives its own salt has nothing for a server to own, and the service rejects it
 at construction with `invalid-service-profile`. Both bundled profiles qualify:
 the Kalvora profile, whose enrolled key is the wallet, and the sign-in profile,
 whose enrolled key is not, and which refuses a Kalvora key at registration.
+`random-vault` mode serves chain wallet profiles only and refuses the sign-in
+profile.
 
 ## Adding a chain
 
@@ -725,11 +759,16 @@ before defining either.
 | --- | --- | --- |
 | `withDerivedWallet(credentials, useWallet, options?)` | function | derives a wallet, scopes it to a synchronous callback, zeroes the key on exit; `options.applicationSecrets` adds [application secrets](#application-secrets) as the callback's second parameter |
 | `derivePublicIdentity(credentials)` | function | the same derivation, returning only public identity material |
+| `withAccountWallet(setup, profile, password, useWallet, options?)` | function | reconstructs a deterministic account wallet from its saved setup; `options.applicationSecrets` is passed to `withDerivedWallet` |
+| `createRandomAccountWallet(setup, profile, password)` | function | generates a random wallet and returns its encrypted vault and recovery code; refuses the sign-in profile |
 | `defineDerivationProfile(profile)` | function | validates and freezes a profile |
 | `defineIdentityCodec(codec)` | function | validates and freezes a codec |
 | `assertCodecRoundTrip(codec, publicKeyBytes)` | function | throws unless `decodePublicKey` inverts `encodePublicKey` |
 | `deriveIdentityFromSeed(seed, codec)` | function | public identity for an existing 32-byte Ed25519 seed |
 | `normalizeUsername(username)` | function | the exact username normalization derivation applies |
+| `buildAccountChangeMessage(input)` | function | the ten-line [account-change message](docs/PROTOCOL.md#part-4--the-account-change-message) a client signs to change its account |
+| `normalizeEmail(address)` | function | the identity service's email normalization, for an `email:` subject |
+| `ACCOUNT_CHANGE_DOMAIN` / `accountChangeActions` | constant / list | `"web2-ish-self-custody account change v1"` and this release's six actions |
 | `signInEd25519ExternalSalt` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v1`: service-salted sign-in key, not a wallet ([sign-in profile](#a-sign-in-key-separate-from-the-wallet)) |
 | `signInEd25519Codec` | `IdentityCodec` | `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits, decoded strictly |
 | `signInHkdfEd25519` | `KeyDerivation` | `hkdf-sha256-sign-in-key-v1`: the sign-in profile's HKDF-SHA256 step |
@@ -741,7 +780,7 @@ before defining either.
 | `generateRecoveryCode` / `normalizeRecoveryCode` | functions | vault recovery codes |
 | `WALLET_VAULT_FORMAT` | constant | `"web2-ish-self-custody-wallet-vault-v1"` |
 
-Exported types: `CreateWalletVaultOptions`, `DerivationContext`,
+Exported types: `AccountChangeAction`, `AccountChangeMessageInput`, `AccountWalletMode`, `AccountWalletSetup`, `CreateWalletVaultOptions`, `DerivationContext`,
 `DerivationCredentials`, `DerivationProfile`, `DerivedIdentity`,
 `DerivedWallet`, `IdentityCodec`, `KeyDerivation`, `ProfileDomains`,
 `SaltPolicy`, `SealedBox`, `SeedIdentity`, and `WalletVault`.
@@ -765,7 +804,7 @@ There is no private-key export anywhere in the package.
 | group | exports |
 | --- | --- |
 | service | `createIdentityService`, `createNeonIdentityService`, `createPgIdentityService` |
-| transport | `createIdentityRouter`, `jsonResponse`, `nodeRequestListener` |
+| transport | `createIdentityRouter`, `createSessionResponder`, `jsonResponse`, `nodeRequestListener` |
 | SQL drivers | `neonDriver`, `pgDriver` |
 | challenges | `CHALLENGE_DOMAIN`, `buildChallengeMessage`, `canonicalWalletIdentity`, `verifyChallengeSignature` |
 | email delivery | `createEmailSender`, `createResendEmailSender`, `createPostmarkEmailSender`, `createSendGridEmailSender`, `emailProviders`, `deliverEmailVerification`, `assertEmailVerificationDelivery`, `renderVerificationEmail`, `resolveVerificationEmailTheme`, `formatVerificationCode`, `parseMailbox`, `escapeHtml`, `EmailDeliveryError` |
@@ -812,6 +851,14 @@ their own profile.
 - **A sign-in key is still an oracle.** Under the sign-in profile the service
   holds no wallet, but the enrolled sign-in public key tests password guesses
   just as a wallet address does, and a correct guess gives the wallet too.
+- **Account changes need the password, not a session.** Sign-in-key rotation,
+  the signed email change (`changeEmail`) and recovery-key changes each need a
+  fresh, strictly verified signature by the enrolled key. `updateAccount` and
+  `PATCH /accounts/me` still change the email with a session alone and report
+  nothing to `onSecurityEvent`, so a host that treats the email as a security
+  channel refuses `email` there and changes it only through `changeEmail`. A
+  recovery key is a full account credential, single use, and the service holds
+  only its public half.
 - **Pin the profile in source.** A client that accepts a profile id, codec id,
   or KDF parameters from a server has handed that server a downgrade lever.
 - **Isolate derivation.** Run it in a fresh dedicated worker, one derivation at
@@ -832,12 +879,15 @@ and failure modes.
 
 These describe the client-side entry points (derivation and the wallet vault).
 The server module is the one part of this package that holds state, and it
-holds only public identity material.
+holds public identity material and, in vault mode, encrypted vaults.
 
 - Recover a forgotten password. A deterministic wallet is a function of its
   password; the only recovery path is the recovery code of a wallet vault
   created *before* the password was lost.
 - Recover a vault whose password and recovery code are both lost.
+- Recover a deterministic key. The identity service's opt-in sign-in-key
+  rotation and recovery keys rebind an account to a new key; nothing recovers
+  the old one or what was derived from it.
 - Preserve a derived wallet when the username, password, context, salt, or
   profile changes. (A vault preserves the seed across password changes, but
   re-deriving from new credentials still yields a different wallet.)

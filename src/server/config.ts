@@ -1,9 +1,11 @@
 import { assertCodecRoundTrip } from "../codec.js";
 import type { DerivationProfile } from "../profile.js";
+import { signInEd25519Codec } from "../signIn.js";
 import { IdentityError } from "./errors.js";
 import type {
   IdentityServiceConfig,
   ResolvedIdentityServiceConfig,
+  SecurityEventHook,
 } from "./types.js";
 
 const defaults = Object.freeze({
@@ -13,7 +15,15 @@ const defaults = Object.freeze({
   emailVerificationTtlSeconds: 900,
   emailVerificationMaxAttempts: 5,
   requireVerifiedEmail: false,
+  walletMode: "service-deterministic" as const,
+  storeSessionClientHashes: true,
+  accountSecurity: Object.freeze({ signInKeyRotation: false, recoveryKeys: false }),
+  onSecurityEvent: null,
+  auditRetentionDays: null,
 });
+
+/** 100 years: a bound that refuses a typo without limiting any real policy. */
+const MAX_AUDIT_RETENTION_DAYS = 36_500;
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
   if (!Number.isInteger(value) || value <= 0 || value > max) {
@@ -75,13 +85,97 @@ function assertServiceableProfile(profile: DerivationProfile): DerivationProfile
   return profile;
 }
 
+/**
+ * A misspelt or stringly-typed `"false"` would otherwise read as truthy and
+ * keep storing the hashes a deployment asked to stop storing.
+ */
+function optionalBoolean(value: unknown, field: string, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "boolean") {
+    throw new IdentityError(`${field} must be a boolean.`, "invalid-service-profile");
+  }
+  return value;
+}
+
+/**
+ * Each opt-in is a strict boolean, and an unknown key is refused: a misspelt
+ * opt-in must not leave a deployment believing it turned something on.
+ */
+function resolveAccountSecurity(
+  value: unknown,
+): Readonly<{ signInKeyRotation: boolean; recoveryKeys: boolean }> {
+  if (value === undefined) {
+    return defaults.accountSecurity;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new IdentityError("accountSecurity must be an object.", "invalid-service-profile");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  for (const key of Object.keys(record)) {
+    if (key !== "signInKeyRotation" && key !== "recoveryKeys") {
+      throw new IdentityError(
+        "accountSecurity accepts only signInKeyRotation and recoveryKeys.",
+        "invalid-service-profile",
+      );
+    }
+  }
+  return Object.freeze({
+    signInKeyRotation: optionalBoolean(
+      record["signInKeyRotation"],
+      "accountSecurity.signInKeyRotation",
+      false,
+    ),
+    recoveryKeys: optionalBoolean(record["recoveryKeys"], "accountSecurity.recoveryKeys", false),
+  });
+}
+
+/** `null` is accepted as unset, so a resolved config resolves to itself. */
+function resolveSecurityEventHook(value: unknown): SecurityEventHook | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "function") {
+    throw new IdentityError("onSecurityEvent must be a function.", "invalid-service-profile");
+  }
+  return value as SecurityEventHook;
+}
+
+function resolveAuditRetentionDays(value: unknown): number | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "number") {
+    throw new IdentityError(
+      `auditRetentionDays must be an integer between 1 and ${MAX_AUDIT_RETENTION_DAYS}.`,
+      "invalid-service-profile",
+    );
+  }
+  return assertPositiveInteger(value, "auditRetentionDays", MAX_AUDIT_RETENTION_DAYS);
+}
+
 export function resolveIdentityServiceConfig(
   config: IdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
   assertNoRemovedOptions(config);
+  const walletMode = config.walletMode ?? defaults.walletMode;
+  if (!["service-deterministic", "per-account-deterministic", "random-vault"].includes(walletMode)) {
+    throw new IdentityError("Unknown wallet mode.", "invalid-service-profile");
+  }
+  const profile = assertServiceableProfile(config.profile);
+  // A random-vault key comes from no password derivation, so under the sign-in
+  // profile there would be no application secret and no wallet beside it.
+  if (walletMode === "random-vault" && profile.codec.id === signInEd25519Codec.id) {
+    throw new IdentityError(
+      `Profile "${profile.id}" enrolls a password-derived sign-in key; random-vault mode needs a chain wallet profile.`,
+      "invalid-service-profile",
+    );
+  }
   return Object.freeze({
+    walletMode,
     serviceProfileId: config.serviceProfileId,
-    profile: assertServiceableProfile(config.profile),
+    profile,
     applicationId: config.applicationId,
     networkId: config.networkId,
     tablePrefix: config.tablePrefix ?? defaults.tablePrefix,
@@ -106,6 +200,14 @@ export function resolveIdentityServiceConfig(
       100,
     ),
     requireVerifiedEmail: config.requireVerifiedEmail ?? defaults.requireVerifiedEmail,
+    storeSessionClientHashes: optionalBoolean(
+      config.storeSessionClientHashes,
+      "storeSessionClientHashes",
+      defaults.storeSessionClientHashes,
+    ),
+    accountSecurity: resolveAccountSecurity(config.accountSecurity),
+    onSecurityEvent: resolveSecurityEventHook(config.onSecurityEvent),
+    auditRetentionDays: resolveAuditRetentionDays(config.auditRetentionDays),
   });
 }
 

@@ -70,12 +70,16 @@ database. Its boundary is deliberately narrow.
 
 The server never receives, and therefore cannot store or leak:
 
-- a password, or any hash or transform of one — there is no password column
-- a wallet seed, private key, or secret scalar
-- a ciphertext, encrypted vault, or key-escrow blob of any kind
+- a plaintext wallet password or recovery code
+- a plaintext wallet seed, private key, or secret scalar
 
-There is no recovery path for wallet material, by design. A request to add one
-is a design change, not a bug fix.
+Deterministic modes store public wallet metadata. `random-vault` mode also
+stores encrypted vaults and revisions. Vault downloads require platform
+authorization; clients decrypt locally with a password or recovery code.
+The server cannot reset or recover either secret. In the deterministic modes
+the identity service offers opt-in sign-in-key rotation and recovery keys
+(docs/SERVER_API.md); both rebind an account to a new key, authorized by
+strictly verified signatures, and neither recovers the old key.
 
 The public salt is public but integrity-critical. It is a namespace separator,
 not a secret: publishing it is required for clients to derive at all, and
@@ -100,20 +104,29 @@ browser-facing deployment must set it. See
 
 What database access does yield: normalized usernames, display names, emails
 and their verification state, wallet addresses, public keys, codec ids,
-fingerprints, the public salt, hashed session tokens, hashed IP and user-agent
-values supplied by the caller, and audit rows. An operator with write access can suspend accounts,
+fingerprints, service/account public salts, hashed session tokens; per session,
+hashed IP and user-agent values supplied by the caller (unless
+`storeSessionClientHashes` is `false`) and an optional coarse client label;
+rate-limit buckets derived from the caller's IP hash; and audit rows. An unkeyed
+IP hash, and a bucket derived from one, can be reversed by enumerating the IPv4
+space; a host that wants no reversible IP-derived data at rest should key its
+`hashRequestIp` with a server secret. In `random-vault` mode
+it also yields encrypted vaults and revisions. An operator with write access can suspend accounts,
 delete sessions, and enroll an attacker-controlled public key against an
 existing account — so wallet enrollment records deserve the same monitoring as
 any other privileged write. What that operator cannot do is recover, derive, or
-sign with any user's wallet, because no material capable of producing one is
-present. Their remaining path to a specific wallet is an offline guessing
-attack against a known public identity. Under a chain wallet profile that is
-the same attack any holder of the public address already has. Under the
-sign-in profile the enrolled sign-in public key is an oracle that may not be
-public otherwise, so the database adds one for every account, including
-accounts whose wallet address was never published. Either way the attack is
-bounded by password entropy and the profile's scrypt cost rather than by any
-server-side control.
+sign with any user's key from database access alone: no material that produces
+one without the password is present, and the vaults stored in `random-vault`
+mode are ciphertext that opens only with the password or the recovery code.
+Their remaining path to a specific key is an offline guessing attack. In the
+deterministic modes it runs against a known public identity. Under a chain
+wallet profile that is the same attack any holder of the public address already
+has. Under the sign-in profile the enrolled sign-in public key is an oracle that
+may not be public otherwise, so the database adds one for every account,
+including accounts whose wallet address was never published. In `random-vault`
+mode each stored vault is an oracle as well, at the scrypt cost recorded in it.
+Either way the attack is bounded by password entropy and the profile's scrypt
+cost rather than by any server-side control.
 
 ## Reporting
 

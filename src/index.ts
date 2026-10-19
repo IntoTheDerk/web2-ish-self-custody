@@ -6,9 +6,18 @@
  * `DerivationProfile`s (KDF parameters plus the domain-separation strings that
  * define its transcript). Built-in chains live under `web2-ish-self-custody/chains/*`.
  */
+export {
+  ACCOUNT_CHANGE_DOMAIN,
+  accountChangeActions,
+  buildAccountChangeMessage,
+  normalizeEmail,
+} from "./accountChange.js";
+export type { AccountChangeAction, AccountChangeMessageInput } from "./accountChange.js";
 export { assertCodecRoundTrip, defineIdentityCodec } from "./codec.js";
 export type { IdentityCodec } from "./codec.js";
 export { derivePublicIdentity, withDerivedWallet } from "./derive.js";
+export { createRandomAccountWallet, withAccountWallet } from "./accountWallet.js";
+export type { AccountWalletMode, AccountWalletSetup } from "./accountWallet.js";
 export { DerivationError } from "./errors.js";
 export type { DerivationErrorCode } from "./errors.js";
 export {

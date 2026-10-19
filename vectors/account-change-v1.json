@@ -1,0 +1,172 @@
+{
+  "warning": "TEST-ONLY CREDENTIALS. NEVER USE THESE VALUES FOR A REAL WALLET.",
+  "format": "web2-ish-self-custody account change v1",
+  "signInCredentials": {
+    "profile": "web2ish-sign-in-ed25519-external-salt-v1",
+    "username": "JESSE@example.COM",
+    "normalizedUsername": "jesse@example.com",
+    "applicationId": "example-app",
+    "networkId": "kalvora-mainnet",
+    "saltHex": "c3e4bb3c8b5943b3df405f473743e1534bd95ce1ed460a9efd7299f53e16d42a"
+  },
+  "context": {
+    "serviceProfileId": "example-account-v1",
+    "applicationId": "example-app",
+    "networkId": "kalvora-mainnet",
+    "usernameNormalized": "jesse@example.com",
+    "nonceHex": "61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf",
+    "expiresAt": "2026-10-18T12:05:00.000Z"
+  },
+  "keys": {
+    "current": {
+      "passwordUtf8": "correct horse battery staple lantern orbit",
+      "masterSeedHex": "45e49fb0cffa6af1c7b70497f2a22644470bc8b7923cf7bfeed538f64afd567d",
+      "seedHex": "31ee71687bd9d3b3a892a7c8ffcd3873197c7b10890c5b92f2710fa0a239976d",
+      "publicKeyHex": "8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "principal": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205"
+    },
+    "next": {
+      "passwordUtf8": "second correct horse battery staple lantern orbit",
+      "masterSeedHex": "0723d0a71c93212e33d0c3282ba2897939955271d52e568eefc9c6a485fe07b9",
+      "seedHex": "cf02f403f07f599e5612d803bd604b63d9ccff6594c9626f812d2c880301b203",
+      "publicKeyHex": "8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "principal": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392"
+    },
+    "recovery": {
+      "seedLabel": "fixture-account-change-recovery-key-v1",
+      "seedHex": "55f2740e5fab3f96b852d0e80ee38c96641233ff5ff05dd1758324ba5238d625",
+      "publicKeyHex": "da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "principal": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169"
+    }
+  },
+  "cases": [
+    {
+      "action": "sign-in-key-rotation",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsign-in-key-rotation\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "8fdb0257e7712078fde1cdeb44c243b0596cbe6a39afe68dbe67c31d79ff96ed43113431d73d05b65b16025590f81de6a141acc979a2ff0362d0e100fc61940d"
+        },
+        {
+          "role": "subject",
+          "signer": "next",
+          "signatureHex": "55190b3e32e75e9ce2516eb4341161de11a7d76f965cf329d50f907e9dcf5a872a0b37b6c44c5875188e0f528597494464489ac3311bc4dd2f6a510b15d0d009"
+        }
+      ]
+    },
+    {
+      "action": "email-change",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "email:new.address@example.com",
+      "emailInput": "  New.Address@Example.COM ",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nemail-change\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nemail:new.address@example.com",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "20e336645bf8077c4e931d64460a12c6083c2a22229695c6e8aee5a6fd6e77f71b6fee674ecbf946d4da150a1e3820a3a15573049587db8a7ffd1eb69775fd09"
+        }
+      ]
+    },
+    {
+      "action": "recovery-key-enrollment",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nrecovery-key-enrollment\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nrecovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "7a4c8e67e2cb5e3142e3f81ee2f5d28e15bbbed26af04537fd069962cb09a2e4fdd663eed95346965553e453ef18901d121fcab99e1e593ac07f60e2c0f3160c"
+        },
+        {
+          "role": "subject",
+          "signer": "recovery",
+          "signatureHex": "51675293d2cd6c5701d7a9afbbf3d667bbbf53fc520a7838e43d25ae3152726d734f0ad1f30e89662c314b6df57c56deede587d9ea0ffe03a59bc15ecbab7306"
+        }
+      ]
+    },
+    {
+      "action": "recovery-key-removal",
+      "authorizer": "key:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "subject": "none",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nrecovery-key-removal\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nnone",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "current",
+          "signatureHex": "d3aaeccc0bb024f975984aec9aa3e1d6948982389e4434305187f6038ef916f13681b7ea61d346adf66d1d5a142726d6625363d6b496b7755ed9b24f12a3080a"
+        }
+      ]
+    },
+    {
+      "action": "recovery-begin",
+      "authorizer": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "subject": "none",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nrecovery-begin\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nrecovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169\nnone",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "recovery",
+          "signatureHex": "f1be5ede99e56fa0fce3cb6be3854d4ae8aff15d918fe67f6d4c26547d57629d66afd4e9843a85ecf6559d547ee09054d9402bd1d9a9ac83ecba2cdceddd390a"
+        }
+      ]
+    },
+    {
+      "action": "recovery-reset",
+      "authorizer": "recovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169",
+      "subject": "key:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nrecovery-reset\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nrecovery-key:da10b554be2c6f514667ef2d647c9b473843b1873bd307e588b58aa955e52169\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "signatures": [
+        {
+          "role": "authorizer",
+          "signer": "recovery",
+          "signatureHex": "5e3c8f6d26d8b1fb865c7cd7e8ea1394c6b68fde4c0addd41790faeb7947df8bd8f8f1a6ad3c8f35c87321e930385a860002ddaa7157c3daeb98499976a8ab03"
+        },
+        {
+          "role": "subject",
+          "signer": "next",
+          "signatureHex": "13b5caf96287e46fc3d4d610bc2d1963c0036bba992650a53edcda809d073e6631921a270d1ec940041e5b8be101d72d64a8184cd02c99782458efd88450d60b"
+        }
+      ]
+    }
+  ],
+  "negativeCases": [
+    {
+      "name": "small-order public key, R = identity, S = 0",
+      "reason": "small-order-public-key",
+      "acceptedUnderZip215": true,
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsign-in-key-rotation\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "publicKeyHex": "0100000000000000000000000000000000000000000000000000000000000000",
+      "signatureHex": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "non-canonical public key (y = p + 3)",
+      "reason": "non-canonical-public-key",
+      "acceptedUnderZip215": false,
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsign-in-key-rotation\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "publicKeyHex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "signatureHex": "8fdb0257e7712078fde1cdeb44c243b0596cbe6a39afe68dbe67c31d79ff96ed43113431d73d05b65b16025590f81de6a141acc979a2ff0362d0e100fc61940d"
+    },
+    {
+      "name": "non-canonical R (y = p + 3)",
+      "reason": "non-canonical-r",
+      "acceptedUnderZip215": false,
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsign-in-key-rotation\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "publicKeyHex": "8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "signatureHex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f43113431d73d05b65b16025590f81de6a141acc979a2ff0362d0e100fc61940d"
+    },
+    {
+      "name": "S + L: the current key's rotation signature with its scalar malleated",
+      "reason": "s-not-below-l",
+      "acceptedUnderZip215": false,
+      "messageUtf8": "web2-ish-self-custody account change v1\nexample-account-v1\nexample-app\nkalvora-mainnet\nsign-in-key-rotation\njesse@example.com\n61d7b77bc2cd848d417503ee1dc4196d1cf59cda7a1e651f16c86ad8cfc5d5cf\n2026-10-18T12:05:00.000Z\nkey:S_8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205\nkey:S_8d519c85b4503a0c1e84ddfb87f0e2f1041a4212ddfa6c11cd345c6816dbd392",
+      "publicKeyHex": "8b3ba319c0d2042d9d6d1d7c7530c9cd9200070ded96717dc3f8337c78bd2205",
+      "signatureHex": "8fdb0257e7712078fde1cdeb44c243b0596cbe6a39afe68dbe67c31d79ff96ed30e5298ef1a0170e32b3f9f76ef2fcfaa141acc979a2ff0362d0e100fc61941d"
+    }
+  ]
+}

@@ -13,6 +13,10 @@ npm run verify:ci   # every CI gate that can run locally
 
 ## Workflow
 
+The steps below describe the `main` workflow. For development consolidation,
+feature PRs target `dev` and require the same CI and review checks. Promote
+reviewed `dev` changes to `main` through a separate PR; releases remain on `main`.
+
 1. **Branch from `main`.** Collaborators with write access push branches to
    this repository; everyone else forks it first. Use names like
    `fix/session-expiry` or `feat/recovery-kit-v2`. Nobody pushes to `main`

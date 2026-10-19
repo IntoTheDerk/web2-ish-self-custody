@@ -387,6 +387,117 @@ export function identityMigrations(
         `ALTER TABLE ${p}_accounts ALTER COLUMN display_name DROP NOT NULL`,
       ]),
     }),
+    Object.freeze({
+      version: 5,
+      name: "account-wallet-modes",
+      statements: Object.freeze([
+        `CREATE TABLE IF NOT EXISTS ${p}_wallet_policy (
+           service_profile_id text PRIMARY KEY REFERENCES ${p}_service_profiles(service_profile_id),
+           mode text NOT NULL CHECK (mode IN ('service-deterministic', 'per-account-deterministic', 'random-vault'))
+         )`,
+        `INSERT INTO ${p}_wallet_policy (service_profile_id, mode)
+         VALUES ('${serviceProfileId}', CASE WHEN EXISTS (SELECT 1 FROM ${p}_accounts)
+           THEN 'service-deterministic' ELSE '${assertLiteral(config.walletMode, "walletMode")}' END)
+         ON CONFLICT DO NOTHING`,
+        createTriggerOnce(`${p}_wallet_policy_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_wallet_policy FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`),
+        createTriggerOnce(`${p}_wallet_policy_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_wallet_policy FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`),
+        `CREATE TABLE IF NOT EXISTS ${p}_wallet_setups (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           service_profile_id text NOT NULL REFERENCES ${p}_service_profiles(service_profile_id),
+           username_normalized text NOT NULL,
+           public_salt bytea NOT NULL DEFAULT gen_random_bytes(32) CHECK (octet_length(public_salt) = 32),
+           UNIQUE (service_profile_id, username_normalized)
+         )`,
+        createTriggerOnce(`${p}_wallet_setups_immutable`,
+          `BEFORE UPDATE OR DELETE ON ${p}_wallet_setups FOR EACH ROW EXECUTE FUNCTION ${mutationGuard}()`),
+        createTriggerOnce(`${p}_wallet_setups_no_truncate`,
+          `BEFORE TRUNCATE ON ${p}_wallet_setups FOR EACH STATEMENT EXECUTE FUNCTION ${mutationGuard}()`),
+        `ALTER TABLE ${p}_account_wallets ADD COLUMN IF NOT EXISTS vault jsonb,
+           ADD COLUMN IF NOT EXISTS vault_revision integer NOT NULL DEFAULT 1`,
+      ]),
+    }),
+    Object.freeze({
+      version: 6,
+      name: "session-client-labels",
+      statements: Object.freeze([
+        // A coarse, display-only client description per session, deleted with
+        // its row by `pruneExpired`. One statement on purpose, like migration
+        // 4: a separate DROP/ADD CONSTRAINT pair is not safe for concurrent
+        // runners (the loser gets "constraint already exists" on every retry),
+        // whereas ADD COLUMN IF NOT EXISTS serializes on the table lock and
+        // skips the column and its constraint together on a re-run.
+        // No index: `authenticate()` rewrites `last_seen_at` on every request,
+        // and an index containing it would end HOT updates for that write.
+        // Listing filters through `<p>_sessions_account_idx`.
+        `ALTER TABLE ${p}_sessions ADD COLUMN IF NOT EXISTS client_label text
+           CONSTRAINT ${p}_sessions_client_label
+           CHECK (client_label IS NULL OR client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')`,
+      ]),
+    }),
+    Object.freeze({
+      version: 7,
+      name: "account-recovery-keys",
+      statements: Object.freeze([
+        // Recovery keys: the public half of an Ed25519 key the client derives
+        // from a recovery secret it holds. At most one is active per account
+        // (the partial unique index); a used or removed key keeps its row, so
+        // `UNIQUE (service_profile_id, public_key)` also refuses re-enrolling
+        // any key this service has seen. Every statement below is one
+        // `CREATE ... IF NOT EXISTS` with its constraints inline, so a re-run
+        // is a no-op and concurrent runners serialize on the catalog (the
+        // loser's duplicate-object error is retried by the runner).
+        `CREATE TABLE IF NOT EXISTS ${p}_account_recovery_keys (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
+           service_profile_id text NOT NULL REFERENCES ${p}_service_profiles(service_profile_id),
+           public_key text NOT NULL,
+           status text NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now(),
+           used_at timestamptz,
+           removed_at timestamptz,
+           CONSTRAINT ${p}_account_recovery_keys_public_key CHECK (public_key ~ '^[0-9a-f]{64}$'),
+           CONSTRAINT ${p}_account_recovery_keys_status CHECK (status IN ('active', 'used', 'removed')),
+           CONSTRAINT ${p}_account_recovery_keys_used CHECK ((status = 'used') = (used_at IS NOT NULL)),
+           CONSTRAINT ${p}_account_recovery_keys_removed CHECK ((status = 'removed') = (removed_at IS NOT NULL)),
+           UNIQUE (service_profile_id, public_key)
+         )`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_account_recovery_keys_active_idx
+           ON ${p}_account_recovery_keys (account_id) WHERE status = 'active'`,
+        // Used and removed keys are kept forever, so the partial index above
+        // cannot serve an account's whole history: `recoveryStatus` (its
+        // latest key) and the account-delete cascade read it here.
+        `CREATE INDEX IF NOT EXISTS ${p}_account_recovery_keys_account_idx
+           ON ${p}_account_recovery_keys (account_id, created_at DESC)`,
+        // Recovery tokens, stored as SHA-256 only. "Live" is neither completed
+        // nor revoked; an expired token stays live until the next begin
+        // revokes it or `pruneExpired` deletes it a day after it expires. The
+        // live index is UNIQUE so that at most one token per account is live
+        // even when two begins overlap: under READ COMMITTED the second
+        // begin's snapshot cannot see the first one's new row to revoke it, so
+        // only an index can refuse the second insert (the service then
+        // retries, and the retry revokes the first token).
+        `CREATE TABLE IF NOT EXISTS ${p}_account_recoveries (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
+           recovery_key_id uuid NOT NULL REFERENCES ${p}_account_recovery_keys(id) ON DELETE CASCADE,
+           token_hash text NOT NULL UNIQUE,
+           created_at timestamptz NOT NULL DEFAULT now(),
+           expires_at timestamptz NOT NULL,
+           completed_at timestamptz,
+           revoked_at timestamptz,
+           CONSTRAINT ${p}_account_recoveries_token_hash CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+           CONSTRAINT ${p}_account_recoveries_expiry CHECK (expires_at > created_at)
+         )`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_account_recoveries_live_idx
+           ON ${p}_account_recoveries (account_id)
+           WHERE completed_at IS NULL AND revoked_at IS NULL`,
+        // A retired key's tokens, and the cascade when a key row is deleted.
+        `CREATE INDEX IF NOT EXISTS ${p}_account_recoveries_key_idx
+           ON ${p}_account_recoveries (recovery_key_id)`,
+      ]),
+    }),
   ]);
 }
 

@@ -5,6 +5,322 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased
+
+- Add opt-in per-account deterministic and random-vault modes, with persistent
+  random account UUIDs/salts and client helpers. Existing derivation profiles,
+  codecs, vectors, and legacy service mode are unchanged.
+- Limit the SDK's vault password changes to encrypted vaults. Deterministic
+  accounts change keys through the opt-in sign-in-key rotation and recovery keys
+  of "Account changes and recovery keys" below.
+- Store vault ciphertext at enrollment, authorize multi-device downloads through
+  a host hook, and use revision checks for password-wrapper updates.
+- Add PostgreSQL migration 5, integration tests, and a wallet-modes guide.
+- With v0.10.1-alpha.0 merged in: `withAccountWallet` takes an optional fifth
+  argument and passes `applicationSecrets` to `withDerivedWallet`, so the
+  callback receives application secrets as its second parameter and
+  `per-account-deterministic` mode can serve the sign-in profile.
+  `random-vault` mode refuses the sign-in profile (`invalid-service-profile`
+  from the service configuration, `invalid-profile` from
+  `createRandomAccountWallet`): a random key runs no password derivation and
+  so has no application secret to derive a wallet from.
+
+### Session management
+
+A sessions list and signing out of other sessions, for the caller's own
+account. **Additive at runtime and opt-in:** the new routes are off unless
+configured, existing routes, responses and session objects gain no field, no
+`IdentityErrorCode` is added and `enumerationSensitiveCodes` is unchanged.
+Derivation, every profile, codec, transcript and vector are untouched; no
+vector is added. The breaking changes, a deploy order and TypeScript-only
+edges, are listed at the end of this section.
+
+- **Migration 6 `session-client-labels`**: one statement,
+  `ALTER TABLE <p>_sessions ADD COLUMN IF NOT EXISTS client_label text
+  CONSTRAINT <p>_sessions_client_label CHECK (client_label IS NULL OR
+  client_label ~ '^[A-Za-z0-9 .()-]{1,64}$')`. One statement so that concurrent
+  runners serialize on the table lock and a re-run skips the column and its
+  constraint together. No index is added, so the `last_seen_at` update of every
+  `authenticate` stays a HOT update. Run `migrate()` before serving this
+  version: `register` and `login` write the column and fail on a schema without
+  it.
+- **`RequestContext.clientLabel?: string`** (new optional field): a coarse,
+  display-only client label stored on the session that `register` or `login`
+  issues. A value outside the CHECK is dropped, never an error.
+- **`IdentityRouterOptions.clientLabel?: (request: Request) => string |
+  undefined`** (new optional field): the host's label hook, called only on
+  `POST /accounts` and `POST /sessions`. An invalid result or a throwing hook
+  stores no label and never fails the sign-in. A non-function is refused with a
+  `TypeError` when the router is created.
+- **`IdentityRouterOptions.accountSecurityRoutes?: boolean`** (new optional
+  field, **default `false`**): mounts the opt-in routes `GET /sessions` (list),
+  `DELETE /sessions` (revoke every other session) and `DELETE /sessions/{id}`
+  (revoke one other session). Off, those paths answer 405 and 404 as before. A
+  non-boolean is refused with a `TypeError`.
+- **`IdentityServiceConfig.storeSessionClientHashes?: boolean`** (new optional
+  field, default `true`, unchanged behavior): `false` writes NULL to new
+  sessions' `ip_hash` and `user_agent_hash`; rate limits still hash
+  `RequestContext.ipHash`. A non-boolean is refused with
+  `invalid-service-profile`. `ResolvedIdentityServiceConfig` gains the
+  required field `storeSessionClientHashes: boolean`, and the exported
+  `identityServiceDefaults` gains `storeSessionClientHashes: true`.
+- **New `IdentityService` methods**, each one statement that authenticates the
+  caller's token like `authenticate` (`session-not-found`, `session-expired`):
+  - `listSessions(token, context?)`: `readonly ListedSession[]`, the account's
+    live sessions, most recently active first, at most 50, display only. It
+    slides the caller's `last_seen_at` and always includes the caller's row.
+  - `liveSessionIds(token, context?)`: every live session id of the account,
+    uncapped, for reconciliation; not routed.
+  - `revokeSessionById(token, sessionId, context?)`: `{ revoked }`. Another
+    account's session, an unknown id and an already revoked or expired session
+    all answer `{ revoked: false }`; the caller's own id and a non-UUID are
+    `invalid-request`. Audit `session.revoke` with `{ scope: "other" }`.
+  - `revokeOtherSessions(token, context?)`: `{ revokedSessionIds }`, keeping the
+    caller's session. Audit `session.revoke-others` with
+    `{ scope: "others", revoked }`.
+  The revoke statements never lock the caller's own row; `revokeSessionById`
+  locks at most its target and `revokeOtherSessions` locks the account's other
+  live sessions in id order, so concurrent revocations, two sessions revoking
+  each other included, cannot deadlock one another.
+- **Lock order of the existing multi-row session statements** (no signature
+  change): `revokeAllSessions` now also locks its rows in id order before
+  revoking them, so it and `revokeOtherSessions` take locks in one order, and
+  `pruneExpired` deletes only dead session rows that no other statement holds
+  locked (`FOR UPDATE SKIP LOCKED`), leaving a locked row for the next run
+  instead of waiting on it. A plain multi-row `UPDATE` locks rows in scan
+  order, which `authenticate` traffic reorders between snapshots, so two
+  overlapping multi-row revocations of one account (released versions: two
+  `revokeAllSessions` calls) could fail with PostgreSQL `40P01 deadlock
+  detected`.
+- **New type export** `ListedSession` from `web2-ish-self-custody/server`:
+  `{ id, issuedAt, lastSeenAt, expiresAt, clientLabel: string | null, current }`.
+- Tests: `test/server/sessions.integration.test.ts` (real PostgreSQL: migration
+  6 re-run and from two concurrent runners, listing, revocation, the label and
+  hashes, pruning, concurrent mutual revocation, the id-order lock of
+  `revokeOtherSessions` and `revokeAllSessions` observed through a held row,
+  six concurrent `revokeOtherSessions` under `authenticate` traffic with no
+  error but `session-not-found`, `pruneExpired` skipping a locked row, the
+  routes) and
+  `test/server/router-sessions.test.ts` (no database: routing, option
+  validation, the label hook). The migration pins in the other server suites
+  become `[1..6]`.
+- Docs: `docs/SERVER_API.md` "Session management (opt-in)", the
+  `<p>_sessions` schema, configuration, "Not exposed over HTTP" and the custody
+  lists; the README's server notes.
+
+#### Breaking changes
+
+All but the first are TypeScript-only: none changes runtime behavior for an
+existing deployment that has run migration 6.
+
+- **Deploy order.** `register` and `login` write `client_label`, so they fail
+  on a schema without migration 6. Run `migrate()` before this version serves
+  traffic.
+- **Hand-written `IdentityService` implementations and test doubles:** the
+  interface gains four required methods (`listSessions`, `liveSessionIds`,
+  `revokeSessionById`, `revokeOtherSessions`). Services made by
+  `createIdentityService` and the adapters already have them.
+- **`ResolvedIdentityServiceConfig`** gains the required field
+  `storeSessionClientHashes`, so a hand-built one (for example one passed to
+  `identityMigrations` or `runIdentityMigrations` without
+  `resolveIdentityServiceConfig`) needs it.
+- An exact-equality assertion on `identityServiceDefaults` or on a resolved
+  config sees the new key.
+
+### Account changes and recovery keys
+
+Sign-in-key rotation (a password change for a deterministic key), a signed
+email change, and account recovery with a recovery key, for the caller's own
+account. **Opt-in:** rotation and recovery keys are off unless
+`accountSecurity` turns them on, they run only in the deterministic wallet
+modes, and none of the new methods is routed by `createIdentityRouter`. Every
+change is authorized by signatures over a new ten-line account-change message,
+verified strictly. Derivation, every profile, codec, transcript and existing
+vector are unchanged; one vector is added. The breaking changes are listed at
+the end of this section.
+
+- **Account-change message** (core entry, so a browser worker builds the bytes
+  it signs): `web2-ish-self-custody account change v1`, then the service
+  profile, application, network, action, normalized username, the `rotation`
+  challenge's nonce and expiry, a typed authorizer and a typed subject
+  (`docs/PROTOCOL.md` Part 4). Actions: `sign-in-key-rotation`,
+  `email-change`, `recovery-key-enrollment`, `recovery-key-removal`,
+  `recovery-begin`, `recovery-reset`; principals `key:<codec public key>`,
+  `recovery-key:<64 hex>`, `email:<normalized address>`, `none`.
+- **New core exports** from `web2-ish-self-custody`:
+  `buildAccountChangeMessage(input)` (refuses, with `invalid-message`, a line
+  break in any field, an unknown action and any principal form but the
+  action's), `normalizeEmail(address)` (the service's rule, which now also
+  refuses C0 and C1 control characters and DEL in the local part, so that
+  every address it returns is an `email:` subject the builder accepts;
+  `invalid-email`),
+  `ACCOUNT_CHANGE_DOMAIN`, `accountChangeActions`, and the types
+  `AccountChangeAction` and `AccountChangeMessageInput`.
+  `DerivationErrorCode` gains `invalid-email`.
+- **Strict Ed25519 for account changes**: S < L, canonical A and R, A not of
+  small order, then noble's `zip215: false`. Under noble's default rule (and
+  OpenSSL 3.5's) a small-order key with R = identity and S = 0 verifies for
+  every message. Every submitted key, `newKey`, a recovery key and **the key of a
+  registration**, must be canonical and not of small order
+  (`invalid-public-key`, before any account lookup). Login's
+  `verifyChallengeSignature` is unchanged.
+- **Migration 7 `account-recovery-keys`**: `<p>_account_recovery_keys` (public
+  key, `active`/`used`/`removed`, one active per account, every key unique per
+  service) and `<p>_account_recoveries` (SHA-256 token digests, 15 minutes, one
+  live per account). Six `CREATE … IF NOT EXISTS` statements with their
+  constraints inline, safe to re-run and from concurrent runners. The live-token
+  index is **unique**, not a plain index: two overlapping begins cannot see
+  each other's new row to revoke it, so only the index keeps one live token per
+  account (the second begin retries on a fresh
+  snapshot and revokes the first token). Two plain indexes,
+  `<p>_account_recovery_keys_account_idx (account_id, created_at DESC)` and
+  `<p>_account_recoveries_key_idx (recovery_key_id)`, serve `recoveryStatus`,
+  a retired key's tokens and the account-delete cascade, since used and
+  removed keys are kept.
+- **A usable recovery token** is unspent, unrevoked, unexpired and its recovery
+  key `active`; every method that reads a token checks all four. Retiring a
+  key (a replacing enrollment, `removeRecoveryKey`, `revokeRecoveryKeys`)
+  makes its tokens unusable and stamps the ones its statement sees revoked; a
+  token that a begin overlapping the retirement issued can stay unstamped
+  until the next begin or `pruneExpired`, and the audit's `revokedTokens` does
+  not count it. Code that reads `<p>_account_recoveries` directly must join the
+  key as `active`.
+- **New `IdentityService` methods**, each change one statement that re-checks
+  its session or recovery token, the account's `active` status and the enrolled
+  key under row locks: `rotateSignInKey`, `changeEmail`, `enrollRecoveryKey`,
+  `removeRecoveryKey`, `recoveryStatus`, `beginRecovery`,
+  `authenticateRecovery`, `completeRecovery`, `listSecurityEvents`, and the
+  server-only `revokeRecoveryKeys(accountId)`. A rotation updates the one
+  enrolled-key row in place and revokes every other session; a completed
+  recovery replaces the key, spends the recovery key, revokes every session and
+  issues a new one. Audit actions `account.key-rotate`, `account.email-change`,
+  `account.recovery-key.enroll`, `account.recovery-key.remove`,
+  `account.recovery-key.revoke`, `account.recovery-begin`, `account.recover`,
+  with field names and counts only.
+- **Lock order**: every account change takes the account row `FOR SHARE`
+  (`FOR NO KEY UPDATE` for the email change), never `FOR UPDATE`, then the
+  enrolled key, the recovery key and token, and sessions in id order, the same
+  order `revokeOtherSessions` and `revokeAllSessions` use, so neither can
+  deadlock the other: their audit insert's `FOR KEY SHARE` on the account
+  passes. A test drives the interleaving that deadlocks under `FOR UPDATE`.
+- **`createSessionResponder(service, options)`** (new export from
+  `web2-ish-self-custody/server`, with type `SessionResponder`): the router's
+  own session response, cookie or bearer body, for a host route that issues the
+  session of `completeRecovery`. It takes the service, like
+  `createIdentityRouter`, because the cookie's `Max-Age` is the service's
+  `sessionTtlSeconds`.
+- **Config** (new optional `IdentityServiceConfig` fields):
+  `accountSecurity: { signInKeyRotation?, recoveryKeys? }` (both default
+  `false`; strict booleans, unknown keys refused); `onSecurityEvent` (a hook
+  awaited for at most 3 s after a change commits, its errors ignored;
+  `revokeOtherSessions`, and so the opt-in `DELETE /sessions` route, also
+  reports `session.revoke-others` to it when it revoked a session, and can
+  answer up to 3 s later while a slow hook runs); and `auditRetentionDays` (1
+  to 36,500; when set, `pruneExpired` deletes this service's `account.*` and
+  `session.*` audit rows older than it; a row whose account was deleted names
+  no service profile and is never pruned, so an operator deletes an account's
+  audit rows before the account). `pruneExpired` also deletes recovery-token
+  rows a day after they expire.
+- **Rate limits** `account-change` (10 per 300 s per hashed IP and account, a
+  recovery completion included), `recovery-begin` (5 per hour per hashed IP and
+  username) and `recovery-begin-ip` (20 per hour per hashed IP).
+- **Errors** `key-unchanged` (409) and `stale-key` (409). Recovery failures
+  reuse `invalid-signature`; `enumerationSensitiveCodes` is unchanged.
+- **Login** issues its session only while the key it verified is still
+  enrolled, checked in the session's insert statement, so a rotation or
+  recovery that commits after login read the keys leaves that login no session
+  (`invalid-signature`). A login whose insert overlaps the rotation's statement
+  can still keep one; the sessions list shows it.
+- **Security events**: audit rows written by a session's own action or by an
+  action that issued a session name it in `metadata.sessionId`
+  (`account.register`, `account.login`, `session.revoke`,
+  `session.revoke-others` and the new account changes), which is how
+  `listSecurityEvents` shows the session's label while its row exists.
+- **New type exports** from `web2-ish-self-custody/server`:
+  `AccountSecurityOptions`, `AuthenticatedRecovery`, `EmailChangeInput`,
+  `EnrolledKeyInput`, `IdentityRecoveryKey`, `IssuedRecovery`,
+  `RecoveryBeginInput`, `RecoveryCompletionInput`,
+  `RecoveryKeyEnrollmentInput`, `RecoveryKeyRemovalInput`, `RecoveryStatus`,
+  `SecurityEvent`, `SecurityEventAction`, `SecurityEventHook`,
+  `SecurityEventNotice`, `SessionResponder`, `SignInKeyRotationInput`.
+- **Vector** `vectors/account-change-v1.json`: the message of each action,
+  signatures by the committed sign-in vector's key, by a second password's
+  sign-in key and by a fixture recovery key, and four signatures that must
+  verify false (a small-order A with R = identity and S = 0, a non-canonical A,
+  a non-canonical R, S + L). Reproduced by the new
+  `scripts/verify_account_change_vector.py` (`cryptography` after explicit
+  RFC 8032 checks, and its own pure-Python ZIP-215 check), which
+  `verify:vectors:python` and `verify-ci.sh` run and `package.json` `files`
+  ships; `verify-ci.sh` gains a gate that every `scripts/verify_*_vector.py` is
+  both run and shipped.
+- Tests: `test/accountChange.test.ts` (the message against the vector, every
+  refusal, `normalizeEmail`, including control characters and that every
+  address it returns is a subject the builder accepts), `test/server/accountChangeSignature.test.ts`
+  (strict verification against the vector, the small-order forgery noble's
+  default accepts), `test/server/accountChanges.test.ts` (opt-ins, the mode rule
+  and key checks before any SQL, the hook's 3 s bound),
+  `test/server/sessionResponder.test.ts` (byte-for-byte parity with the
+  router), `test/server/config.test.ts` additions, and
+  `test/server/accountChanges.integration.test.ts` (real PostgreSQL: migration 7
+  re-run and from concurrent runners, and its indexes serving the key history
+  and a key's tokens; rotation in place, the old key refused and
+  the new one accepted at login, other sessions revoked, atomicity under a
+  concurrent rotation, `stale-key`, the login race guard, refusals of unchanged
+  keys, bad signatures, foreign challenges, the negative vectors' shapes and a
+  small-order `newKey`; `wallet-conflict`; the email change, and a control
+  character refused before the challenge is spent; enrollment,
+  replacement, idempotence and removal, concurrent enrollments; begin spends
+  nothing, a second begin revokes the first token, completion is single use;
+  uniform 401s; concurrent begins and completions; a begin overlapping each kind
+  of key retirement, whose token is refused; the status rule for every
+  operation, including a suspension that commits mid-change;
+  `revokeRecoveryKeys`; the security events; pruning, an audit row of a deleted
+  account kept; the hook; the
+  rate limits; the lock order observed through held rows, the orchestrated
+  revoke-others interleaving, and a stress run with revoke-others, revoke-all,
+  authenticate and login traffic). The migration pins in the other server
+  suites become `[1..7]`.
+- Docs: `docs/PROTOCOL.md` Part 4 and "Account wallet modes",
+  `docs/SERVER_API.md` "Account changes and recovery keys (opt-in)", the two
+  schema entries, configuration, errors, rate limits and the operator's insider
+  alerts (now also the in-place key UPDATE and recovery keys),
+  `docs/WALLET_MODES.md`, `docs/SECURITY_MODEL.md` ("Account changes"),
+  `docs/INTEGRATION.md`, `SECURITY.md` and the README: deterministic password
+  changes and account recovery are no longer described as platform-owned.
+
+#### Breaking changes
+
+- **Deploy order.** `pruneExpired` deletes from `<p>_account_recoveries`, so it
+  fails on a schema without migration 7. Run `migrate()` before this version
+  serves traffic.
+- **Registration refuses small-order and non-canonical public keys**
+  (`invalid-public-key`). No key derived by a profile is either; a key that is
+  could be "signed for" without a private key.
+- **Email addresses with control characters are refused** (`invalid-email`):
+  `normalizeEmail`, and so registration, `updateAccount`, email verification
+  and `changeEmail`, refuses an address whose local part contains a C0 control
+  (U+0000 to U+001F, NUL included), DEL (U+007F) or a C1 control (U+0080 to
+  U+009F, NEL included). The released rule accepted most of them. Addresses
+  already stored are not touched.
+- **Login** fails with `invalid-signature`, instead of issuing a session, when
+  the key it verified was replaced between its read and its session insert.
+- **Hand-written `IdentityService` implementations and test doubles:** the
+  interface gains ten required methods (`rotateSignInKey`, `changeEmail`,
+  `enrollRecoveryKey`, `removeRecoveryKey`, `recoveryStatus`,
+  `beginRecovery`, `authenticateRecovery`, `completeRecovery`,
+  `listSecurityEvents`, `revokeRecoveryKeys`), and `pruneExpired`'s result
+  gains `recoveryTokens` and `auditEvents`.
+- **`IdentityErrorCode`** gains `key-unchanged` and `stale-key`, and
+  **`DerivationErrorCode`** gains `invalid-email`, which breaks exhaustive
+  switches. `enumerationSensitiveCodes` is unchanged.
+- **`ResolvedIdentityServiceConfig`** gains the required fields
+  `accountSecurity`, `onSecurityEvent` and `auditRetentionDays`, and the
+  exported `identityServiceDefaults` gains the same three keys; a hand-built
+  resolved config needs them, and an exact-equality assertion sees them.
+- **Audit metadata** of `account.register`, `account.login`, `session.revoke`
+  and `session.revoke-others` gains `sessionId`, for a consumer that parses it
+  exactly.
+
 ## v0.10.1-alpha.0 — 2026-10-18 (alpha pre-release)
 
 Application secrets, and a sign-in profile with a Kalvora wallet from a master

@@ -21,6 +21,7 @@ import {
 } from "./email.js";
 import { IdentityError, enumerationSensitiveCodes } from "./errors.js";
 import {
+  acceptedClientLabel,
   challengePurposes,
   type AuthenticatedIdentity,
   type ChallengePurpose,
@@ -29,6 +30,7 @@ import {
   type RegistrationInput,
   type RequestContext,
 } from "./types.js";
+import { parseWalletVault } from "../vault.js";
 
 export type IdentityRouterOptions = Readonly<{
   /** Path all routes hang off. Default `/identity`. */
@@ -52,6 +54,27 @@ export type IdentityRouterOptions = Readonly<{
    * host that calls `service.startEmailVerification` itself.
    */
   emailVerification?: EmailVerificationDelivery;
+  /** Verify a platform login/recovery grant and return its account UUID, or null.
+   * Never trust an account ID supplied in the request without verifying ownership.
+   * Without this hook, pre-login vault downloads are disabled. */
+  authorizeVaultRead?: (request: Request) => Promise<string | null>;
+  /**
+   * Returns a coarse, display-only label for the client, such as
+   * "Firefox on macOS", computed by the host from the request (typically from
+   * an allowlist of browser and OS families). It is called only for the two
+   * routes that issue a session, `POST /accounts` and `POST /sessions`, and is
+   * stored on that session. A result outside `^[A-Za-z0-9 .()-]{1,64}$`, or a
+   * hook that throws, stores no label and never fails the sign-in. Never
+   * return the raw User-Agent.
+   */
+  clientLabel?: (request: Request) => string | undefined;
+  /**
+   * Mounts the caller's account-wide session routes: `GET /sessions` (list),
+   * `DELETE /sessions` (revoke every other session) and `DELETE /sessions/{id}`
+   * (revoke one other session). Default `false`: without it those paths answer
+   * as unrouted (405 on `/sessions`, 404 on `/sessions/{id}`).
+   */
+  accountSecurityRoutes?: boolean;
 }>;
 
 /** 64 KiB. Every accepted body here is a handful of short strings. */
@@ -70,9 +93,19 @@ type RouterContext = Readonly<{
   trustedOrigins: ReadonlySet<string> | null;
   hashRequestIp: ((request: Request) => string | undefined) | null;
   emailVerification: EmailVerificationDelivery | null;
+  authorizeVaultRead: IdentityRouterOptions["authorizeVaultRead"];
+  clientLabel: ((request: Request) => string | undefined) | null;
+  routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>>;
+  /** The `/sessions/{id}` methods, or null while the account routes are off. */
+  sessionByIdRoute: ReadonlyMap<string, RouteHandler> | null;
 }>;
 
-type RouteHandler = (ctx: RouterContext, request: Request) => Promise<Response>;
+/** `routeParameter` is the `{id}` of `/sessions/{id}`; no other route takes one. */
+type RouteHandler = (
+  ctx: RouterContext,
+  request: Request,
+  routeParameter?: string,
+) => Promise<Response>;
 
 /**
  * Transport-level failures that predate the service call. Kept separate from
@@ -105,10 +138,27 @@ export function jsonResponse(
   });
 }
 
-export function createIdentityRouter(
-  service: IdentityService,
-  options: IdentityRouterOptions = {},
-): (request: Request) => Promise<Response> {
+/**
+ * Answers with a freshly issued session exactly as the router's register and
+ * login routes do: `payload` plus `session`, and either the cookie
+ * (`Set-Cookie`, the token withheld from the body) or, with
+ * `useCookies: false`, the token in the body. `status` defaults to 200.
+ */
+export type SessionResponder = (
+  payload: Readonly<Record<string, unknown>>,
+  issued: IssuedSession,
+  status?: number,
+) => Response;
+
+/** The router's cookie settings, validated once. */
+type CookieSettings = Readonly<{
+  service: IdentityService;
+  cookieName: string;
+  cookieDomain: string | undefined;
+  useCookies: boolean;
+}>;
+
+function cookieSettings(service: IdentityService, options: IdentityRouterOptions): CookieSettings {
   const cookieName = options.cookieName ?? "__Host-w2sc_session";
   if (!cookieNamePattern.test(cookieName)) {
     throw new TypeError("cookieName must be a valid cookie token.");
@@ -119,9 +169,48 @@ export function createIdentityRouter(
   if (cookieName.startsWith("__Host-") && options.cookieDomain !== undefined) {
     throw new TypeError("A __Host- prefixed cookie cannot declare a Domain attribute.");
   }
+  return Object.freeze({
+    service,
+    cookieName,
+    cookieDomain: options.cookieDomain,
+    useCookies: options.useCookies ?? true,
+  });
+}
+
+/**
+ * The router's session response, for a host route that issues a session
+ * outside the router (for example around `completeRecovery`, between its own
+ * statements). Pass the same service and the same options as to
+ * `createIdentityRouter`: the cookie's name, `Domain`, `Max-Age` (the
+ * service's `sessionTtlSeconds`) and attributes, and the bearer body, are
+ * then byte for byte the router's.
+ */
+export function createSessionResponder(
+  service: IdentityService,
+  options: IdentityRouterOptions = {},
+): SessionResponder {
+  const settings = cookieSettings(service, options);
+  return (payload, issued, status = 200) => sessionResponse(settings, payload, issued, status);
+}
+
+export function createIdentityRouter(
+  service: IdentityService,
+  options: IdentityRouterOptions = {},
+): (request: Request) => Promise<Response> {
+  const { cookieName } = cookieSettings(service, options);
   if (options.emailVerification !== undefined) {
     assertEmailVerificationDelivery(options.emailVerification);
   }
+  if (options.clientLabel !== undefined && typeof options.clientLabel !== "function") {
+    throw new TypeError("clientLabel must be a function.");
+  }
+  if (
+    options.accountSecurityRoutes !== undefined &&
+    typeof options.accountSecurityRoutes !== "boolean"
+  ) {
+    throw new TypeError("accountSecurityRoutes must be a boolean.");
+  }
+  const accountSecurityRoutes = options.accountSecurityRoutes ?? false;
 
   const ctx: RouterContext = Object.freeze({
     service,
@@ -135,6 +224,10 @@ export function createIdentityRouter(
         : new Set(options.trustedOrigins.map(normalizeOrigin)),
     hashRequestIp: options.hashRequestIp ?? null,
     emailVerification: options.emailVerification ?? null,
+    authorizeVaultRead: options.authorizeVaultRead,
+    clientLabel: options.clientLabel ?? null,
+    routes: accountSecurityRoutes ? routesWithAccountSecurity : routes,
+    sessionByIdRoute: accountSecurityRoutes ? sessionByIdRoute : null,
   });
 
   return async function handleIdentityRequest(request: Request): Promise<Response> {
@@ -151,7 +244,16 @@ async function dispatch(ctx: RouterContext, request: Request): Promise<Response>
   if (route === null) {
     return notFound();
   }
-  const methods = routes.get(route);
+  let methods = ctx.routes.get(route);
+  let routeParameter: string | undefined;
+  if (methods === undefined && ctx.sessionByIdRoute !== null) {
+    // Exact routes win, so `/sessions/current` stays sign-out.
+    const match = /^\/sessions\/([^/]+)$/u.exec(route);
+    if (match !== null) {
+      methods = ctx.sessionByIdRoute;
+      routeParameter = match[1];
+    }
+  }
   if (methods === undefined) {
     return notFound();
   }
@@ -164,7 +266,7 @@ async function dispatch(ctx: RouterContext, request: Request): Promise<Response>
     );
   }
   assertOriginAllowed(ctx, request);
-  return handler(ctx, request);
+  return handler(ctx, request, routeParameter);
 }
 
 function notFound(): Response {
@@ -275,7 +377,7 @@ function tokenFromRequest(ctx: RouterContext, request: Request): string | null {
   return ctx.useCookies ? cookieValue(request, ctx.cookieName) : null;
 }
 
-function serializeSessionCookie(ctx: RouterContext, token: string): string {
+function serializeSessionCookie(ctx: CookieSettings, token: string): string {
   const parts = [
     `${ctx.cookieName}=${encodeURIComponent(token)}`,
     "Path=/",
@@ -306,15 +408,40 @@ function clearSessionCookie(ctx: RouterContext): string {
   return parts.join("; ");
 }
 
-function requestContext(ctx: RouterContext, request: Request): RequestContext {
+/**
+ * `issuesSession` is true only on the two routes that open a session, so the
+ * host's label hook runs where its result is stored and nowhere else.
+ */
+function requestContext(
+  ctx: RouterContext,
+  request: Request,
+  issuesSession = false,
+): RequestContext {
   const ipHash = ctx.hashRequestIp?.(request);
   const userAgent = request.headers.get("user-agent");
+  const clientLabel = issuesSession ? hostClientLabel(ctx, request) : undefined;
   return {
     ...(ipHash !== undefined && ipHash !== "" ? { ipHash } : {}),
     ...(userAgent !== null && userAgent !== ""
       ? { userAgentHash: bytesToHex(sha256(utf8(userAgent))) }
       : {}),
+    ...(clientLabel !== undefined ? { clientLabel } : {}),
   };
+}
+
+/**
+ * The label is display-only metadata, so neither an invalid value nor a
+ * failing hook may cost the user their sign-in: both store no label.
+ */
+function hostClientLabel(ctx: RouterContext, request: Request): string | undefined {
+  if (ctx.clientLabel === null) {
+    return undefined;
+  }
+  try {
+    return acceptedClientLabel(ctx.clientLabel(request));
+  } catch {
+    return undefined;
+  }
 }
 
 async function readBodyBytes(request: Request): Promise<Uint8Array> {
@@ -472,7 +599,7 @@ async function authenticateRequest(
  * echoing it would hand it straight back.
  */
 function sessionResponse(
-  ctx: RouterContext,
+  ctx: CookieSettings,
   payload: Readonly<Record<string, unknown>>,
   issued: IssuedSession,
   status: number,
@@ -500,6 +627,7 @@ const registrationFields: readonly string[] = [
   "publicKey",
   "challengeId",
   "signature",
+  "vault",
 ];
 
 async function handleProfile(ctx: RouterContext, _request: Request): Promise<Response> {
@@ -531,8 +659,9 @@ async function handleRegister(ctx: RouterContext, request: Request): Promise<Res
     signature: requireString(body, "signature"),
     ...(displayName !== undefined ? { displayName } : {}),
     ...(email !== undefined ? { email } : {}),
+    ...(body["vault"] !== undefined ? { vault: readVault(body["vault"]) } : {}),
   };
-  const result = await ctx.service.register(input, requestContext(ctx, request));
+  const result = await ctx.service.register(input, requestContext(ctx, request, true));
   return sessionResponse(
     ctx,
     { account: result.account, wallet: result.wallet },
@@ -548,7 +677,7 @@ async function handleLogin(ctx: RouterContext, request: Request): Promise<Respon
     challengeId: requireString(body, "challengeId"),
     signature: requireString(body, "signature"),
   };
-  const result = await ctx.service.login(input, requestContext(ctx, request));
+  const result = await ctx.service.login(input, requestContext(ctx, request, true));
   return sessionResponse(ctx, { account: result.account }, result.session, 200);
 }
 
@@ -602,6 +731,47 @@ async function handleRevokeSession(
     throw error;
   }
   return jsonResponse({ revoked: true }, 200, headers);
+}
+
+function requireRequestToken(ctx: RouterContext, request: Request): string {
+  const token = tokenFromRequest(ctx, request);
+  if (token === null) {
+    throw new IdentityError("Request carries no session token.", "session-not-found");
+  }
+  return token;
+}
+
+async function handleListSessions(ctx: RouterContext, request: Request): Promise<Response> {
+  const sessions = await ctx.service.listSessions(
+    requireRequestToken(ctx, request),
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ sessions });
+}
+
+async function handleRevokeOtherSessions(
+  ctx: RouterContext,
+  request: Request,
+): Promise<Response> {
+  const result = await ctx.service.revokeOtherSessions(
+    requireRequestToken(ctx, request),
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ revokedSessionIds: result.revokedSessionIds });
+}
+
+async function handleRevokeSessionById(
+  ctx: RouterContext,
+  request: Request,
+  sessionId?: string,
+): Promise<Response> {
+  const token = requireRequestToken(ctx, request);
+  const result = await ctx.service.revokeSessionById(
+    token,
+    sessionId ?? "",
+    requestContext(ctx, request),
+  );
+  return jsonResponse({ revoked: result.revoked });
 }
 
 async function handleGetAccount(ctx: RouterContext, request: Request): Promise<Response> {
@@ -691,10 +861,35 @@ async function handleConfirmEmailVerification(
   return jsonResponse(result);
 }
 
+function readVault(value: unknown) {
+  try { return parseWalletVault(value); } catch {
+    throw new IdentityError("Invalid wallet vault.", "invalid-request");
+  }
+}
+
+async function handleReadVault(ctx: RouterContext, request: Request): Promise<Response> {
+  const accountId = await ctx.authorizeVaultRead?.(request);
+  if (accountId === undefined || accountId === null) {
+    throw new IdentityError("Platform authorization is required to download a vault.", "invalid-signature");
+  }
+  return jsonResponse(await ctx.service.getWalletVault(accountId, requestContext(ctx, request)));
+}
+
+async function handleUpdateVault(ctx: RouterContext, request: Request): Promise<Response> {
+  const token = tokenFromRequest(ctx, request);
+  if (token === null) throw new IdentityError("Session token is missing.", "session-not-found");
+  const body = await readJsonObject(request, ["vault", "expectedRevision"]);
+  if (typeof body["expectedRevision"] !== "number") {
+    throw new IdentityError("expectedRevision must be a number.", "invalid-request");
+  }
+  return jsonResponse(await ctx.service.updateWalletVault(token, readVault(body["vault"]), body["expectedRevision"], requestContext(ctx, request)));
+}
+
 const routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
   string,
   ReadonlyMap<string, RouteHandler>
 >([
+  ["/wallet-vault", new Map<string, RouteHandler>([["POST", handleReadVault], ["PUT", handleUpdateVault]])],
   ["/profile", new Map<string, RouteHandler>([["GET", handleProfile]])],
   ["/challenges", new Map<string, RouteHandler>([["POST", handleCreateChallenge]])],
   ["/accounts", new Map<string, RouteHandler>([["POST", handleRegister]])],
@@ -721,6 +916,29 @@ const routes: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
     "/email-verifications/confirm",
     new Map<string, RouteHandler>([["POST", handleConfirmEmailVerification]]),
   ],
+]);
+
+/**
+ * The same table with the opt-in account routes: `/sessions` gains the list
+ * and revoke-others methods beside login. Built once, never per request.
+ */
+const routesWithAccountSecurity: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> = new Map<
+  string,
+  ReadonlyMap<string, RouteHandler>
+>([
+  ...routes,
+  [
+    "/sessions",
+    new Map<string, RouteHandler>([
+      ["POST", handleLogin],
+      ["GET", handleListSessions],
+      ["DELETE", handleRevokeOtherSessions],
+    ]),
+  ],
+]);
+
+const sessionByIdRoute: ReadonlyMap<string, RouteHandler> = new Map<string, RouteHandler>([
+  ["DELETE", handleRevokeSessionById],
 ]);
 
 /**
