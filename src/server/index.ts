@@ -83,8 +83,8 @@ export {
 export type { PlatformSaltConfig } from "./serviceProfile.js";
 export type { IdentityMigration } from "./migrations.js";
 
-export { createIdentityRouter, jsonResponse } from "./router.js";
-export type { IdentityRouterOptions } from "./router.js";
+export { createIdentityRouter, createSessionResponder, jsonResponse } from "./router.js";
+export type { IdentityRouterOptions, SessionResponder } from "./router.js";
 
 export { createIdentityService } from "./service.js";
 
@@ -99,22 +99,38 @@ export type {
 
 export { challengePurposes } from "./types.js";
 export type {
+  AccountSecurityOptions,
   AuthenticatedIdentity,
+  AuthenticatedRecovery,
   ChallengePurpose,
+  EmailChangeInput,
   EmailVerificationRequest,
+  EnrolledKeyInput,
   IdentityAccount,
   IdentityChallenge,
+  IdentityRecoveryKey,
   IdentityServiceConfig,
   IdentitySession,
   IdentityWallet,
   IssuedEmailVerification,
+  IssuedRecovery,
   IssuedSession,
   ListedSession,
   LoginInput,
   PublishedDerivationProfile,
+  RecoveryBeginInput,
+  RecoveryCompletionInput,
+  RecoveryKeyEnrollmentInput,
+  RecoveryKeyRemovalInput,
+  RecoveryStatus,
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
+  SecurityEvent,
+  SecurityEventAction,
+  SecurityEventHook,
+  SecurityEventNotice,
   ServiceWalletMode,
+  SignInKeyRotationInput,
   StoredWalletVault,
 } from "./types.js";

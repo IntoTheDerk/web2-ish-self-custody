@@ -11,6 +11,10 @@
 #   npm ci
 #   npm run verify        # = typecheck && test && verify:vectors:python && build
 #
+# verify:vectors:python runs both independent verifiers:
+# scripts/verify_kalvora_external_salt_vector.py (the derivation vectors) and
+# scripts/verify_account_change_vector.py (the account-change vector).
+#
 # This script runs the four steps behind `npm run verify` individually, so each
 # reports its own PASS/FAIL instead of the whole chain stopping at the first
 # `&&`. Running every gate is otherwise identical to what CI executes.
@@ -184,9 +188,30 @@ check_npm_ci() {
 run "npm ci (lockfile in sync with package.json)" check_npm_ci
 
 # --- npm run verify, one gate per step -------------------------------------
+# Every independent vector verifier must be both run by verify:vectors:python
+# and shipped in package.json `files`, so a new one cannot be added half-wired.
+check_vector_verifiers_wired() {
+  node -e '
+    const fs = require("node:fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const run = pkg.scripts["verify:vectors:python"] ?? "";
+    const scripts = fs.readdirSync("scripts").filter((name) => /^verify_.*_vector\.py$/u.test(name));
+    let bad = scripts.length === 0;
+    for (const name of scripts) {
+      const path = `scripts/${name}`;
+      if (!run.includes(`python3 ${path}`)) { console.log(`${path} is not run by verify:vectors:python`); bad = true; }
+      if (!pkg.files.includes(path)) { console.log(`${path} is not in package.json files`); bad = true; }
+    }
+    if (!bad) console.log(`${scripts.length} verifier(s) run and shipped`);
+    process.exit(bad ? 1 : 0);
+  '
+}
+
+run "vector verifiers are run and shipped" check_vector_verifiers_wired
 run "typecheck"   npm run --silent typecheck
 run "unit tests"  npm test
 if python3 -c 'import cryptography' >/dev/null 2>&1; then
+  # Both scripts: the external-salt derivation vectors and the account-change vector.
   run "python vectors" npm run --silent verify:vectors:python
 else
   skip "python vectors" \

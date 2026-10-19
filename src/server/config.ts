@@ -5,6 +5,7 @@ import { IdentityError } from "./errors.js";
 import type {
   IdentityServiceConfig,
   ResolvedIdentityServiceConfig,
+  SecurityEventHook,
 } from "./types.js";
 
 const defaults = Object.freeze({
@@ -16,7 +17,13 @@ const defaults = Object.freeze({
   requireVerifiedEmail: false,
   walletMode: "service-deterministic" as const,
   storeSessionClientHashes: true,
+  accountSecurity: Object.freeze({ signInKeyRotation: false, recoveryKeys: false }),
+  onSecurityEvent: null,
+  auditRetentionDays: null,
 });
+
+/** 100 years: a bound that refuses a typo without limiting any real policy. */
+const MAX_AUDIT_RETENTION_DAYS = 36_500;
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
   if (!Number.isInteger(value) || value <= 0 || value > max) {
@@ -92,6 +99,62 @@ function optionalBoolean(value: unknown, field: string, fallback: boolean): bool
   return value;
 }
 
+/**
+ * Each opt-in is a strict boolean, and an unknown key is refused: a misspelt
+ * opt-in must not leave a deployment believing it turned something on.
+ */
+function resolveAccountSecurity(
+  value: unknown,
+): Readonly<{ signInKeyRotation: boolean; recoveryKeys: boolean }> {
+  if (value === undefined) {
+    return defaults.accountSecurity;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new IdentityError("accountSecurity must be an object.", "invalid-service-profile");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  for (const key of Object.keys(record)) {
+    if (key !== "signInKeyRotation" && key !== "recoveryKeys") {
+      throw new IdentityError(
+        "accountSecurity accepts only signInKeyRotation and recoveryKeys.",
+        "invalid-service-profile",
+      );
+    }
+  }
+  return Object.freeze({
+    signInKeyRotation: optionalBoolean(
+      record["signInKeyRotation"],
+      "accountSecurity.signInKeyRotation",
+      false,
+    ),
+    recoveryKeys: optionalBoolean(record["recoveryKeys"], "accountSecurity.recoveryKeys", false),
+  });
+}
+
+/** `null` is accepted as unset, so a resolved config resolves to itself. */
+function resolveSecurityEventHook(value: unknown): SecurityEventHook | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "function") {
+    throw new IdentityError("onSecurityEvent must be a function.", "invalid-service-profile");
+  }
+  return value as SecurityEventHook;
+}
+
+function resolveAuditRetentionDays(value: unknown): number | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "number") {
+    throw new IdentityError(
+      `auditRetentionDays must be an integer between 1 and ${MAX_AUDIT_RETENTION_DAYS}.`,
+      "invalid-service-profile",
+    );
+  }
+  return assertPositiveInteger(value, "auditRetentionDays", MAX_AUDIT_RETENTION_DAYS);
+}
+
 export function resolveIdentityServiceConfig(
   config: IdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
@@ -142,6 +205,9 @@ export function resolveIdentityServiceConfig(
       "storeSessionClientHashes",
       defaults.storeSessionClientHashes,
     ),
+    accountSecurity: resolveAccountSecurity(config.accountSecurity),
+    onSecurityEvent: resolveSecurityEventHook(config.onSecurityEvent),
+    auditRetentionDays: resolveAuditRetentionDays(config.auditRetentionDays),
   });
 }
 

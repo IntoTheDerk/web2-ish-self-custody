@@ -8,10 +8,27 @@ import {
   verifyChallengeSignature,
 } from "./challenge.js";
 import { resolveIdentityServiceConfig } from "./config.js";
+import { accountChangeOperations } from "./accountChanges.js";
+import { assertStrictEd25519PublicKey } from "./accountChangeSignature.js";
 import { accountWalletOperations } from "./accountWallets.js";
 import type { IdentityService } from "./contract.js";
 import { IdentityError } from "./errors.js";
 import { runIdentityMigrations } from "./migrations.js";
+import {
+  assertUuid,
+  booleanColumn,
+  mapAccount,
+  mapSession,
+  mapWallet,
+  metadataJson,
+  normalizeEmail,
+  requestNow,
+  sanitizeContextHash,
+  sqlStateOf,
+  uuidPattern,
+  walletCurve,
+  type ConsumedChallenge,
+} from "./records.js";
 import {
   instantColumn,
   integerColumn,
@@ -41,7 +58,6 @@ import {
   type IdentityAccount,
   type IdentityChallenge,
   type IdentityServiceConfig,
-  type IdentitySession,
   type IdentityWallet,
   type IssuedEmailVerification,
   type IssuedSession,
@@ -54,18 +70,12 @@ import {
 } from "./types.js";
 
 const tablePrefixPattern = /^[a-z][a-z0-9_]{0,31}$/u;
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const controlCharacters = /[\u0000-\u001f\u007f]/u;
-const emailPattern =
-  /^[^\s@<>"',;:\\]{1,64}@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/u;
 const nonAlphanumeric = /[^A-Z0-9]/gu;
 
 const MIN_USERNAME_LENGTH = 3;
 const MAX_USERNAME_LENGTH = 320;
 const MAX_DISPLAY_NAME_LENGTH = 120;
-const MAX_EMAIL_LENGTH = 254;
-const MAX_CONTEXT_HASH_LENGTH = 128;
 
 /** The most rows `listSessions` returns; `liveSessionIds` has no cap. */
 const MAX_LISTED_SESSIONS = 50;
@@ -105,6 +115,12 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
     limit: 20,
     windowSeconds: 3_600,
   }),
+  // Every signed account change of one account (rotation, email change,
+  // recovery-key enrollment and removal, recovery completion), per caller.
+  accountChange: Object.freeze({ id: "account-change", limit: 10, windowSeconds: 300 }),
+  // Beginning a recovery: per caller and username, and per caller alone.
+  recoveryBegin: Object.freeze({ id: "recovery-begin", limit: 5, windowSeconds: 3_600 }),
+  recoveryBeginIp: Object.freeze({ id: "recovery-begin-ip", limit: 20, windowSeconds: 3_600 }),
 });
 
 function requireRule(name: string): RateLimitRule {
@@ -127,52 +143,6 @@ function assertTablePrefix(value: string): string {
     );
   }
   return value;
-}
-
-type MissingIdentifierCode =
-  | "account-not-found"
-  | "challenge-not-found"
-  | "email-verification-failed";
-
-/**
- * Identifiers are shape-checked before reaching a `::uuid` cast, so a
- * malformed id surfaces as its caller's own "not found" rather than as a
- * PostgreSQL 22P02 leaking out of the driver.
- */
-function assertUuid(value: string, code: MissingIdentifierCode): string {
-  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!uuidPattern.test(normalized)) {
-    throw new IdentityError("Malformed identifier.", code);
-  }
-  return normalized;
-}
-
-function booleanColumn(row: SqlRow, column: string): boolean {
-  const value = row[column];
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (value === "t" || value === "true") {
-    return true;
-  }
-  if (value === "f" || value === "false") {
-    return false;
-  }
-  throw new TypeError(`Expected boolean column "${column}".`);
-}
-
-function accountStatus(value: string): "active" | "suspended" {
-  if (value === "active" || value === "suspended") {
-    return value;
-  }
-  throw new IdentityError("Unknown account status.", "invalid-service-profile");
-}
-
-function walletCurve(value: string): "ed25519" {
-  if (value === "ed25519") {
-    return value;
-  }
-  throw new IdentityError("Unknown wallet curve.", "invalid-service-profile");
 }
 
 function assertChallengePurpose(value: string): ChallengePurpose {
@@ -201,26 +171,6 @@ function normalizeDisplayName(value: string): string {
   return candidate;
 }
 
-function normalizeEmail(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.length > MAX_EMAIL_LENGTH || !emailPattern.test(normalized)) {
-    throw new IdentityError("email is not a valid address.", "invalid-email");
-  }
-  return normalized;
-}
-
-/** Context hashes arrive pre-hashed; the service never sees a raw IP. */
-function sanitizeContextHash(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_CONTEXT_HASH_LENGTH) {
-    return null;
-  }
-  return trimmed;
-}
-
 /**
  * Session ids reach a `::uuid` cast, so they are shape-checked first. A
  * malformed id is the caller's input error, which says nothing about whether
@@ -244,76 +194,6 @@ function assertSessionToken(token: unknown): string {
 function rateLimitIpHash(context: RequestContext | undefined): string {
   return sanitizeContextHash(context?.ipHash) ?? RATE_LIMIT_MISSING_IP_HASH;
 }
-
-function requestNow(context: RequestContext | undefined): string | null {
-  const now = context?.now;
-  return now === undefined ? null : now.toISOString();
-}
-
-function metadataJson(
-  metadata: Readonly<Record<string, string | number | boolean | null>>,
-): string {
-  return JSON.stringify(metadata);
-}
-
-function sqlStateOf(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) {
-    return null;
-  }
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" ? code : null;
-}
-
-function mapAccount(row: SqlRow, prefix: string): IdentityAccount {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
-    usernameNormalized: textColumn(row, `${prefix}username_normalized`),
-    displayName: optionalTextColumn(row, `${prefix}display_name`),
-    email: optionalTextColumn(row, `${prefix}email`),
-    emailVerifiedAt: optionalInstantColumn(row, `${prefix}email_verified_at`),
-    status: accountStatus(textColumn(row, `${prefix}status`)),
-    createdAt: instantColumn(row, `${prefix}created_at`),
-    updatedAt: instantColumn(row, `${prefix}updated_at`),
-  });
-}
-
-function mapWallet(row: SqlRow, prefix: string): IdentityWallet {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    accountId: textColumn(row, `${prefix}account_id`),
-    serviceProfileId: textColumn(row, `${prefix}service_profile_id`),
-    profileId: textColumn(row, `${prefix}profile_id`),
-    codecId: textColumn(row, `${prefix}codec_id`),
-    curve: walletCurve(textColumn(row, `${prefix}curve`)),
-    applicationId: textColumn(row, `${prefix}application_id`),
-    networkId: textColumn(row, `${prefix}network_id`),
-    address: textColumn(row, `${prefix}address`),
-    addressNormalized: textColumn(row, `${prefix}address_normalized`),
-    publicKey: textColumn(row, `${prefix}public_key`),
-    fingerprint: textColumn(row, `${prefix}fingerprint`),
-    isPrimary: booleanColumn(row, `${prefix}is_primary`),
-    createdAt: instantColumn(row, `${prefix}created_at`),
-  });
-}
-
-function mapSession(row: SqlRow, prefix: string): IdentitySession {
-  return Object.freeze({
-    id: textColumn(row, `${prefix}id`),
-    accountId: textColumn(row, `${prefix}account_id`),
-    issuedAt: instantColumn(row, `${prefix}issued_at`),
-    expiresAt: instantColumn(row, `${prefix}expires_at`),
-    lastSeenAt: instantColumn(row, `${prefix}last_seen_at`),
-  });
-}
-
-type ConsumedChallenge = Readonly<{
-  id: string;
-  purpose: ChallengePurpose;
-  usernameNormalized: string;
-  nonceHex: string;
-  expiresAt: Date;
-}>;
 
 export function createIdentityService(
   sql: SqlDriver,
@@ -536,11 +416,20 @@ export function createIdentityService(
     return new IdentityError("Session is not valid.", "session-not-found");
   };
 
+  /**
+   * Issues a login session, only while `verifiedPublicKey` (the key whose
+   * signature the login just checked) is still an enrolled key of the
+   * account: a rotation or recovery that committed after the login read the
+   * account's keys must not leave the old key's login a session it could not
+   * revoke. That leaves a window of one overlapping statement, which the
+   * sessions list shows and revoke-others closes (docs/SERVER_API.md).
+   */
   const issueSession = async (
     accountId: string,
     action: string,
     metadata: Readonly<Record<string, string | number | boolean | null>>,
     context: RequestContext | undefined,
+    verifiedPublicKey: string,
   ): Promise<IssuedSession> => {
     const token = generateSessionToken();
     const client = sessionClientColumns(context);
@@ -555,11 +444,18 @@ export function createIdentityService(
                      date_trunc('milliseconds', clock.at + (interval '1 second' * $4::double precision)),
                      clock.at, $5::text, $6::text, $9::text
               FROM clock
+              WHERE EXISTS (
+                SELECT 1 FROM ${p}_account_wallets w
+                 WHERE w.account_id = $2::uuid AND w.public_key = $10::text
+              )
               RETURNING id, account_id, issued_at, expires_at, last_seen_at
             ),
             logged AS (
               INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-              SELECT $2::uuid, $7::text, $8::jsonb, clock.at FROM clock
+              SELECT $2::uuid, $7::text,
+                     $8::jsonb || jsonb_build_object('sessionId', new_session.id),
+                     clock.at
+                FROM clock, new_session
               RETURNING 1
             )
        SELECT id, account_id, issued_at, expires_at, last_seen_at FROM new_session`,
@@ -573,11 +469,16 @@ export function createIdentityService(
         action,
         metadataJson(metadata),
         client.clientLabel,
+        verifiedPublicKey,
       ],
     );
     const row = requireSingleRow(
       rows,
-      () => new IdentityError("Session could not be issued.", "account-not-found"),
+      () =>
+        new IdentityError(
+          "Challenge signature did not verify against any registered wallet.",
+          "invalid-signature",
+        ),
     );
     return Object.freeze({ session: mapSession(row, ""), token });
   };
@@ -688,6 +589,18 @@ export function createIdentityService(
       "account-exists",
     );
   };
+
+  const accountChanges = accountChangeOperations({
+    sql,
+    config: resolved,
+    p,
+    normalizeUsername,
+    rateLimit: (rule, subject, context) => enforceRateLimit(requireRule(rule), subject, context),
+    rateLimitIpHash,
+    consumeChallenge,
+    sessionFailure,
+    sessionClientColumns,
+  });
 
   let cachedDerivationProfile: PublishedDerivationProfile | null = null;
 
@@ -830,6 +743,10 @@ export function createIdentityService(
         publicKey: input.publicKey,
         address: input.address,
       });
+      // A small-order or non-canonical key could be "signed for" without any
+      // private key (noble's default zip215 rule accepts R = identity, S = 0
+      // under a small-order key), so it is never enrolled.
+      assertStrictEd25519PublicKey(wallet.publicKeyBytes);
       // Deliberately NOT defaulted to the username: an unset friendly name has
       // to stay distinguishable from one the user actually chose.
       const displayName =
@@ -968,8 +885,10 @@ export function createIdentityService(
                 ),
                 logged AS (
                   INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                  SELECT new_account.id, 'account.register', $20::jsonb, clock.at
-                  FROM new_account, clock
+                  SELECT new_account.id, 'account.register',
+                         $20::jsonb || jsonb_build_object('sessionId', new_session.id),
+                         clock.at
+                  FROM new_account, new_session, clock
                   RETURNING 1
                 )
            SELECT a.id AS account_id,
@@ -1087,7 +1006,7 @@ export function createIdentityService(
       }
 
       const message = challengeMessageFor(challenge);
-      let verified = false;
+      let verified: string | null = null;
       for (const row of rows) {
         const publicKey = optionalTextColumn(row, "wallet_public_key");
         const address = optionalTextColumn(row, "wallet_address");
@@ -1100,7 +1019,8 @@ export function createIdentityService(
             address,
           });
           if (verifyChallengeSignature(identity, message, input.signature)) {
-            verified = true;
+            // The stored text, which the session insert re-checks as enrolled.
+            verified = publicKey;
             break;
           }
         } catch {
@@ -1109,7 +1029,7 @@ export function createIdentityService(
           continue;
         }
       }
-      if (!verified) {
+      if (verified === null) {
         throw invalidSignature;
       }
 
@@ -1118,6 +1038,7 @@ export function createIdentityService(
         "account.login",
         { profileId: resolved.profile.id, challengePurpose: challenge.purpose },
         context,
+        verified,
       );
       return Object.freeze({ account, session });
     },
@@ -1187,7 +1108,9 @@ export function createIdentityService(
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                SELECT revoked.account_id, 'session.revoke', $3::jsonb, (SELECT at FROM clock)
+                SELECT revoked.account_id, 'session.revoke',
+                       $3::jsonb || jsonb_build_object('sessionId', revoked.id),
+                       (SELECT at FROM clock)
                 FROM revoked
                 RETURNING 1
               )
@@ -1393,8 +1316,10 @@ export function createIdentityService(
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                SELECT revoked.account_id, 'session.revoke', $5::jsonb, (SELECT at FROM clock)
-                  FROM revoked
+                SELECT revoked.account_id, 'session.revoke',
+                       $5::jsonb || jsonb_build_object('sessionId', caller.id),
+                       (SELECT at FROM clock)
+                  FROM revoked, caller
                 RETURNING 1
               )
          SELECT caller.id AS caller_id, (SELECT count(*) FROM revoked)::int AS revoked
@@ -1460,28 +1385,53 @@ export function createIdentityService(
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
                 SELECT caller.account_id, 'session.revoke-others',
-                       jsonb_build_object('scope', 'others', 'revoked', (SELECT count(*) FROM revoked)),
+                       jsonb_build_object(
+                         'scope', 'others',
+                         'revoked', (SELECT count(*) FROM revoked),
+                         'sessionId', caller.id
+                       ),
                        (SELECT at FROM clock)
                   FROM caller
                 RETURNING 1
               )
-         SELECT caller.id AS caller_id, revoked.id AS revoked_id
+         SELECT caller.id AS caller_id, caller.account_id, (SELECT at FROM clock) AS occurred_at,
+                revoked.id AS revoked_id
            FROM caller
            LEFT JOIN revoked ON true
           ORDER BY revoked.id`,
         [tokenHash, nowParam, serviceProfileId],
       );
-      if (rows.length === 0) {
+      const first = optionalRow(rows);
+      if (first === null) {
         throw await sessionFailure(tokenHash, nowParam);
       }
-      return Object.freeze({
-        revokedSessionIds: Object.freeze(
-          rows
-            .map((row) => optionalTextColumn(row, "revoked_id"))
-            .filter((id): id is string => id !== null),
-        ),
-      });
+      const revokedSessionIds = Object.freeze(
+        rows
+          .map((row) => optionalTextColumn(row, "revoked_id"))
+          .filter((id): id is string => id !== null),
+      );
+      if (revokedSessionIds.length > 0) {
+        await accountChanges.notify(
+          "session.revoke-others",
+          textColumn(first, "account_id"),
+          instantColumn(first, "occurred_at"),
+          context,
+          { revokedSessions: revokedSessionIds.length },
+        );
+      }
+      return Object.freeze({ revokedSessionIds });
     },
+
+    rotateSignInKey: accountChanges.rotateSignInKey,
+    changeEmail: accountChanges.changeEmail,
+    enrollRecoveryKey: accountChanges.enrollRecoveryKey,
+    removeRecoveryKey: accountChanges.removeRecoveryKey,
+    recoveryStatus: accountChanges.recoveryStatus,
+    beginRecovery: accountChanges.beginRecovery,
+    authenticateRecovery: accountChanges.authenticateRecovery,
+    completeRecovery: accountChanges.completeRecovery,
+    listSecurityEvents: accountChanges.listSecurityEvents,
+    revokeRecoveryKeys: accountChanges.revokeRecoveryKeys,
 
     async getAccount(accountId: string): Promise<IdentityAccount> {
       return loadAccount(accountId);
@@ -1769,6 +1719,8 @@ export function createIdentityService(
       sessions: number;
       emailVerifications: number;
       rateLimits: number;
+      recoveryTokens: number;
+      auditEvents: number;
     }> {
       // Dead sessions are deleted only if no other statement holds their row
       // lock (SKIP LOCKED): maintenance never waits on a revocation, so it can
@@ -1804,12 +1756,48 @@ export function createIdentityService(
                 DELETE FROM ${p}_rate_limits
                  WHERE updated_at <= (SELECT at FROM clock) - (interval '1 second' * $3::double precision)
                  RETURNING 1
+              ),
+              -- A recovery token row is kept one day past its expiry, then
+              -- deleted, unless another statement holds it locked.
+              expired_recoveries AS (
+                DELETE FROM ${p}_account_recoveries
+                 WHERE id IN (
+                   SELECT r.id
+                     FROM ${p}_account_recoveries r
+                    WHERE r.expires_at <= (SELECT at FROM clock) - interval '1 day'
+                      AND r.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF r SKIP LOCKED
+                 )
+                 RETURNING 1
+              ),
+              -- Only with auditRetentionDays: this service's account and
+              -- session events older than it. A row whose account was
+              -- deleted (account_id SET NULL) names no service profile, so no
+              -- service prunes it; the operator deletes it with the account.
+              expired_audit AS (
+                DELETE FROM ${p}_audit_events e
+                 WHERE $4::integer IS NOT NULL
+                   AND e.created_at <= (SELECT at FROM clock) - (interval '1 day' * $4::integer)
+                   AND (e.action LIKE 'account.%' OR e.action LIKE 'session.%')
+                   AND e.account_id IN (
+                     SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                   )
+                 RETURNING 1
               )
          SELECT (SELECT count(*) FROM expired_challenges)::int AS challenges,
                 (SELECT count(*) FROM dead_sessions)::int AS sessions,
                 (SELECT count(*) FROM expired_verifications)::int AS email_verifications,
-                (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits`,
-        [requestNow(context), serviceProfileId, RATE_LIMIT_RETENTION_SECONDS],
+                (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits,
+                (SELECT count(*) FROM expired_recoveries)::int AS recovery_tokens,
+                (SELECT count(*) FROM expired_audit)::int AS audit_events`,
+        [
+          requestNow(context),
+          serviceProfileId,
+          RATE_LIMIT_RETENTION_SECONDS,
+          resolved.auditRetentionDays,
+        ],
       );
       const row = requireSingleRow(
         rows,
@@ -1820,6 +1808,8 @@ export function createIdentityService(
         sessions: integerColumn(row, "sessions"),
         emailVerifications: integerColumn(row, "email_verifications"),
         rateLimits: integerColumn(row, "rate_limits"),
+        recoveryTokens: integerColumn(row, "recovery_tokens"),
+        auditEvents: integerColumn(row, "audit_events"),
       };
     },
   });

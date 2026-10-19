@@ -42,7 +42,7 @@ const prefix = `wsm_${suffix}`;
 const concurrencyPrefix = `wsc_${suffix}`;
 const serviceProfileId = `w2sc-sessions-${suffix}`;
 const tables = [
-  "wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications",
+  "account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications",
   "sessions", "auth_challenges", "account_wallets", "accounts", "service_profile_bootstrap",
   "service_profiles", "schema_migrations",
 ];
@@ -193,7 +193,7 @@ describe.skipIf(!url)("session management on PostgreSQL", () => {
     await Promise.all([first.connect(), second.connect()]);
     sql = pgDriver(first);
     service = createIdentityService(sql, config(prefix));
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7]);
   }, 60_000);
 
   afterAll(async () => {
@@ -386,8 +386,9 @@ describe.skipIf(!url)("session management on PostgreSQL", () => {
 
       // Already revoked: the same uniform answer, and nothing is audited twice.
       expect(await service.revokeSessionById(s0.token, s1.session.id)).toEqual({ revoked: false });
+      // The acting session's id, so the security events can show its label.
       expect((await auditRows(accountId, "session.revoke")).map((row) => row["metadata"])).toEqual([
-        { scope: "other" },
+        { scope: "other", sessionId: s0.session.id },
       ]);
 
       // Ids are matched case-insensitively, like every other id the service takes.
@@ -459,8 +460,8 @@ describe.skipIf(!url)("session management on PostgreSQL", () => {
 
       expect(await service.revokeOtherSessions(s1.token)).toEqual({ revokedSessionIds: [] });
       expect((await auditRows(accountId, "session.revoke-others")).map((row) => row["metadata"])).toEqual([
-        { scope: "others", revoked: 3 },
-        { scope: "others", revoked: 0 },
+        { scope: "others", revoked: 3, sessionId: s1.session.id },
+        { scope: "others", revoked: 0, sessionId: s1.session.id },
       ]);
       expect(await service.liveSessionIds(s1.token)).toEqual([s1.session.id]);
       expect((await rejection(() => service.revokeOtherSessions(s0.token))).code).toBe("session-not-found");

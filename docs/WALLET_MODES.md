@@ -9,7 +9,7 @@ Choose one mode per identity-service namespace:
 
 | `walletMode` | Key creation | Password change | What the platform saves |
 | --- | --- | --- | --- |
-| `per-account-deterministic` | Password, username, context, and a random account salt | Platform implements its own flow; a different password derives a different wallet | Public account setup and enrolled public keys |
+| `per-account-deterministic` | Password, username, context, and a random account salt | A different password derives a different key; the opt-in sign-in-key rotation rebinds the account to it | Public account setup and enrolled public keys |
 | `random-vault` | Random 32-byte Ed25519 seed generated on the client | Re-encrypt the same wallet | Public account setup and encrypted vault |
 
 Omitting `walletMode` preserves the older `service-deterministic` behavior.
@@ -101,20 +101,36 @@ sign-in profile, at service configuration (`invalid-service-profile`) and in
 `createRandomAccountWallet` (`invalid-profile`): its key is random, so there is
 no application secret to derive a wallet from.
 
-### Platform-owned password changes and recovery
+### Password changes and recovery in the deterministic modes
 
-The SDK provides no password-change, wallet-replacement, or account-recovery
-workflow for deterministic mode. Calling `withAccountWallet` with a different
-password derives a different wallet; it does not update the enrolled account
-or authorize that new key to sign in.
+Calling `withAccountWallet` with a different password derives a different key;
+on its own that changes nothing at the service. Two opt-in operations of the
+identity service rebind the account, both in `service-deterministic` and
+`per-account-deterministic` mode only
+([server API](SERVER_API.md#account-changes-and-recovery-keys-opt-in)):
 
-A platform that wants these features implements its own ownership checks,
-account-to-key reassignment, session handling, and updates to any permissions
-that reference the old key, including on-chain authorization where applicable.
-The platform may keep its own account UUID while assigning a new signing key.
-A forgotten password cannot be reconstructed by the SDK, and assigning a new
-key does not recover the old one. The SDK's password-change and recovery-code
-helpers apply only to encrypted vaults.
+- **Sign-in-key rotation** (`accountSecurity.signInKeyRotation`). The client
+  derives the new key with the new password, signs the
+  [account-change message](PROTOCOL.md#part-4--the-account-change-message)
+  with the current key (proof of the current password) and with the new key
+  (proof of possession), and calls `rotateSignInKey`. One statement updates the
+  account's one enrolled-key row in place and revokes every other session; the
+  caller's session stays.
+- **Recovery keys** (`accountSecurity.recoveryKeys`). A signed-in user enrolls
+  the public half of a recovery key derived from a secret the application gives
+  them (for example a phrase). After losing the password they prove that key
+  (`beginRecovery`, which spends nothing), then sign the new password's key
+  with it (`completeRecovery`): one statement replaces the enrolled key, marks
+  the recovery key used, revokes every session and issues a new one.
+
+Both replace the key; neither recovers the old one, and under a chain wallet
+profile the replaced key is a wallet that the account no longer signs in with.
+The platform updates anything else that names the old key, including on-chain
+authorization where applicable, and keeps its own account UUID throughout.
+`random-vault` mode refuses both (`invalid-request`): there a password change
+is a vault re-wrap that keeps the wallet, and the vault has its own recovery
+code. A platform that wants a different flow can still build its own; the
+service's are off unless configured.
 
 ## Random wallet and encrypted vault
 

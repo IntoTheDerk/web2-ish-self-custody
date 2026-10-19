@@ -42,7 +42,7 @@ describe.skipIf(!url)("account wallet modes on PostgreSQL", () => {
   afterAll(async () => {
     if (!client) return;
     for (const prefix of prefixes) {
-      const tables = ["wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications", "sessions", "auth_challenges", "account_wallets", "accounts", "service_profile_bootstrap", "service_profiles", "schema_migrations"];
+      const tables = ["account_recoveries", "account_recovery_keys", "wallet_setups", "wallet_policy", "audit_events", "rate_limits", "email_verifications", "sessions", "auth_challenges", "account_wallets", "accounts", "service_profile_bootstrap", "service_profiles", "schema_migrations"];
       await client.query(`DROP TABLE IF EXISTS ${tables.map(t => `${prefix}_${t}`).join(", ")} CASCADE`);
       await client.query(`DROP FUNCTION IF EXISTS ${prefix}_reject_immutable_mutation() CASCADE`);
     }

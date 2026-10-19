@@ -3,6 +3,7 @@ export type DerivationErrorCode =
   | "async-wallet-scope"
   | "invalid-codec"
   | "invalid-context"
+  | "invalid-email"
   | "invalid-message"
   | "invalid-password"
   | "invalid-profile"

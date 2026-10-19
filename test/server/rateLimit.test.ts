@@ -1,3 +1,4 @@
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { describe, expect, it } from "vitest";
 import { kalvoraEd25519ExternalSalt } from "../../src/chains/kalvora.js";
 import { IdentityError } from "../../src/server/errors.js";
@@ -5,7 +6,9 @@ import { createIdentityService } from "../../src/server/service.js";
 import type { SqlDriver, SqlParameter, SqlRow } from "../../src/server/sql.js";
 
 const username = "Jesse@Example.com";
-const publicKeyBytes = new Uint8Array(32).fill(7);
+// A real Ed25519 public key: registration refuses a non-canonical or
+// small-order key before its rate limit, as it refuses a malformed one.
+const publicKeyBytes = ed25519.getPublicKey(new Uint8Array(32).fill(7));
 const codec = kalvoraEd25519ExternalSalt.codec;
 
 type RateLimitCall = Readonly<{

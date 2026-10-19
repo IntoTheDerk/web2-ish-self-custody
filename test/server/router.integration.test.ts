@@ -411,6 +411,8 @@ describe.skipIf(driverHandle === null)("identity router over PostgreSQL", () => 
     // allowlist, so interpolating it into teardown DDL is safe.
     await driverHandle.driver.query(
       `DROP TABLE IF EXISTS
+         ${tablePrefix}_account_recoveries,
+         ${tablePrefix}_account_recovery_keys,
          ${tablePrefix}_wallet_setups,
          ${tablePrefix}_wallet_policy,
          ${tablePrefix}_audit_events,
