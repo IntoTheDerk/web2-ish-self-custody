@@ -14,6 +14,8 @@
  *   account (FOR SHARE, or FOR NO KEY UPDATE for the email change)
  *   → enrolled key (`<p>_account_wallets`)
  *   → recovery key → recovery token
+ *   → account resets (the rotation aborts a pending signed-in reset; the
+ *     email change closes live emailed codes)
  *   → sessions, in id order (FOR NO KEY UPDATE), never the caller's own row
  *   → inserts (a new session, the audit row)
  *
@@ -93,7 +95,13 @@ const UNIQUE_RACE_ATTEMPTS = 3;
 
 const recoveryKeyHexPattern = /^[0-9a-f]{64}$/u;
 
-export type RateLimitName = "accountChange" | "recoveryBegin" | "recoveryBeginIp";
+export type RateLimitName =
+  | "accountChange"
+  | "recoveryBegin"
+  | "recoveryBeginIp"
+  | "accountResetStart"
+  | "accountResetStartDay"
+  | "accountResetStartIp";
 
 export type AccountChangeDependencies = Readonly<{
   sql: SqlDriver;
@@ -116,7 +124,21 @@ export type AccountChangeDependencies = Readonly<{
   sessionClientColumns: (
     context: RequestContext | undefined,
   ) => Readonly<{ ipHash: string | null; userAgentHash: string | null; clientLabel: string | null }>;
+  /**
+   * The per-recipient cap of account reset codes (the
+   * `account-reset-recipient` rule), which `startAccountReset` counts inside
+   * its own statement: its rule id, limit, window, and the bucket text before
+   * the address, so that SQL forms the bucket as `enforceRateLimit` would.
+   * Nothing else reads the bucket, so the start's uniform answer is its only
+   * outcome.
+   */
+  recipientCap: Readonly<{ ruleId: string; limit: number; windowSeconds: number; bucketPrefix: string }>;
 }>;
+
+/** The optional fields of a `SecurityEventNotice`, by action. */
+export type SecurityEventExtra = Partial<
+  Omit<SecurityEventNotice, "action" | "accountId" | "occurredAt" | "clientLabel">
+>;
 
 export type AccountChangeOperations = Readonly<{
   rotateSignInKey(
@@ -163,7 +185,7 @@ export type AccountChangeOperations = Readonly<{
     accountId: string,
     occurredAt: Date,
     context: RequestContext | undefined,
-    extra?: Readonly<{ revokedSessions?: number; previousVerifiedEmail?: string | null }>,
+    extra?: SecurityEventExtra,
   ): Promise<void>;
 }>;
 
@@ -196,23 +218,23 @@ export async function notifySecurityEvent(
   }
 }
 
-const WALLET_COLUMNS = [
+export const WALLET_COLUMNS = [
   "id", "account_id", "service_profile_id", "profile_id", "codec_id", "curve",
   "application_id", "network_id", "address", "address_normalized", "public_key",
   "fingerprint", "is_primary", "created_at",
 ] as const;
-const ACCOUNT_COLUMNS = [
+export const ACCOUNT_COLUMNS = [
   "id", "service_profile_id", "username_normalized", "display_name", "email",
   "email_verified_at", "status", "created_at", "updated_at",
 ] as const;
-const SESSION_COLUMNS = ["id", "account_id", "issued_at", "expires_at", "last_seen_at"] as const;
+export const SESSION_COLUMNS = ["id", "account_id", "issued_at", "expires_at", "last_seen_at"] as const;
 const RECOVERY_KEY_COLUMNS = ["public_key", "status", "created_at", "used_at", "removed_at"] as const;
 
-function columns(alias: string, names: readonly string[], prefix: string): string {
+export function columns(alias: string, names: readonly string[], prefix: string): string {
   return names.map((name) => `${alias}.${name} AS ${prefix}${name}`).join(", ");
 }
 
-function bare(alias: string, names: readonly string[]): string {
+export function bare(alias: string, names: readonly string[]): string {
   return names.map((name) => `${alias}.${name}`).join(", ");
 }
 
@@ -231,7 +253,7 @@ function mapRecoveryKey(row: SqlRow, prefix: string): IdentityRecoveryKey {
 }
 
 /** Statements that a concurrent twin can refuse with a unique violation are re-run on a fresh snapshot. */
-async function retryUniqueViolation<T>(run: () => Promise<T>): Promise<T> {
+export async function retryUniqueViolation<T>(run: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await run();
@@ -262,7 +284,15 @@ type RecoveryContext = Readonly<{
   walletCount: number;
 }>;
 
-export function accountChangeOperations(deps: AccountChangeDependencies): AccountChangeOperations {
+/**
+ * The helpers every signed account change shares: input checks, the session
+ * read that builds the message to verify, the message itself, the refusals
+ * and the host notice. Package-internal; `accountResets.ts` uses them too, so
+ * that a reset is checked exactly as the changes here are.
+ */
+export type AccountChangeToolkit = ReturnType<typeof accountChangeToolkit>;
+
+export function accountChangeToolkit(deps: AccountChangeDependencies) {
   const { sql, config, p } = deps;
   const serviceProfileId = config.serviceProfileId;
   const codec = config.profile.codec;
@@ -536,6 +566,55 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
     throw staleKey();
   };
 
+  return Object.freeze({
+    recoveryRefused,
+    accountNotActive,
+    badSignature,
+    requireDeterministicMode,
+    requireRotationEnabled,
+    requireRecoveryKeysEnabled,
+    requireInput,
+    sessionToken,
+    canonicalNewKey,
+    canonicalRecoveryKey,
+    storedIdentity,
+    message,
+    keyPrincipal,
+    recoveryPrincipal,
+    notify,
+    readSessionContext,
+    prepareSignedChange,
+    enrolledKeyState,
+    walletConflict,
+    staleKey,
+    failGuardedStatement,
+  });
+}
+
+export function accountChangeOperations(deps: AccountChangeDependencies): AccountChangeOperations {
+  const { sql, config, p } = deps;
+  const serviceProfileId = config.serviceProfileId;
+  const {
+    recoveryRefused,
+    accountNotActive,
+    badSignature,
+    requireRotationEnabled,
+    requireRecoveryKeysEnabled,
+    requireInput,
+    sessionToken,
+    canonicalNewKey,
+    canonicalRecoveryKey,
+    storedIdentity,
+    message,
+    keyPrincipal,
+    recoveryPrincipal,
+    notify,
+    prepareSignedChange,
+    enrolledKeyState,
+    walletConflict,
+    failGuardedStatement,
+  } = accountChangeToolkit(deps);
+
   const operations: AccountChangeOperations = {
     notify,
 
@@ -606,6 +685,23 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      )
                    RETURNING ${bare("w", WALLET_COLUMNS)}
                 ),
+                -- A password change proves the password is not forgotten, so
+                -- it aborts the account's pending signed-in reset, as a
+                -- password sign-in does. The caller's session survives the
+                -- rotation, and a stolen copy of it may be what started the
+                -- reset. The reset row is locked after the key and before the
+                -- sessions, the order of the reset completions.
+                aborted_resets AS (
+                  UPDATE ${p}_account_resets r
+                     SET aborted_at = (SELECT at FROM clock)
+                    FROM rotated
+                   WHERE r.account_id = rotated.account_id
+                     AND r.kind = 'signed-in'
+                     AND r.completed_at IS NULL
+                     AND r.aborted_at IS NULL
+                     AND r.expires_at > (SELECT at FROM clock)
+                   RETURNING r.id, r.account_id
+                ),
                 targets AS (
                   SELECT s.id
                     FROM ${p}_sessions s, rotated, caller
@@ -613,6 +709,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      AND s.id <> caller.id
                      AND s.revoked_at IS NULL
                      AND s.expires_at > (SELECT at FROM clock)
+                     AND (SELECT count(*) FROM aborted_resets) >= 0
                    ORDER BY s.id
                      FOR NO KEY UPDATE OF s
                 ),
@@ -634,9 +731,18 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          (SELECT at FROM clock)
                     FROM rotated, caller
                   RETURNING 1
+                ),
+                logged_abort AS (
+                  INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+                  SELECT aborted_resets.account_id, 'account.signed-in-reset.abort',
+                         jsonb_build_object('abortedBy', 'rotation', 'sessionId', caller.id),
+                         (SELECT at FROM clock)
+                    FROM aborted_resets, caller
+                  RETURNING 1
                 )
            SELECT (SELECT count(*) FROM caller)::int AS caller_found,
                   (SELECT count(*) FROM acct)::int AS account_active,
+                  (SELECT count(*) FROM aborted_resets)::int AS aborted_resets,
                   (SELECT at FROM clock) AS occurred_at,
                   ${columns("r", WALLET_COLUMNS, "wallet_")},
                   v.id AS revoked_id
@@ -677,9 +783,15 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
           .map((row) => optionalTextColumn(row, "revoked_id"))
           .filter((id): id is string => id !== null),
       );
-      await notify("account.key-rotate", wallet.accountId, instantColumn(first, "occurred_at"), context, {
+      const occurredAt = instantColumn(first, "occurred_at");
+      await notify("account.key-rotate", wallet.accountId, occurredAt, context, {
         revokedSessions: revokedSessionIds.length,
       });
+      if (integerColumn(first, "aborted_resets") > 0) {
+        await notify("account.signed-in-reset.abort", wallet.accountId, occurredAt, context, {
+          abortedBy: "rotation",
+        });
+      }
       return Object.freeze({ wallets: Object.freeze([wallet]), revokedSessionIds });
     },
 
@@ -703,7 +815,8 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
               ),
               acct AS (
                 SELECT a.id, a.email AS previous_email,
-                       a.email_verified_at AS previous_verified_at
+                       a.email_verified_at AS previous_verified_at,
+                       a.email_reset_enabled AS previous_email_reset
                   FROM ${p}_accounts a, caller
                  WHERE a.id = caller.account_id
                    AND a.service_profile_id = $3::text
@@ -725,10 +838,31 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          WHEN $5::text IS DISTINCT FROM acct.previous_email THEN NULL
                          ELSE a.email_verified_at
                        END,
+                       -- The email-change interlock: a new address is not yet
+                       -- a recovery channel, so account recovery by email
+                       -- goes off and its live codes, sent to the old
+                       -- address, are closed (below). Turning it back on
+                       -- needs the new address verified and a signature.
+                       email_reset_enabled = CASE
+                         WHEN $5::text IS DISTINCT FROM acct.previous_email THEN false
+                         ELSE a.email_reset_enabled
+                       END,
                        updated_at = (SELECT at FROM clock)
                   FROM acct, keyed
                  WHERE a.id = acct.id AND keyed.account_id = acct.id
                  RETURNING ${bare("a", ACCOUNT_COLUMNS)}
+              ),
+              closed_resets AS (
+                UPDATE ${p}_account_resets r
+                   SET aborted_at = (SELECT at FROM clock)
+                  FROM updated, acct
+                 WHERE r.account_id = updated.id
+                   AND $5::text IS DISTINCT FROM acct.previous_email
+                   AND r.kind = 'email'
+                   AND r.completed_at IS NULL
+                   AND r.aborted_at IS NULL
+                   AND r.expires_at > (SELECT at FROM clock)
+                 RETURNING r.id
               ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -738,6 +872,10 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          'verificationCleared',
                            $5::text IS DISTINCT FROM acct.previous_email
                            AND acct.previous_verified_at IS NOT NULL,
+                         'emailResetDisabled',
+                           $5::text IS DISTINCT FROM acct.previous_email
+                           AND acct.previous_email_reset,
+                         'closedResets', (SELECT count(*) FROM closed_resets),
                          'sessionId', caller.id
                        ),
                        (SELECT at FROM clock)

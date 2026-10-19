@@ -1,4 +1,8 @@
 import type {
+  AccountResetCompletionInput,
+  AccountResetSettingInput,
+  AccountResetSettings,
+  AccountResetStatus,
   AuthenticatedIdentity,
   AuthenticatedRecovery,
   ChallengePurpose,
@@ -9,11 +13,14 @@ import type {
   IdentityRecoveryKey,
   IdentityWallet,
   IssuedEmailVerification,
+  IssuedAccountReset,
   IssuedRecovery,
   IssuedSession,
+  IssuedSignedInReset,
   ListedSession,
   LoginInput,
   PublishedDerivationProfile,
+  ReauthenticationInput,
   RecoveryBeginInput,
   RecoveryCompletionInput,
   RecoveryKeyEnrollmentInput,
@@ -23,8 +30,10 @@ import type {
   RequestContext,
   ResolvedIdentityServiceConfig,
   SecurityEvent,
+  SignedInResetCompletionInput,
   SignInKeyRotationInput,
   StoredWalletVault,
+  VerifiedReauthentication,
 } from "./types.js";
 import type { WalletVault } from "../vault.js";
 
@@ -127,7 +136,8 @@ export interface IdentityService {
    * another account, an unknown id, and a session already revoked or expired
    * all answer `{ revoked: false }`, so the answer reveals nothing. The
    * caller's own session id is `invalid-request`: signing out is
-   * `revokeSession`. A malformed id is `invalid-request`.
+   * `revokeSession`. A malformed id is `invalid-request`. A session that
+   * started a pending signed-in reset revokes nothing (`reset-pending`).
    */
   revokeSessionById(
     token: string,
@@ -135,7 +145,10 @@ export interface IdentityService {
     context?: RequestContext,
   ): Promise<{ revoked: boolean }>;
 
-  /** Revokes every live session of the caller's account except the caller's. */
+  /**
+   * Revokes every live session of the caller's account except the caller's,
+   * unless the caller started a pending signed-in reset (`reset-pending`).
+   */
   revokeOtherSessions(
     token: string,
     context?: RequestContext,
@@ -175,8 +188,12 @@ export interface IdentityService {
    * Re-binds the account to a new enrolled key (a password change), in place:
    * the one enrolled-key row gets the new address, public key and
    * fingerprint, and every other live session of the account is revoked; the
-   * caller's session stays. `authorizerSignature` is by the current key,
-   * `subjectSignature` by the new one. Errors: `invalid-signature` for a bad
+   * caller's session stays. It also aborts the account's pending signed-in
+   * reset (audited `account.signed-in-reset.abort { abortedBy: "rotation" }`),
+   * since a password change proves the password is not forgotten and a
+   * stolen copy of the caller's session may have started it.
+   * `authorizerSignature` is by the current key, `subjectSignature` by the
+   * new one. Errors: `invalid-signature` for a bad
    * signature or a challenge of another username; `key-unchanged` (409) when
    * the new key is the current one; `stale-key` (409) when another change
    * moved the key after this one was signed; `wallet-conflict` (409) unless
@@ -271,6 +288,134 @@ export interface IdentityService {
    */
   revokeRecoveryKeys(accountId: string, context?: RequestContext): Promise<number>;
 
+  /*
+   * Account resets (migration 8) and reauthentication. The changes are signed
+   * like the account changes above (a `rotation` challenge, the
+   * account-change message, strict verification), run in one statement each
+   * that requires an `active` account, take the account row FOR SHARE or FOR
+   * NO KEY UPDATE (never FOR UPDATE), the enrolled key, the resets and then
+   * sessions in id order, and write one audit row with field names only.
+   * None is routed by `createIdentityRouter`.
+   *
+   * Account recovery by email (`accountSecurity.emailReset`) and the
+   * signed-in reset (`accountSecurity.signedInReset`) are opt-ins, off by
+   * default, and run only in the deterministic wallet modes. Each account
+   * also has its own setting: recovery by email is off until its owner turns
+   * it on with a verified email; the signed-in reset is on. Aborting a reset,
+   * reading the status, turning a setting off and `verifyReauthentication`
+   * need no opt-in.
+   */
+
+  /**
+   * Turns one of the account's reset settings on or off, signed by the
+   * enrolled key over `setting:on` or `setting:off`. Account recovery by
+   * email needs a verified email to turn on; the signed-in reset can be
+   * turned off only while an active recovery key or account recovery by
+   * email is set (`reset-setting-refused` otherwise). Turning a setting off
+   * closes that kind's live resets. `changed` is false when it already had
+   * the value.
+   */
+  setAccountResetSetting(
+    token: string,
+    input: AccountResetSettingInput,
+    context?: RequestContext,
+  ): Promise<{ settings: AccountResetSettings; changed: boolean }>;
+
+  /**
+   * The account's reset settings, whether its email is verified, and its
+   * pending signed-in reset (`null` when none is live, or when the session
+   * that started it is gone), flagged when the caller started it. A host
+   * shows the other sessions a banner with an abort from this.
+   */
+  accountResetStatus(token: string, context?: RequestContext): Promise<AccountResetStatus>;
+
+  /**
+   * Starts an account recovery by email. It answers every username the same
+   * way: a fresh `resetId` and the same `expiresAt` (15 minutes), with no
+   * error that depends on the account. Only for an active account with a
+   * verified email and its `email-reset` setting on, and within the
+   * per-recipient cap (`account-reset-recipient`, a bucket of its own), does
+   * it store a code (16 symbols, 80 bits; its SHA-256, 5 attempts) and
+   * return `delivery` for the host to send. Never put `delivery` in a
+   * response, and pad every response to one fixed time: the SDK's work is
+   * the same statements for every username, but delivery is the host's.
+   * Rate limits `account-reset-start` (3 per hour per username),
+   * `account-reset-start-day` (10 per day per username) and
+   * `account-reset-start-ip` count every request.
+   */
+  startAccountReset(
+    input: Readonly<{ username: string }>,
+    context?: RequestContext,
+  ): Promise<IssuedAccountReset>;
+
+  /**
+   * Completes an account recovery by email: the emailed code is the
+   * authorization, and only `newKey` signs (action `email-reset`, authorizer
+   * `email:<resetId>`). In one statement it replaces the enrolled key, marks
+   * the reset completed, closes the account's other live resets, revokes
+   * every session and issues a new one. Every failure an unauthenticated
+   * caller can cause is one `invalid-signature`; a code that verified but
+   * names the current key is `key-unchanged`.
+   */
+  completeAccountReset(
+    input: AccountResetCompletionInput,
+    context?: RequestContext,
+  ): Promise<{
+    account: IdentityAccount;
+    wallets: readonly IdentityWallet[];
+    session: IssuedSession;
+    revokedSessionIds: readonly string[];
+  }>;
+
+  /**
+   * Starts a signed-in reset from the caller's session: it becomes
+   * available to that session after 72 hours and can then be completed for
+   * 7 days. With account recovery by email on, it also issues an emailed
+   * code (`delivery`) that completes it at once. At most one is pending per
+   * account (`reset-pending`). While it is pending, its session cannot
+   * revoke the account's other sessions (`reset-pending`), any session can
+   * abort it, and a sign-in with the password or a password change aborts
+   * it. Only the initiating session completes it, and a session's expiry is
+   * fixed, so without an emailed code a start whose session expires before
+   * `availableAt` is refused: `reset-unavailable` with `details.reason:
+   * "session-expires-first"` and `details.sessionExpiresAt`.
+   */
+  startSignedInReset(token: string, context?: RequestContext): Promise<IssuedSignedInReset>;
+
+  /** Aborts the account's pending signed-in reset, from any of its sessions. */
+  abortSignedInReset(token: string, context?: RequestContext): Promise<{ aborted: boolean }>;
+
+  /**
+   * Completes the caller's own signed-in reset, signed by `newKey` only
+   * (action `signed-in-reset`, authorizer `session-reset:<resetId>`): after
+   * the wait, or before it with the emailed `code`. In one statement it
+   * replaces the enrolled key and revokes every other session; the caller's
+   * stays. `reset-unavailable` when there is no such pending reset of this
+   * session or it is not available yet; `email-verification-failed` for a
+   * wrong, expired or exhausted code; `stale-key` when the key changed after
+   * the call began.
+   */
+  completeSignedInReset(
+    token: string,
+    input: SignedInResetCompletionInput,
+    context?: RequestContext,
+  ): Promise<{ wallets: readonly IdentityWallet[]; revokedSessionIds: readonly string[] }>;
+
+  /**
+   * Proves the current password to the host: consumes a `rotation`
+   * challenge, verifies the enrolled key's signature strictly over action
+   * `reauthentication` and subject `host:<label>`, requires an active
+   * account, and writes audit `account.reauth { label, sessionId }`. It
+   * changes nothing else. `label` is the host's constant for what it
+   * unlocks, `^[a-z0-9][a-z0-9._:-]{2,79}$`, never user data. Counted under
+   * `account-change`.
+   */
+  verifyReauthentication(
+    token: string,
+    input: ReauthenticationInput,
+    context?: RequestContext,
+  ): Promise<VerifiedReauthentication>;
+
   getAccount(accountId: string): Promise<IdentityAccount>;
 
   updateAccount(
@@ -298,7 +443,7 @@ export interface IdentityService {
 
   /**
    * Deletes expired challenges, verifications, and sessions, recovery tokens
-   * a day after they expire and, with `auditRetentionDays`, this service's
+   * and account resets a day after they expire and, with `auditRetentionDays`, this service's
    * older `account.*` and `session.*` audit rows. A dead session or recovery row that another
    * statement holds locked is skipped, never waited on; the next run deletes
    * it.
@@ -309,6 +454,7 @@ export interface IdentityService {
     emailVerifications: number;
     rateLimits: number;
     recoveryTokens: number;
+    accountResets: number;
     auditEvents: number;
   }>;
 }

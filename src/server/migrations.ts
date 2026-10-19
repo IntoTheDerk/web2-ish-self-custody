@@ -498,6 +498,69 @@ export function identityMigrations(
            ON ${p}_account_recoveries (recovery_key_id)`,
       ]),
     }),
+    Object.freeze({
+      version: 8,
+      name: "account-resets",
+      statements: Object.freeze([
+        // The two per-account reset settings. Each column is one ADD COLUMN
+        // IF NOT EXISTS, like migration 6: concurrent runners serialize on the
+        // table lock and a re-run skips it. A NOT NULL column with a constant
+        // default needs no table rewrite (PostgreSQL 11+), so existing
+        // accounts read the default at once: account recovery by email off,
+        // the signed-in reset on (it does nothing unless the service's
+        // `accountSecurity.signedInReset` opt-in is on too).
+        `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS email_reset_enabled boolean NOT NULL DEFAULT false`,
+        `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS signed_in_reset_enabled boolean NOT NULL DEFAULT true`,
+        // One row per reset: an emailed code (`email`, signed out) or a
+        // signed-in reset (`signed-in`, from one session, available after a
+        // wait or at once with an emailed code). The code is stored as its
+        // SHA-256 only. "Live" is neither completed nor aborted; a reset that
+        // lapsed is closed with `aborted_at` when the next one starts.
+        // `session_id` deliberately has no foreign key: `pruneExpired`
+        // deletes dead sessions under SKIP LOCKED, and a cascade from them
+        // would lock reset rows behind the session locks, against the order
+        // every reset statement takes (reset before sessions). A reset whose
+        // session is gone cannot complete, because completion requires that
+        // session's live token.
+        `CREATE TABLE IF NOT EXISTS ${p}_account_resets (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
+           kind text NOT NULL,
+           code_hash text,
+           attempts integer NOT NULL DEFAULT 0,
+           session_id uuid,
+           created_at timestamptz NOT NULL DEFAULT now(),
+           available_at timestamptz NOT NULL,
+           expires_at timestamptz NOT NULL,
+           completed_at timestamptz,
+           aborted_at timestamptz,
+           CONSTRAINT ${p}_account_resets_kind CHECK (kind IN ('email', 'signed-in')),
+           CONSTRAINT ${p}_account_resets_code_hash CHECK (code_hash IS NULL OR code_hash ~ '^[0-9a-f]{64}$'),
+           CONSTRAINT ${p}_account_resets_attempts CHECK (attempts >= 0),
+           CONSTRAINT ${p}_account_resets_shape CHECK (
+             (kind = 'email' AND code_hash IS NOT NULL AND session_id IS NULL AND available_at = created_at)
+             OR (kind = 'signed-in' AND session_id IS NOT NULL)
+           ),
+           CONSTRAINT ${p}_account_resets_times CHECK (available_at >= created_at AND expires_at > available_at),
+           CONSTRAINT ${p}_account_resets_closed CHECK (completed_at IS NULL OR aborted_at IS NULL)
+         )`,
+        // At most one live signed-in reset per account. Under READ COMMITTED a
+        // second start cannot see the first one's new row, so only an index
+        // can refuse it (the service retries on a fresh snapshot and answers
+        // `reset-pending`). It also serves the login abort and the status.
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_account_resets_signed_in_live_idx
+           ON ${p}_account_resets (account_id)
+           WHERE kind = 'signed-in' AND completed_at IS NULL AND aborted_at IS NULL`,
+        // An account's resets: the live email codes that an email change, a
+        // setting change or a completion closes, and the account-delete
+        // cascade.
+        `CREATE INDEX IF NOT EXISTS ${p}_account_resets_account_idx
+           ON ${p}_account_resets (account_id, created_at DESC)`,
+        // `pruneExpired` deletes rows a day after they expire.
+        `CREATE INDEX IF NOT EXISTS ${p}_account_resets_expires_idx
+           ON ${p}_account_resets (expires_at)`,
+      ]),
+    }),
   ]);
 }
 

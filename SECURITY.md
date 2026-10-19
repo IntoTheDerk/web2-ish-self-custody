@@ -77,9 +77,11 @@ Deterministic modes store public wallet metadata. `random-vault` mode also
 stores encrypted vaults and revisions. Vault downloads require platform
 authorization; clients decrypt locally with a password or recovery code.
 The server cannot reset or recover either secret. In the deterministic modes
-the identity service offers opt-in sign-in-key rotation and recovery keys
-(docs/SERVER_API.md); both rebind an account to a new key, authorized by
-strictly verified signatures, and neither recovers the old key.
+the identity service offers opt-in sign-in-key rotation and recovery keys, and
+opt-in account resets by an emailed code or from a signed-in session after a
+72-hour wait (docs/SERVER_API.md); each rebinds an account to a new key,
+authorized by strictly verified signatures (and, for a reset, the code or the
+wait), and none recovers the old key.
 
 The public salt is public but integrity-critical. It is a namespace separator,
 not a secret: publishing it is required for clients to derive at all, and

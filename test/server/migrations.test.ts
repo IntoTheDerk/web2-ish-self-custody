@@ -343,6 +343,68 @@ describe("migration 7, account recovery keys", () => {
   });
 });
 
+describe("migration 8, account resets", () => {
+  const migration = migrations.find((candidate) => candidate.version === 8);
+  const normalized = (statement: string): string => statement.replace(/\s+/gu, " ").trim();
+
+  it("is two ADD COLUMN IF NOT EXISTS and four CREATE ... IF NOT EXISTS statements", () => {
+    expect(migration?.name).toBe("account-resets");
+    const statements = (migration?.statements ?? []).map(normalized);
+    expect(statements).toHaveLength(6);
+    expect(statements[0]).toBe(
+      "ALTER TABLE acme_id_accounts ADD COLUMN IF NOT EXISTS email_reset_enabled boolean NOT NULL DEFAULT false",
+    );
+    expect(statements[1]).toBe(
+      "ALTER TABLE acme_id_accounts ADD COLUMN IF NOT EXISTS signed_in_reset_enabled boolean NOT NULL DEFAULT true",
+    );
+    expect(statements.slice(2).map((statement) => statement.split(" (")[0])).toEqual([
+      "CREATE TABLE IF NOT EXISTS acme_id_account_resets",
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_resets_signed_in_live_idx ON acme_id_account_resets",
+      "CREATE INDEX IF NOT EXISTS acme_id_account_resets_account_idx ON acme_id_account_resets",
+      "CREATE INDEX IF NOT EXISTS acme_id_account_resets_expires_idx ON acme_id_account_resets",
+    ]);
+    // Each statement is one idempotent object: no DROP or separate ADD CONSTRAINT.
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\b(DROP|ADD CONSTRAINT)\b/u);
+    }
+  });
+
+  it("pins the listed columns, the checks and the live index", () => {
+    const [, , table, live] = (migration?.statements ?? []).map(normalized);
+    for (const column of [
+      "id uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+      "account_id uuid NOT NULL REFERENCES acme_id_accounts(id) ON DELETE CASCADE",
+      "kind text NOT NULL",
+      "code_hash text,",
+      "attempts integer NOT NULL DEFAULT 0",
+      "session_id uuid,",
+      "created_at timestamptz NOT NULL DEFAULT now()",
+      "available_at timestamptz NOT NULL",
+      "expires_at timestamptz NOT NULL",
+      "completed_at timestamptz,",
+      "aborted_at timestamptz,",
+    ]) {
+      expect(table).toContain(column);
+    }
+    expect(table).toContain("CHECK (kind IN ('email', 'signed-in'))");
+    expect(table).toContain("CHECK (code_hash IS NULL OR code_hash ~ '^[0-9a-f]{64}$')");
+    expect(table).toContain("CHECK (attempts >= 0)");
+    expect(table).toContain(
+      "(kind = 'email' AND code_hash IS NOT NULL AND session_id IS NULL AND available_at = created_at) OR (kind = 'signed-in' AND session_id IS NOT NULL)",
+    );
+    expect(table).toContain("CHECK (available_at >= created_at AND expires_at > available_at)");
+    expect(table).toContain("CHECK (completed_at IS NULL OR aborted_at IS NULL)");
+    // No foreign key to the sessions: pruning a session must not lock a reset (migrations.ts).
+    expect(table).not.toContain("REFERENCES acme_id_sessions");
+    expect(table).not.toMatch(/\bcode\s+(text|bytea)/u);
+    expect(live).toBe(
+      "CREATE UNIQUE INDEX IF NOT EXISTS acme_id_account_resets_signed_in_live_idx " +
+        "ON acme_id_account_resets (account_id) " +
+        "WHERE kind = 'signed-in' AND completed_at IS NULL AND aborted_at IS NULL",
+    );
+  });
+});
+
 describe("migration 6, session client labels", () => {
   const migration = migrations.find((candidate) => candidate.version === 6);
 

@@ -17,7 +17,12 @@ const defaults = Object.freeze({
   requireVerifiedEmail: false,
   walletMode: "service-deterministic" as const,
   storeSessionClientHashes: true,
-  accountSecurity: Object.freeze({ signInKeyRotation: false, recoveryKeys: false }),
+  accountSecurity: Object.freeze({
+    signInKeyRotation: false,
+    recoveryKeys: false,
+    emailReset: false,
+    signedInReset: false,
+  }),
   onSecurityEvent: null,
   auditRetentionDays: null,
 });
@@ -103,9 +108,16 @@ function optionalBoolean(value: unknown, field: string, fallback: boolean): bool
  * Each opt-in is a strict boolean, and an unknown key is refused: a misspelt
  * opt-in must not leave a deployment believing it turned something on.
  */
+const accountSecurityKeys: readonly string[] = Object.freeze([
+  "signInKeyRotation",
+  "recoveryKeys",
+  "emailReset",
+  "signedInReset",
+]);
+
 function resolveAccountSecurity(
   value: unknown,
-): Readonly<{ signInKeyRotation: boolean; recoveryKeys: boolean }> {
+): ResolvedIdentityServiceConfig["accountSecurity"] {
   if (value === undefined) {
     return defaults.accountSecurity;
   }
@@ -114,9 +126,9 @@ function resolveAccountSecurity(
   }
   const record = value as Readonly<Record<string, unknown>>;
   for (const key of Object.keys(record)) {
-    if (key !== "signInKeyRotation" && key !== "recoveryKeys") {
+    if (!accountSecurityKeys.includes(key)) {
       throw new IdentityError(
-        "accountSecurity accepts only signInKeyRotation and recoveryKeys.",
+        `accountSecurity accepts only ${accountSecurityKeys.join(", ")}.`,
         "invalid-service-profile",
       );
     }
@@ -128,6 +140,8 @@ function resolveAccountSecurity(
       false,
     ),
     recoveryKeys: optionalBoolean(record["recoveryKeys"], "accountSecurity.recoveryKeys", false),
+    emailReset: optionalBoolean(record["emailReset"], "accountSecurity.emailReset", false),
+    signedInReset: optionalBoolean(record["signedInReset"], "accountSecurity.signedInReset", false),
   });
 }
 
