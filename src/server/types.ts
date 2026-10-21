@@ -488,17 +488,17 @@ export type AccountResetDelivery = Readonly<{
 
 /**
  * What `startAccountReset` returns, the same shape for every username. The
- * caller's answer carries `resetId` and `expiresAt` only, whatever happened:
+ * caller's answer carries a fresh decoy `resetId` and `expiresAt` only:
  * `delivery` is `null` unless a code was issued (an active account with a
  * verified email and its `email-reset` setting on, within the per-recipient
  * cap), and a host that sends it must not let the response time or content
  * depend on it.
  */
 export type IssuedAccountReset = Readonly<{
-  /** A fresh UUID for every request; the client signs `email:<resetId>`. */
+  /** A fresh decoy UUID for every anonymous request. Completion uses the emailed id. */
   resetId: string;
   expiresAt: Date;
-  delivery: AccountResetDelivery | null;
+  delivery: (AccountResetDelivery & Readonly<{ resetId: string }>) | null;
 }>;
 
 /**

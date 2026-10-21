@@ -102,8 +102,6 @@ export type RateLimitName =
   | "accountChange"
   | "recoveryBegin"
   | "recoveryBeginIp"
-  | "accountResetStart"
-  | "accountResetStartDay"
   | "accountResetStartIp";
 
 export type AccountChangeDependencies = Readonly<{

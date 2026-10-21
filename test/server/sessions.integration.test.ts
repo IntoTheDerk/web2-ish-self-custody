@@ -193,7 +193,7 @@ describe.skipIf(!url)("session management on PostgreSQL", () => {
     await Promise.all([first.connect(), second.connect()]);
     sql = pgDriver(first);
     service = createIdentityService(sql, config(prefix));
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   }, 60_000);
 
   afterAll(async () => {

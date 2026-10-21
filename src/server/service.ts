@@ -122,16 +122,8 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
   // Beginning a recovery: per caller and username, and per caller alone.
   recoveryBegin: Object.freeze({ id: "recovery-begin", limit: 5, windowSeconds: 3_600 }),
   recoveryBeginIp: Object.freeze({ id: "recovery-begin-ip", limit: 20, windowSeconds: 3_600 }),
-  // Starting an account recovery by email: per username, whoever asks, by
-  // hour and by day, and per caller alone. A username's buckets count every
-  // request, whether or not the account exists or a code is sent, so the
-  // limits answer alike for every username.
-  accountResetStart: Object.freeze({ id: "account-reset-start", limit: 3, windowSeconds: 3_600 }),
-  accountResetStartDay: Object.freeze({
-    id: "account-reset-start-day",
-    limit: 10,
-    windowSeconds: 86_400,
-  }),
+  // Anonymous starts are limited per caller. The database coalesces one
+  // active challenge per account and caps actual mail per recipient.
   accountResetStartIp: Object.freeze({ id: "account-reset-start-ip", limit: 20, windowSeconds: 3_600 }),
   // The codes an account recovery by email sends to one address, whatever
   // the username. Counted only inside the start's statement, for an eligible
@@ -1566,6 +1558,7 @@ export function createIdentityService(
     setAccountResetSetting: accountResets.setAccountResetSetting,
     accountResetStatus: accountResets.accountResetStatus,
     startAccountReset: accountResets.startAccountReset,
+    cancelUndeliveredAccountReset: accountResets.cancelUndeliveredAccountReset,
     completeAccountReset: accountResets.completeAccountReset,
     startSignedInReset: accountResets.startSignedInReset,
     abortSignedInReset: accountResets.abortSignedInReset,

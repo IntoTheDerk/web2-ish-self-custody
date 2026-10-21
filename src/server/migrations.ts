@@ -70,7 +70,7 @@ export function identityMigrations(
 
   const mutationGuard = `${p}_reject_immutable_mutation`;
 
-  return Object.freeze([
+  const migrations = Object.freeze([
     Object.freeze({
       version: 1,
       name: "service-profile",
@@ -568,6 +568,128 @@ export function identityMigrations(
         `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0`,
         `ALTER TABLE ${p}_account_resets ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0`,
       ]),
+    }),
+    Object.freeze({
+      version: 10,
+      name: "coalesced-email-resets",
+      statements: Object.freeze([
+        // Existing emailed reset ids were exposed to anonymous starters by
+        // earlier SDKs. Close every such challenge before coalescing starts.
+        `UPDATE ${p}_account_resets
+            SET aborted_at = now()
+          WHERE kind = 'email' AND completed_at IS NULL AND aborted_at IS NULL`,
+        // Earlier anonymous starts could spend this quota without leaving a
+        // usable mailbox challenge. Do not carry that denial into the cutover.
+        `DELETE FROM ${p}_rate_limits WHERE rule_id = 'account-reset-recipient'`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_account_resets_email_live_idx
+           ON ${p}_account_resets (account_id)
+           WHERE kind = 'email' AND completed_at IS NULL AND aborted_at IS NULL`,
+        // A function keeps the account lock through a fresh READ COMMITTED
+        // snapshot, the recipient reservation and issuance. Stateless SQL
+        // transports cannot hold this lock across separate SDK queries.
+        `CREATE OR REPLACE FUNCTION ${p}_start_email_reset(
+           profile_id text, normalized_name text, recipient_prefix text,
+           recipient_rule text, recipient_window double precision,
+           recipient_limit integer, new_reset_id uuid, new_code_hash text,
+           ttl_seconds double precision, request_at timestamptz
+         ) RETURNS TABLE (delivery_email text, issued integer, expires_at timestamptz)
+         LANGUAGE plpgsql AS $reset$
+         DECLARE
+           clock_at timestamptz := COALESCE(request_at, now());
+           owner_id uuid;
+           address text;
+           recipient_count integer;
+         BEGIN
+           delivery_email := NULL;
+           issued := 0;
+           expires_at := date_trunc('milliseconds', clock_at + interval '1 second' * ttl_seconds);
+           SELECT a.id, a.email INTO owner_id, address
+             FROM ${p}_accounts a
+            WHERE a.service_profile_id = profile_id
+              AND a.username_normalized = normalized_name
+              AND a.status = 'active'
+              AND a.email_reset_enabled
+              AND a.email IS NOT NULL
+              AND a.email_verified_at IS NOT NULL
+            FOR NO KEY UPDATE OF a;
+           IF owner_id IS NULL THEN RETURN NEXT; RETURN; END IF;
+
+           UPDATE ${p}_account_resets r SET aborted_at = clock_at
+            WHERE r.account_id = owner_id AND r.kind = 'email'
+              AND r.completed_at IS NULL AND r.aborted_at IS NULL
+              AND (r.expires_at <= clock_at OR r.attempts >= 5);
+           PERFORM 1 FROM ${p}_account_resets r
+            WHERE r.account_id = owner_id AND r.kind = 'email'
+              AND r.completed_at IS NULL AND r.aborted_at IS NULL;
+           IF FOUND THEN RETURN NEXT; RETURN; END IF;
+
+           INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
+           VALUES (encode(sha256(convert_to(recipient_prefix || address, 'UTF8')), 'hex'),
+                   recipient_rule, 1, clock_at, clock_at)
+           ON CONFLICT (bucket) DO UPDATE
+             SET count = CASE
+                   WHEN rl.window_start + interval '1 second' * recipient_window <= excluded.updated_at
+                   THEN 1 ELSE rl.count + 1 END,
+                 window_start = CASE
+                   WHEN rl.window_start + interval '1 second' * recipient_window <= excluded.updated_at
+                   THEN excluded.window_start ELSE rl.window_start END,
+                 updated_at = excluded.updated_at
+           RETURNING rl.count INTO recipient_count;
+           IF recipient_count > recipient_limit THEN RETURN NEXT; RETURN; END IF;
+
+           INSERT INTO ${p}_account_resets
+             (id, account_id, kind, code_hash, attempts, created_at, available_at, expires_at)
+           VALUES (new_reset_id, owner_id, 'email', new_code_hash, 0, clock_at, clock_at, expires_at);
+           INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
+           VALUES (owner_id, 'account.email-reset.start', jsonb_build_object('method', 'email'), clock_at);
+           delivery_email := address;
+           issued := 1;
+           RETURN NEXT;
+         END;
+         $reset$`,
+        // The host passes the issued id and code only when email delivery
+        // fails. Lock the account before the reset so cancellation is ordered
+        // with starts and completions, then read the reset in a fresh snapshot.
+        `CREATE OR REPLACE FUNCTION ${p}_cancel_undelivered_email_reset(
+           profile_id text, reset_id uuid, expected_code_hash text, request_at timestamptz
+         ) RETURNS boolean LANGUAGE plpgsql AS $reset$
+         DECLARE
+           clock_at timestamptz := COALESCE(request_at, now());
+           owner_id uuid;
+         BEGIN
+           SELECT a.id INTO owner_id
+             FROM ${p}_accounts a
+             JOIN ${p}_account_resets r ON r.account_id = a.id
+            WHERE a.service_profile_id = profile_id AND r.id = reset_id AND r.kind = 'email'
+              AND r.code_hash = expected_code_hash
+            FOR NO KEY UPDATE OF a;
+           IF owner_id IS NULL THEN RETURN false; END IF;
+
+           UPDATE ${p}_account_resets r SET aborted_at = clock_at
+            WHERE r.id = reset_id AND r.account_id = owner_id AND r.kind = 'email'
+              AND r.code_hash = expected_code_hash
+              AND r.completed_at IS NULL AND r.aborted_at IS NULL
+              AND r.expires_at > clock_at;
+           RETURN FOUND;
+         END;
+         $reset$`,
+      ]),
+    }),
+  ]);
+  // Migration 10 was recorded by some environments before its exhausted-row
+  // and failed-delivery fixes. Reapply only its current function definitions;
+  // its one-time cutover UPDATE and quota DELETE must not run again.
+  const emailFunctions = migrations.find((migration) => migration.version === 10)?.statements
+    .filter((statement) => statement.startsWith("CREATE OR REPLACE FUNCTION "));
+  if (emailFunctions?.length !== 2) {
+    throw new Error("Migration 10 must define both email reset functions.");
+  }
+  return Object.freeze([
+    ...migrations,
+    Object.freeze({
+      version: 11,
+      name: "refresh-email-reset-functions",
+      statements: Object.freeze(emailFunctions),
     }),
   ]);
 }
