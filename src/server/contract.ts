@@ -347,6 +347,18 @@ export interface IdentityService {
   ): Promise<IssuedAccountReset>;
 
   /**
+   * Host-only cleanup when delivery of a newly issued email reset fails.
+   * Pass the `resetId` and `code` from `delivery`; never expose this method on
+   * an anonymous route. Only that unexpired, unfinished challenge is closed.
+   * Returns `cancelled: false` for a missing, mismatched, or already closed id.
+   * Recipient quota remains spent because a delivery attempt occurred.
+   */
+  cancelUndeliveredAccountReset(
+    input: Readonly<{ resetId: string; code: string }>,
+    context?: RequestContext,
+  ): Promise<{ cancelled: boolean }>;
+
+  /**
    * Completes an account recovery by email: the emailed code is the
    * authorization, and only `newKey` signs (action `email-reset`, authorizer
    * `email:<resetId>`). In one statement it replaces the enrolled key, marks

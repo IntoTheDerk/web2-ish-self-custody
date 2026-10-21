@@ -421,6 +421,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     for (const tablePrefix of [prefix, concurrencyPrefix]) {
       await first.query(`DROP TABLE IF EXISTS ${tables.map((t) => `${tablePrefix}_${t}`).join(", ")} CASCADE`);
       await first.query(`DROP FUNCTION IF EXISTS ${tablePrefix}_start_email_reset(text,text,text,text,double precision,integer,uuid,text,double precision,timestamptz)`);
+      await first.query(`DROP FUNCTION IF EXISTS ${tablePrefix}_cancel_undelivered_email_reset(text,uuid,text,timestamptz)`);
       await first.query(`DROP FUNCTION IF EXISTS ${tablePrefix}_reject_immutable_mutation() CASCADE`);
     }
     await Promise.all([first.end(), second.end()]);
@@ -872,6 +873,23 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect(sprayed.details?.["rule"]).toBe("account-reset-start-ip");
     });
 
+    it("closes a challenge with five spent attempts before coalescing another start", async () => {
+      const account = await verifiedAccount("exhausted-email");
+      await enableEmailReset(account);
+      const exhausted = (await startEmail(account.name)).delivery!;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expectCode(() => completeEmail(account.name, exhausted.resetId, "WRONGCOD", newKey()), "invalid-signature");
+      }
+      const replacement = (await startEmail(account.name)).delivery!;
+      expect(replacement.resetId).not.toBe(exhausted.resetId);
+      expect((await resetRow(exhausted.resetId))?.["aborted_at"]).not.toBeNull();
+      expect((await startEmail(account.name)).delivery).toBeNull();
+      await expectCode(() => completeEmail(account.name, exhausted.resetId, exhausted.code, newKey()), "invalid-signature");
+      const next = newKey();
+      await completeEmail(account.name, replacement.resetId, replacement.code, next);
+      expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+    });
+
     it("lets the mailbox owner finish from another browser after an attacker started the challenge", async () => {
       const account = await verifiedAccount("mailbox-owner");
       await enableEmailReset(account);
@@ -996,6 +1014,104 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const off = createIdentityService(pgDriver(first), config(prefix, { accountSecurity: { signedInReset: true } }));
       await expectCode(() => off.startAccountReset({ username: "anyone@example.com" }), "invalid-request");
       await expectCode(() => service.startAccountReset({ username: "x" }, ctx()), "invalid-username");
+    });
+  });
+
+  describe("cancelUndeliveredAccountReset", () => {
+    it("requires the issued id and code, then releases only that undelivered challenge", async () => {
+      const account = await verifiedAccount("mail-failed");
+      await enableEmailReset(account);
+      const firstIssue = await startEmail(account.name);
+      const delivery = firstIssue.delivery!;
+      expect(await service.cancelUndeliveredAccountReset({ resetId: firstIssue.resetId, code: delivery.code })).toEqual({ cancelled: false });
+      expect(await service.cancelUndeliveredAccountReset({ resetId: delivery.resetId, code: "WRONGCOD" })).toEqual({ cancelled: false });
+      expect((await resetRow(delivery.resetId))?.["aborted_at"]).toBeNull();
+      expect(await service.cancelUndeliveredAccountReset({ resetId: delivery.resetId, code: delivery.code })).toEqual({ cancelled: true });
+      expect(await service.cancelUndeliveredAccountReset({ resetId: delivery.resetId, code: delivery.code })).toEqual({ cancelled: false });
+      await expectCode(() => completeEmail(account.name, delivery.resetId, delivery.code, newKey()), "invalid-signature");
+      const replacement = (await startEmail(account.name)).delivery!;
+      expect(replacement.resetId).not.toBe(delivery.resetId);
+      expect(await service.cancelUndeliveredAccountReset({ resetId: delivery.resetId, code: delivery.code })).toEqual({ cancelled: false });
+      const next = newKey();
+      await completeEmail(account.name, replacement.resetId, replacement.code, next);
+      expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+      expect(await service.cancelUndeliveredAccountReset({ resetId: replacement.resetId, code: replacement.code })).toEqual({ cancelled: false });
+    });
+
+    it("orders a failed-send cancellation with a simultaneous start", async () => {
+      const account = await verifiedAccount("mail-failed-start-race");
+      await enableEmailReset(account);
+      const issued = (await startEmail(account.name)).delivery!;
+      const lanes = await openConnections(3);
+      const [holder, canceller, starter] = lanes as [Connection, Connection, Connection];
+      let cancellation: Promise<{ cancelled: boolean }> | undefined;
+      let concurrentStart: Promise<IssuedAccountReset> | undefined;
+      try {
+        await holder.client.query("BEGIN");
+        await holder.client.query(`SELECT 1 FROM ${prefix}_accounts WHERE id = $1::uuid FOR UPDATE`, [account.accountId]);
+        cancellation = canceller.service.cancelUndeliveredAccountReset(issued);
+        void cancellation.catch(() => undefined);
+        await waitUntilBlocked(canceller.pid);
+        concurrentStart = startEmail(account.name, starter.service);
+        void concurrentStart.catch(() => undefined);
+        await waitUntilBlocked(starter.pid);
+        await holder.client.query("COMMIT");
+        expect(await cancellation).toEqual({ cancelled: true });
+        const raced = await concurrentStart;
+        const fresh = raced.delivery ?? (await startEmail(account.name)).delivery!;
+        expect(fresh.resetId).not.toBe(issued.resetId);
+        expect((await resetRow(issued.resetId))?.["aborted_at"]).not.toBeNull();
+        const next = newKey();
+        await completeEmail(account.name, fresh.resetId, fresh.code, next);
+        expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+      } finally {
+        await holder.client.query("ROLLBACK");
+        await Promise.allSettled([cancellation, concurrentStart].filter((value) => value !== undefined));
+        await closeConnections(lanes);
+      }
+    });
+
+    it("allows either completion or cancellation to win, never both", async () => {
+      const account = await verifiedAccount("mail-failed-complete-race");
+      await enableEmailReset(account);
+      const issued = (await startEmail(account.name)).delivery!;
+      const next = newKey();
+      const challenge = await service.createChallenge(account.name, "rotation", ctx());
+      const signed = messageFor(challenge, "email-reset", `email:${issued.resetId}`, keyPrincipal(next));
+      const lanes = await openConnections(3);
+      const [holder, canceller, completer] = lanes as [Connection, Connection, Connection];
+      let cancellation: Promise<{ cancelled: boolean }> | undefined;
+      let completion: ReturnType<IdentityService["completeAccountReset"]> | undefined;
+      try {
+        await holder.client.query("BEGIN");
+        await holder.client.query(`SELECT 1 FROM ${prefix}_accounts WHERE id = $1::uuid FOR UPDATE`, [account.accountId]);
+        cancellation = canceller.service.cancelUndeliveredAccountReset(issued);
+        void cancellation.catch(() => undefined);
+        await waitUntilBlocked(canceller.pid);
+        completion = completer.service.completeAccountReset({
+          username: account.name,
+          resetId: issued.resetId,
+          code: issued.code,
+          challengeId: challenge.id,
+          newKey: enrolled(next),
+          subjectSignature: sign(next, signed),
+        }, ctx());
+        void completion.catch(() => undefined);
+        await waitUntilBlocked(completer.pid);
+        await holder.client.query("COMMIT");
+        const [cancelled, completed] = await Promise.allSettled([cancellation, completion]);
+        expect(cancelled.status).toBe("fulfilled");
+        const didCancel = cancelled.status === "fulfilled" && cancelled.value.cancelled;
+        expect(didCancel).toBe(completed.status === "rejected");
+        if (completed.status === "rejected") {
+          expect((completed.reason as IdentityError).code).toBe("invalid-signature");
+        }
+        expect((await resetRow(issued.resetId))?.[didCancel ? "aborted_at" : "completed_at"]).not.toBeNull();
+      } finally {
+        await holder.client.query("ROLLBACK");
+        await Promise.allSettled([cancellation, completion].filter((value) => value !== undefined));
+        await closeConnections(lanes);
+      }
     });
   });
 

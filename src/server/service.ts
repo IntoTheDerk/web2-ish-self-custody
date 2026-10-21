@@ -1558,6 +1558,7 @@ export function createIdentityService(
     setAccountResetSetting: accountResets.setAccountResetSetting,
     accountResetStatus: accountResets.accountResetStatus,
     startAccountReset: accountResets.startAccountReset,
+    cancelUndeliveredAccountReset: accountResets.cancelUndeliveredAccountReset,
     completeAccountReset: accountResets.completeAccountReset,
     startSignedInReset: accountResets.startSignedInReset,
     abortSignedInReset: accountResets.abortSignedInReset,

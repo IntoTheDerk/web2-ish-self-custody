@@ -122,6 +122,10 @@ export type AccountResetOperations = Readonly<{
     input: Readonly<{ username: string }>,
     context?: RequestContext,
   ): Promise<IssuedAccountReset>;
+  cancelUndeliveredAccountReset(
+    input: Readonly<{ resetId: string; code: string }>,
+    context?: RequestContext,
+  ): Promise<{ cancelled: boolean }>;
   completeAccountReset(
     input: AccountResetCompletionInput,
     context?: RequestContext,
@@ -567,6 +571,31 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
             ? Object.freeze({ email, resetId, code })
             : null,
       });
+    },
+
+    async cancelUndeliveredAccountReset(input, context) {
+      requireDeterministicMode();
+      requireInput(input);
+      const resetId = requireResetId(input.resetId);
+      if (typeof input.code !== "string") {
+        throw new IdentityError("code must be a string.", "invalid-request");
+      }
+      const rows = await sql.query(
+        `SELECT ${p}_cancel_undelivered_email_reset(
+          $1::text, $2::uuid, $3::text, $4::timestamptz
+        ) AS cancelled`,
+        [
+          serviceProfileId,
+          resetId,
+          hashAccountResetCode(serviceProfileId, resetId, reduceCode(input.code)),
+          requestNow(context),
+        ],
+      );
+      const row = optionalRow(rows);
+      if (row === null) {
+        throw new IdentityError("The reset could not be cancelled.", "invalid-request");
+      }
+      return Object.freeze({ cancelled: booleanColumn(row, "cancelled") });
     },
 
     async completeAccountReset(input, context) {

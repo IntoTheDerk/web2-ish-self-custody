@@ -1021,10 +1021,11 @@ the retention.
 
 Account recovery by email and the signed-in reset replace the enrolled key
 without the old password, as a recovery key does; reauthentication proves the
-current password to the host and changes nothing. Eight `IdentityService`
+current password to the host and changes nothing. Nine `IdentityService`
 methods, none routed by `createIdentityRouter`: a host calls them from its own
 routes and answers `completeAccountReset` with `createSessionResponder`
-([above](#answering-a-recovery-from-a-host-route)). Each change is signed over
+([above](#answering-a-recovery-from-a-host-route)). Key replacements, setting
+changes, and reauthentication are signed over
 the [account-change message](PROTOCOL.md#part-4--the-account-change-message)
 for a `rotation` challenge of the account's username and verified
 [strictly](#strict-verification), as the account changes are.
@@ -1040,18 +1041,21 @@ Two service opt-ins, both **default `false`**, and two per-account settings
 | account setting, default | `email-reset`, **off** | `signed-in-reset`, **on** |
 | turning the setting on | needs the opt-in and a verified email | needs the opt-in |
 | turning the setting off | always works; closes its live codes | only while an active recovery key (with `recoveryKeys` on) or account recovery by email is set; aborts a pending reset, which counts as pending, and completes, only while the setting is on |
-| methods | `startAccountReset`, `completeAccountReset` | `startSignedInReset`, `completeSignedInReset` |
+| methods | `startAccountReset`, `cancelUndeliveredAccountReset`, `completeAccountReset` | `startSignedInReset`, `completeSignedInReset` |
 
 `abortSignedInReset`, `accountResetStatus`, turning a setting off and
 `verifyReauthentication` need no opt-in. The resets and the settings run only
 in the deterministic wallet modes (`invalid-request` in `random-vault` mode,
-before any SQL); reauthentication runs in every mode. Every method requires an
-`active` account, checked again under the account row's lock; a suspended
+before any SQL); reauthentication runs in every mode. Apart from host cleanup
+of a failed send, every method requires an `active` account, checked again
+under the account row's lock; a suspended
 account's caller gets `invalid-signature`, and `startAccountReset` answers as
 for any other username. The rule for turning the signed-in reset off is
 checked when it is turned off: removing the other method later leaves it off.
 A change of either setting, in either direction, cancels pending signed-in
 resets; changing the email-reset setting also closes its open email codes.
+Failed-send cancellation is host cleanup and can close a code after an
+account is suspended or the service email-reset opt-in is turned off.
 Migration 9 adds a durable reset generation to each account and reset. A
 signed-in reset is pending or completable only while the generations match,
 including when a concurrent start was invisible to the cancelling statement's
@@ -1077,6 +1081,7 @@ session can start one during its first 11 days.
 | `setAccountResetSetting(token, { challengeId, setting, enabled, authorizerSignature }, context?)` | the current key, action `email-reset-setting` or `signed-in-reset-setting`, subject `setting:on` or `setting:off` | one statement: sets the setting (the account row `FOR NO KEY UPDATE`, the key and any recovery key `FOR SHARE`, so a change that committed while it waited is seen), cancels pending signed-in resets and closes email codes when the email-reset setting changes ([above](#opt-ins-settings-and-status)), audits `account.reset-setting { setting, enabled, closedResets, sessionId }`. Returns `{ settings, changed }`; `changed: false` when it already had the value. |
 | `accountResetStatus(token, context?)` | — | `{ settings: { emailReset, signedInReset }, emailVerified, pendingSignedInReset }`. The pending reset is `{ id, createdAt, availableAt, expiresAt, initiatedByCaller, codeUsable }`, or `null` when none is live, its session is gone, or the signed-in reset setting is off. A host shows every other session a banner with **Abort** from it. |
 | `startAccountReset({ username }, context?)` | — | [below](#account-recovery-by-email). Returns `{ resetId, expiresAt, delivery }`. |
+| `cancelUndeliveredAccountReset({ resetId, code }, context?)` | issued id and code, host only | After a failed mail send, closes only that live email challenge under the account lock. Returns `{ cancelled }`; missing, wrong, expired, completed or already closed resets return `false`. The mail attempt still counts toward recipient quota. |
 | `completeAccountReset({ username, resetId, code, challengeId, newKey, subjectSignature }, context?)` | `newKey` only, action `email-reset`, authorizer `email:<resetId>` | one statement: replaces the enrolled key, marks the reset completed, closes the account's other live resets, revokes **every** session and issues a new one, audits `account.email-reset { method: "email", revokedSessions, closedResets, sessionId }`. Returns `{ account, wallets, session, revokedSessionIds }`. |
 | `startSignedInReset(token, context?)` | — | [below](#the-signed-in-reset). Returns `{ reset, delivery }`. |
 | `abortSignedInReset(token, context?)` | — | aborts the account's pending signed-in reset, from any of its sessions, audits `account.signed-in-reset.abort { abortedBy: "session", sessionId }`. Returns `{ aborted }`. |
@@ -1100,6 +1105,9 @@ counts against the address's per-recipient cap (`account-reset-recipient`,
 The usable `delivery.resetId` must reach the mailbox owner with the code.
 Never return it in the anonymous start response. The public decoy cannot
 spend the challenge's five attempts.
+An unexpired challenge whose five attempts are spent is closed under the
+account lock before coalescing, allowing a new code while recipient quota
+remains. The old code cannot complete.
 The code is 16 symbols of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (80 bits),
 returned ungrouped; a host may show it in four groups of four, since a
 completion ignores case and separators. It replaces the enrolled key with no
@@ -1109,7 +1117,13 @@ offline within its 15 minutes.
 ```ts
 const issued = await service.startAccountReset({ username }, context);
 if (issued.delivery !== null) {
-  void sendResetCode(issued.delivery); // with a time budget; log the outcome only
+  const sent = await sendResetCode(issued.delivery); // with a time budget
+  if (!sent) {
+    await service.cancelUndeliveredAccountReset({
+      resetId: issued.delivery.resetId,
+      code: issued.delivery.code,
+    }, context);
+  }
 }
 await padTo(start, 3_500); // the same total time for every username
 return Response.json({ resetId: issued.resetId, expiresAt: issued.expiresAt });
@@ -1121,6 +1135,12 @@ mail delivery vary by eligibility. No hook runs for a start, for the same
 reason. The client signs the `email-reset` message over `email:<resetId>` and
 `key:<new key>` with the new key, and completes with the id and code the email
 carries, including in a different browser from the one that started it.
+Only the server host calls `cancelUndeliveredAccountReset` after the mail
+provider reports failure. Pass both values from `delivery`; the anonymous
+decoy id cannot close the real challenge. A successful cancellation releases
+the challenge slot immediately so another start can issue a code, while the
+recipient quota still bounds repeated failed send attempts. Never expose the
+cancellation method as an anonymous endpoint.
 Deploy the host's email template and completion form with this SDK change:
 an old host that mails only the code leaves the new challenge unusable.
 Run migration 10 before enabling the new start path, and stop older SDK
@@ -1130,6 +1150,9 @@ both migrations must be applied before this combined SDK serves traffic.
 Migration 10 closes open email challenges whose ids earlier SDKs exposed and
 clears legacy reset-recipient counters. A mailbox owner can request a new
 challenge after the cutover.
+If an environment already recorded an earlier revision of migration 10, its
+migrator will not rerun these function definitions. Recreate that disposable
+database or apply the updated migration 10 functions before serving this SDK.
 
 Every failure of `completeAccountReset` that an unauthenticated caller can
 cause is one `invalid-signature`: an unknown username or reset id, a wrong,

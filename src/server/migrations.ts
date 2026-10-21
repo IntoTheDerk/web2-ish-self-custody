@@ -617,7 +617,7 @@ export function identityMigrations(
            UPDATE ${p}_account_resets r SET aborted_at = clock_at
             WHERE r.account_id = owner_id AND r.kind = 'email'
               AND r.completed_at IS NULL AND r.aborted_at IS NULL
-              AND r.expires_at <= clock_at;
+              AND (r.expires_at <= clock_at OR r.attempts >= 5);
            PERFORM 1 FROM ${p}_account_resets r
             WHERE r.account_id = owner_id AND r.kind = 'email'
               AND r.completed_at IS NULL AND r.aborted_at IS NULL;
@@ -645,6 +645,32 @@ export function identityMigrations(
            delivery_email := address;
            issued := 1;
            RETURN NEXT;
+         END;
+         $reset$`,
+        // The host passes the issued id and code only when email delivery
+        // fails. Lock the account before the reset so cancellation is ordered
+        // with starts and completions, then read the reset in a fresh snapshot.
+        `CREATE OR REPLACE FUNCTION ${p}_cancel_undelivered_email_reset(
+           profile_id text, reset_id uuid, expected_code_hash text, request_at timestamptz
+         ) RETURNS boolean LANGUAGE plpgsql AS $reset$
+         DECLARE
+           clock_at timestamptz := COALESCE(request_at, now());
+           owner_id uuid;
+         BEGIN
+           SELECT a.id INTO owner_id
+             FROM ${p}_accounts a
+             JOIN ${p}_account_resets r ON r.account_id = a.id
+            WHERE a.service_profile_id = profile_id AND r.id = reset_id AND r.kind = 'email'
+              AND r.code_hash = expected_code_hash
+            FOR NO KEY UPDATE OF a;
+           IF owner_id IS NULL THEN RETURN false; END IF;
+
+           UPDATE ${p}_account_resets r SET aborted_at = clock_at
+            WHERE r.id = reset_id AND r.account_id = owner_id AND r.kind = 'email'
+              AND r.code_hash = expected_code_hash
+              AND r.completed_at IS NULL AND r.aborted_at IS NULL
+              AND r.expires_at > clock_at;
+           RETURN FOUND;
          END;
          $reset$`,
       ]),
