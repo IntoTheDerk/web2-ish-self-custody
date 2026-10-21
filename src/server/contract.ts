@@ -331,17 +331,15 @@ export interface IdentityService {
 
   /**
    * Starts an account recovery by email. It answers every username the same
-   * way: a fresh `resetId` and the same `expiresAt` (15 minutes), with no
+   * way: a fresh decoy `resetId` and the same `expiresAt` (15 minutes), with no
    * error that depends on the account. Only for an active account with a
    * verified email and its `email-reset` setting on, and within the
    * per-recipient cap (`account-reset-recipient`, a bucket of its own), does
    * it store a code (16 symbols, 80 bits; its SHA-256, 5 attempts) and
-   * return `delivery` for the host to send. Never put `delivery` in a
-   * response, and pad every response to one fixed time: the SDK's work is
-   * the same statements for every username, but delivery is the host's.
-   * Rate limits `account-reset-start` (3 per hour per username),
-   * `account-reset-start-day` (10 per day per username) and
-   * `account-reset-start-ip` count every request.
+   * return `delivery` with the usable reset id for the host to email.
+   * An active challenge is coalesced without spending recipient quota.
+   * Never put `delivery` in a response; pad every response to one fixed time.
+   * `account-reset-start-ip` counts every request when the host supplies an IP hash.
    */
   startAccountReset(
     input: Readonly<{ username: string }>,

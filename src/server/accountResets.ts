@@ -16,11 +16,12 @@
  *   label, audited, changing nothing else.
  *
  * Lock order: the order of `accountChanges.ts`, with the resets after the
- * enrolled key and before the sessions, and never `FOR UPDATE` on the account
- * row. Cancellation advances the account's durable reset generation; closing
- * rows alone cannot catch a start inserted after the canceller's snapshot.
+ * enrolled key and before the sessions. Cancellation advances the account's
+ * durable reset generation; closing rows alone cannot catch a start inserted
+ * after the canceller's snapshot. The email start takes `FOR NO KEY UPDATE`
+ * on the account before inspecting its live reset.
  *
- *   account (FOR SHARE, or FOR NO KEY UPDATE for cancellation/setting change)
+ *   account (FOR SHARE, or FOR NO KEY UPDATE for cancellation, setting change or email start)
  *   → enrolled key (FOR UPDATE to replace it, FOR SHARE to check it)
  *   → recovery key (FOR SHARE, a setting change only)
  *   → resets: the one completing (FOR UPDATE), then the others it closes
@@ -515,80 +516,30 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
         throw new IdentityError("username must be a string.", "invalid-request");
       }
       const usernameNormalized = deps.normalizeUsername(input.username);
-      // Counted for every username alike, before anything is looked up, so a
-      // refusal says nothing about the account.
-      await deps.rateLimit("accountResetStart", [usernameNormalized], context);
-      await deps.rateLimit("accountResetStartDay", [usernameNormalized], context);
+      // Anonymous callers must not be able to spend a shared username quota.
+      // The caller IP is still bounded, while an open emailed challenge is
+      // coalesced below rather than rotated by another browser.
       const ipHash = sanitizeContextHash(context?.ipHash);
       if (ipHash !== null) {
         await deps.rateLimit("accountResetStartIp", [ipHash], context);
       }
 
-      // One statement for every username: the eligibility read, the
-      // per-recipient cap (`account-reset-recipient`, counted only for an
-      // eligible account and read by nothing but this statement, whose answer
-      // is uniform, so it is never surfaced), the code row and its audit. The id and code are minted for
-      // every request, so the answer's shape and the work before the
-      // statement are the same whether or not a code is issued.
+      // Only the email carries the usable id. The public id is fresh even on
+      // issuance; an anonymous requester cannot spend the code's attempts.
+      const publicResetId = globalThis.crypto.randomUUID();
       const resetId = globalThis.crypto.randomUUID();
       const code = generateAccountResetCode();
       const cap = deps.recipientCap;
+      // The database function takes an account row lock, then uses a fresh
+      // snapshot to coalesce an active challenge. It reserves recipient quota
+      // only when a new code is actually inserted.
       const rows = await sql.query(
-        `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
-              acct AS (
-                SELECT a.id, a.email
-                  FROM ${p}_accounts a
-                 WHERE a.service_profile_id = $2::text
-                   AND a.username_normalized = $3::text
-                   AND a.status = 'active'
-                   AND a.email_reset_enabled
-                   AND a.email IS NOT NULL
-                   AND a.email_verified_at IS NOT NULL
-                   FOR SHARE OF a
-              ),
-              recipient AS (
-                INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
-                SELECT encode(sha256(convert_to($4::text || acct.email, 'UTF8')), 'hex'),
-                       $5::text, 1, clock.at, clock.at
-                  FROM acct, clock
-                ON CONFLICT (bucket) DO UPDATE
-                  SET count = CASE
-                        WHEN rl.window_start + (interval '1 second' * $6::double precision) <= excluded.updated_at
-                        THEN 1
-                        ELSE rl.count + 1
-                      END,
-                      window_start = CASE
-                        WHEN rl.window_start + (interval '1 second' * $6::double precision) <= excluded.updated_at
-                        THEN excluded.window_start
-                        ELSE rl.window_start
-                      END,
-                      updated_at = excluded.updated_at
-                RETURNING count
-              ),
-              issued AS (
-                INSERT INTO ${p}_account_resets (
-                  id, account_id, kind, code_hash, attempts, created_at, available_at, expires_at
-                )
-                SELECT $8::uuid, acct.id, 'email', $9::text, 0, clock.at, clock.at,
-                       date_trunc('milliseconds', clock.at + (interval '1 second' * $10::double precision))
-                  FROM acct, clock, recipient
-                 WHERE recipient.count <= $7::integer
-                RETURNING account_id
-              ),
-              logged AS (
-                INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
-                SELECT issued.account_id, 'account.email-reset.start',
-                       jsonb_build_object('method', 'email'), clock.at
-                  FROM issued, clock
-                RETURNING 1
-              )
-         SELECT date_trunc('milliseconds', clock.at + (interval '1 second' * $10::double precision))
-                  AS expires_at,
-                (SELECT count(*) FROM issued)::int AS issued,
-                (SELECT email FROM acct) AS email
-           FROM clock`,
+        `SELECT delivery_email AS email, issued, expires_at
+           FROM ${p}_start_email_reset(
+             $1::text, $2::text, $3::text, $4::text, $5::double precision,
+             $6::integer, $7::uuid, $8::text, $9::double precision, $10::timestamptz
+           )`,
         [
-          requestNow(context),
           serviceProfileId,
           usernameNormalized,
           cap.bucketPrefix,
@@ -598,6 +549,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
           resetId,
           hashAccountResetCode(serviceProfileId, resetId, code),
           ACCOUNT_RESET_CODE_TTL_SECONDS,
+          requestNow(context),
         ],
       );
       const row = optionalRow(rows);
@@ -608,11 +560,11 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
       // No hook here: the host already holds the code to send, and an awaited
       // hook would make an issued code slower to answer than a refusal.
       return Object.freeze({
-        resetId,
+        resetId: publicResetId,
         expiresAt: instantColumn(row, "expires_at"),
         delivery:
           integerColumn(row, "issued") === 1 && email !== null
-            ? Object.freeze({ email, code })
+            ? Object.freeze({ email, resetId, code })
             : null,
       });
     },

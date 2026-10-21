@@ -413,13 +413,14 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   }, 60_000);
 
   afterAll(async () => {
     if (!first) return;
     for (const tablePrefix of [prefix, concurrencyPrefix]) {
       await first.query(`DROP TABLE IF EXISTS ${tables.map((t) => `${tablePrefix}_${t}`).join(", ")} CASCADE`);
+      await first.query(`DROP FUNCTION IF EXISTS ${tablePrefix}_start_email_reset(text,text,text,text,double precision,integer,uuid,text,double precision,timestamptz)`);
       await first.query(`DROP FUNCTION IF EXISTS ${tablePrefix}_reject_immutable_mutation() CASCADE`);
     }
     await Promise.all([first.end(), second.end()]);
@@ -452,16 +453,18 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const expected = await resetObjects();
       expect(expected).toContain("email_reset_enabled:boolean:NO:false");
       expect(expected).toContain("signed_in_reset_enabled:boolean:NO:true");
-      // One table; four indexes (the primary key, the live unique index, the
-      // account and the expiry index); one primary key, one foreign key and
+      // One table; five indexes (the primary key, both live unique indexes,
+      // the account and the expiry index); one primary key, one foreign key and
       // six named checks.
       expect(expected.filter((object) => object.endsWith(":r"))).toHaveLength(1);
-      expect(expected.filter((object) => object.endsWith(":i"))).toHaveLength(4);
+      expect(expected.filter((object) => object.endsWith(":i"))).toHaveLength(5);
       expect(expected.filter((object) => object.endsWith(":p"))).toHaveLength(1);
       expect(expected.filter((object) => object.endsWith(":f"))).toHaveLength(1);
       expect(expected.filter((object) => object.endsWith(":c"))).toHaveLength(6);
 
-      const statements = identityMigrations(one.config).find((migration) => migration.version === 8)!.statements;
+      const statements = identityMigrations(one.config)
+        .filter((migration) => migration.version === 8 || migration.version === 9 || migration.version === 10)
+        .flatMap((migration) => migration.statements);
       for (const statement of statements) {
         await applyMigrationStatement(pgDriver(first), statement);
         await applyMigrationStatement(pgDriver(first), statement);
@@ -488,7 +491,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
 
       // The whole runner, twice at once, with version 8 not yet recorded.
       await drop();
-      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version = 8`);
+      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version IN (8, 9, 10)`);
       const [ranOne, ranTwo] = await Promise.all([one.migrate(), two.migrate()]);
       expect([...ranOne, ...ranTwo]).toContain(8);
       expect(await resetObjects()).toEqual(expected);
@@ -554,10 +557,10 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       ).rejects.toMatchObject({ code: "23514" });
       await insert({});
       await expect(insert({})).rejects.toMatchObject({ code: "23505" });
-      // A closed one does not count; several emailed codes may be live.
+      // A closed one does not count; a second live emailed code is refused.
       await insert({ aborted_at: "2026-10-20T00:00:00.000Z" });
       await insert({ kind: "email", code_hash: hash, session_id: null, available_at: "2026-10-19T00:00:00.000Z" });
-      await insert({ kind: "email", code_hash: hash, session_id: null, available_at: "2026-10-19T00:00:00.000Z" });
+      await expect(insert({ kind: "email", code_hash: hash, session_id: null, available_at: "2026-10-19T00:00:00.000Z" })).rejects.toMatchObject({ code: "23505" });
       await first.query(`DELETE FROM ${prefix}_account_resets WHERE account_id = $1::uuid`, [account.accountId]);
     });
 
@@ -588,6 +591,45 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       for (const text of [live, history, expired]) {
         expect(text).not.toMatch(/Seq Scan/u);
       }
+    });
+  });
+
+  describe("migration 10", () => {
+    it("closes legacy public-id challenges and clears legacy recipient exhaustion", async () => {
+      const legacy = createIdentityService(pgDriver(first), config(concurrencyPrefix));
+      const account = await register(username("legacy-email-reset"), {
+        via: legacy,
+        email: `legacy-${suffix}@example.org`,
+        verify: true,
+      });
+      await setSetting(account, account.session.token, "email-reset", true, { via: legacy });
+      const old = await startEmail(account.name, legacy);
+      expect(old.delivery).not.toBeNull();
+      await first.query(
+        `UPDATE ${concurrencyPrefix}_rate_limits SET count = 8 WHERE rule_id = 'account-reset-recipient'`,
+      );
+      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version = 10`);
+
+      expect(await legacy.migrate()).toEqual([10]);
+      const closed = await first.query(
+        `SELECT aborted_at FROM ${concurrencyPrefix}_account_resets WHERE id = $1::uuid`,
+        [old.delivery!.resetId],
+      );
+      expect(closed.rows[0]?.["aborted_at"]).not.toBeNull();
+      const staleQuota = await first.query(
+        `SELECT count(*)::int AS total FROM ${concurrencyPrefix}_rate_limits WHERE rule_id = 'account-reset-recipient'`,
+      );
+      expect(staleQuota.rows[0]?.["total"]).toBe(0);
+      await expectCode(
+        () => completeEmail(account.name, old.delivery!.resetId, old.delivery!.code, newKey(), { via: legacy }),
+        "invalid-signature",
+      );
+      const fresh = await startEmail(account.name, legacy);
+      expect(fresh.delivery).not.toBeNull();
+      expect(fresh.delivery!.resetId).not.toBe(old.delivery!.resetId);
+      const next = newKey();
+      await completeEmail(account.name, fresh.delivery!.resetId, fresh.delivery!.code, next, { via: legacy });
+      expect((await legacy.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
     });
   });
 
@@ -727,9 +769,9 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
         const status = await service.accountResetStatus(account.session.token);
         expect(status.settings.emailReset).toBe(false);
         expect(status.emailVerified).toBe(false);
-        expect((await resetRow(issued.resetId))?.["aborted_at"]).not.toBeNull();
+        expect((await resetRow(issued.delivery!.resetId))?.["aborted_at"]).not.toBeNull();
         // The code sent to the old address completes nothing.
-        await expectCode(() => completeEmail(account.name, issued.resetId, issued.delivery!.code, newKey()), "invalid-signature");
+        await expectCode(() => completeEmail(account.name, issued.delivery!.resetId, issued.delivery!.code, newKey()), "invalid-signature");
         // Back on only once the new address is verified.
         await expectCode(() => setSetting(account, account.session.token, "email-reset", true), "reset-setting-refused");
         const started = await service.startEmailVerification({ username: account.name, email: "moved@example.org" }, ctx());
@@ -788,6 +830,8 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect(new Set(answers.map((answer) => answer.issued.resetId)).size).toBe(answers.length);
       const delivered = answers.at(-1)!.issued.delivery!;
       expect(delivered.email).toBe(eligible.email);
+      expect(delivered.resetId).toMatch(uuidShape);
+      expect(delivered.resetId).not.toBe(answers.at(-1)!.issued.resetId);
       // 16 symbols of 5 bits: a digest that leaks cannot be searched within the code's life.
       expect(delivered.code).toMatch(/^[A-HJ-NP-Z2-9]{16}$/u);
 
@@ -806,27 +850,19 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect(eventsFor(eligible.accountId).map((event) => event.action)).not.toContain("account.email-reset.start");
     });
 
-    it("rate-limits per username whoever asks, by hour and by day, alike for known and unknown usernames", async () => {
+    it("does not let anonymous callers spend the owner's username quota", async () => {
       const known = await verifiedAccount("rate-known");
       await enableEmailReset(known);
-      const base = Date.now() + 10 * 86_400_000;
-      for (const name of [known.name, username("rate-unknown")]) {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          await startEmail(name, service, ctx({ now: new Date(base + attempt) }));
-        }
-        const hourly = await expectCode(() => startEmail(name, service, ctx({ now: new Date(base + 10) })), "rate-limited");
-        expect(hourly.details?.["rule"]).toBe("account-reset-start");
-        // Seven more over the next hours, then the daily cap.
-        for (let hour = 1; hour <= 7; hour += 1) {
-          await startEmail(name, service, ctx({ now: new Date(base + hour * HOUR + 1_000) }));
-        }
-        // The hour window has rolled, so the eleventh of the day is the daily one.
-        const daily = await expectCode(
-          () => startEmail(name, service, ctx({ now: new Date(base + 9 * HOUR) })),
-          "rate-limited",
-        );
-        expect(daily.details?.["rule"]).toBe("account-reset-start-day");
+      const firstMail = await startEmail(known.name);
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const knownAnswer = await startEmail(known.name);
+        const unknownAnswer = await startEmail(username(`rate-unknown-${String(attempt)}`));
+        expect(knownAnswer.delivery).toBeNull();
+        expect(unknownAnswer.delivery).toBeNull();
+        expect(knownAnswer.resetId).not.toBe(firstMail.delivery!.resetId);
       }
+      expect(await resetRows(known.accountId)).toHaveLength(1);
+      await completeEmail(known.name, firstMail.delivery!.resetId, firstMail.delivery!.code, newKey());
       // Per caller: 20 an hour across usernames.
       const caller = { ipHash: `reset-spray-${suffix}` };
       for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -834,6 +870,86 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       }
       const sprayed = await expectCode(() => service.startAccountReset({ username: username("spray-last") }, caller), "rate-limited");
       expect(sprayed.details?.["rule"]).toBe("account-reset-start-ip");
+    });
+
+    it("lets the mailbox owner finish from another browser after an attacker started the challenge", async () => {
+      const account = await verifiedAccount("mailbox-owner");
+      await enableEmailReset(account);
+      const attackerStart = await startEmail(account.name, service, { ipHash: `attacker-${suffix}` });
+      const ownerStart = await startEmail(account.name, otherService, { ipHash: `owner-${suffix}` });
+      expect(attackerStart.delivery).not.toBeNull();
+      expect(ownerStart.delivery).toBeNull();
+      expect(attackerStart.resetId).not.toBe(attackerStart.delivery!.resetId);
+      expect(ownerStart.resetId).not.toBe(attackerStart.delivery!.resetId);
+      const next = newKey();
+      await completeEmail(
+        account.name,
+        attackerStart.delivery!.resetId,
+        attackerStart.delivery!.code,
+        next,
+        { via: otherService },
+      );
+      expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+    });
+
+    it("leaves recipient capacity for later starts across a full hour of anonymous requests", async () => {
+      const account = await verifiedAccount("recipient-survives");
+      await enableEmailReset(account);
+      const base = Date.now() + 1_000;
+      for (let slot = 0; slot < 4; slot += 1) {
+        const now = new Date(base + slot * 901_000);
+        const issued = await startEmail(account.name, service, ctx({ now }));
+        expect(issued.delivery).not.toBeNull();
+        for (let repeat = 0; repeat < 12; repeat += 1) {
+          expect((await startEmail(account.name, service, ctx({ now }))).delivery).toBeNull();
+        }
+      }
+      const count = await first.query(
+        `SELECT count FROM ${prefix}_rate_limits WHERE rule_id = 'account-reset-recipient'
+          AND bucket = $1`,
+        [bytesToHex(sha256(encoder.encode([
+          "web2-ish-self-custody rate limit bucket v1", serviceProfileId,
+          "account-reset-recipient", account.email!,
+        ].join("\n"))))],
+      );
+      expect(count.rows[0]?.["count"]).toBe(4);
+    });
+
+    it("serializes simultaneous starts and charges the recipient only for the one delivered code", async () => {
+      const account = await verifiedAccount("coalesced-race");
+      await enableEmailReset(account);
+      const lanes = await openConnections(3);
+      const [holder, attacker, owner] = lanes as [Connection, Connection, Connection];
+      let firstStart: Promise<IssuedAccountReset> | undefined;
+      let secondStart: Promise<IssuedAccountReset> | undefined;
+      try {
+        await holder.client.query("BEGIN");
+        await holder.client.query(`SELECT 1 FROM ${prefix}_accounts WHERE id = $1::uuid FOR UPDATE`, [account.accountId]);
+        firstStart = startEmail(account.name, attacker.service);
+        secondStart = startEmail(account.name, owner.service);
+        void firstStart.catch(() => undefined);
+        void secondStart.catch(() => undefined);
+        await Promise.all([waitUntilBlocked(attacker.pid), waitUntilBlocked(owner.pid)]);
+        await holder.client.query("COMMIT");
+        const answers = await Promise.all([firstStart, secondStart]);
+        const mailed = answers.filter((answer) => answer.delivery !== null);
+        expect(mailed).toHaveLength(1);
+        expect(answers[0]!.resetId).not.toBe(answers[1]!.resetId);
+        expect(await resetRows(account.accountId)).toHaveLength(1);
+        const bucket = bytesToHex(sha256(encoder.encode([
+          "web2-ish-self-custody rate limit bucket v1", serviceProfileId,
+          "account-reset-recipient", account.email!,
+        ].join("\n"))));
+        const quota = await first.query(`SELECT count FROM ${prefix}_rate_limits WHERE bucket = $1`, [bucket]);
+        expect(quota.rows[0]?.["count"]).toBe(1);
+        const next = newKey();
+        await completeEmail(account.name, mailed[0]!.delivery!.resetId, mailed[0]!.delivery!.code, next);
+        expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+      } finally {
+        await holder.client.query("ROLLBACK");
+        await Promise.allSettled([firstStart, secondStart].filter((value) => value !== undefined));
+        await closeConnections(lanes);
+      }
     });
 
     it("counts a per-recipient cap of its own inside its statement, which nothing else reads, and never says so", async () => {
@@ -866,14 +982,14 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       );
       expect(probed.details?.["rule"]).toBe("email-verification-recipient");
       // And that verification traffic does not silence the reset codes.
-      expect((await startEmail(account.name)).delivery).not.toBeNull();
-      expect(await count(resetBucket)).toBe(2);
-      // Over its own cap: no code, and the answer it always gives.
+      expect((await startEmail(account.name)).delivery).toBeNull();
+      expect(await count(resetBucket)).toBe(1);
+      // Once the active code expires, a fresh start is subject to the cap.
       await first.query(`UPDATE ${prefix}_rate_limits SET count = 8 WHERE bucket = $1`, [resetBucket]);
-      const capped = await startEmail(account.name);
+      const capped = await startEmail(account.name, service, ctx({ now: new Date(Date.now() + 901_000) }));
       expect(capped.delivery).toBeNull();
       expect(Object.keys(capped).sort()).toEqual(["delivery", "expiresAt", "resetId"]);
-      expect(await resetRows(account.accountId)).toHaveLength(2);
+      expect(await resetRows(account.accountId)).toHaveLength(1);
     });
 
     it("refuses with invalid-request without the opt-in, and in random-vault mode before any SQL", async () => {
@@ -896,8 +1012,9 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const signedIn = await service.startSignedInReset(other.token, ctx());
       const earlier = await startEmail(account.name);
       const issued = await startEmail(account.name);
+      expect(issued.delivery).toBeNull();
       const next = newKey();
-      const done = await completeEmail(account.name, issued.resetId, issued.delivery!.code.toLowerCase(), next, {
+      const done = await completeEmail(account.name, earlier.delivery!.resetId, earlier.delivery!.code.toLowerCase(), next, {
         context: ctx({ clientLabel: "Firefox on macOS" }),
       });
       expect(done.wallets.map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
@@ -908,14 +1025,13 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect(await loginFails(account.name, account.key)).toBe(true);
       await login(account.name, next);
 
-      expect((await resetRow(issued.resetId))?.["completed_at"]).not.toBeNull();
-      expect((await resetRow(earlier.resetId))?.["aborted_at"]).not.toBeNull();
+      expect((await resetRow(earlier.delivery!.resetId))?.["completed_at"]).not.toBeNull();
       expect((await resetRow(signedIn.reset.id))?.["aborted_at"]).not.toBeNull();
       const [audit] = await auditRows(account.accountId, "account.email-reset");
       expect(audit?.["metadata"]).toEqual({
         method: "email",
         revokedSessions: 2,
-        closedResets: 2,
+        closedResets: 1,
         sessionId: done.session.session.id,
       });
       expect(eventsFor(account.accountId, "account.email-reset")).toEqual([
@@ -926,19 +1042,19 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     it("is single use, bound to its reset id, and signed by the new key only", async () => {
       const account = await emailAccount("email-single");
       const a = await startEmail(account.name);
-      const b = await startEmail(account.name);
-      // A's code against B's id.
-      await expectCode(() => completeEmail(account.name, b.resetId, a.delivery!.code, newKey()), "invalid-signature");
+      // The public response id cannot spend A's attempts.
+      await expectCode(() => completeEmail(account.name, a.resetId, a.delivery!.code, newKey()), "invalid-signature");
+      expect((await resetRow(a.delivery!.resetId))?.["attempts"]).toBe(0);
       // The current key signing for the new one: only the subject signs, and it must be the new key.
       await expectCode(
-        () => completeEmail(account.name, a.resetId, a.delivery!.code, newKey(), { signer: account.key }),
+        () => completeEmail(account.name, a.delivery!.resetId, a.delivery!.code, newKey(), { signer: account.key }),
         "invalid-signature",
       );
       const next = newKey();
-      await completeEmail(account.name, a.resetId, a.delivery!.code, next);
-      await expectCode(() => completeEmail(account.name, a.resetId, a.delivery!.code, newKey()), "invalid-signature");
-      // The completion closed B.
-      await expectCode(() => completeEmail(account.name, b.resetId, b.delivery!.code, newKey()), "invalid-signature");
+      await completeEmail(account.name, a.delivery!.resetId, a.delivery!.code, next);
+      await expectCode(() => completeEmail(account.name, a.delivery!.resetId, a.delivery!.code, newKey()), "invalid-signature");
+      const b = await startEmail(account.name);
+      await expectCode(() => completeEmail(account.name, b.delivery!.resetId, a.delivery!.code, newKey()), "invalid-signature");
       expect((await service.listWallets(account.accountId)).map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
     });
 
@@ -946,11 +1062,11 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const account = await emailAccount("email-attempts");
       const issued = await startEmail(account.name);
       for (let attempt = 0; attempt < 5; attempt += 1) {
-        await expectCode(() => completeEmail(account.name, issued.resetId, "WRONGCOD", newKey()), "invalid-signature");
+        await expectCode(() => completeEmail(account.name, issued.delivery!.resetId, "WRONGCOD", newKey()), "invalid-signature");
       }
-      expect((await resetRow(issued.resetId))?.["attempts"]).toBe(5);
-      await expectCode(() => completeEmail(account.name, issued.resetId, issued.delivery!.code, newKey()), "invalid-signature");
-      expect((await resetRow(issued.resetId))?.["attempts"]).toBe(5);
+      expect((await resetRow(issued.delivery!.resetId))?.["attempts"]).toBe(5);
+      await expectCode(() => completeEmail(account.name, issued.delivery!.resetId, issued.delivery!.code, newKey()), "invalid-signature");
+      expect((await resetRow(issued.delivery!.resetId))?.["attempts"]).toBe(5);
     });
 
     it("counts parallel guesses one attempt each", async () => {
@@ -962,7 +1078,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       try {
         const guesses = await Promise.allSettled(
           lanes.map((lane) =>
-            completeEmail(account.name, issued.resetId, "WRONGCOD", newKey(), { via: lane.service }),
+            completeEmail(account.name, issued.delivery!.resetId, "WRONGCOD", newKey(), { via: lane.service }),
           ),
         );
         expect(guesses.every((guess) => guess.status === "rejected")).toBe(true);
@@ -972,7 +1088,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       } finally {
         await closeConnections(lanes);
       }
-      expect((await resetRow(issued.resetId))?.["attempts"]).toBe(5);
+      expect((await resetRow(issued.delivery!.resetId))?.["attempts"]).toBe(5);
     });
 
     it("expires after 15 minutes", async () => {
@@ -981,13 +1097,13 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const later = new Date(issued.expiresAt.getTime() + 1);
       const challenge = await service.createChallenge(account.name, "rotation", ctx({ now: later }));
       const next = newKey();
-      const message = messageFor(challenge, "email-reset", `email:${issued.resetId}`, keyPrincipal(next));
+      const message = messageFor(challenge, "email-reset", `email:${issued.delivery!.resetId}`, keyPrincipal(next));
       await expectCode(
         () =>
           service.completeAccountReset(
             {
               username: account.name,
-              resetId: issued.resetId,
+              resetId: issued.delivery!.resetId,
               code: issued.delivery!.code,
               challengeId: challenge.id,
               newKey: enrolled(next),
@@ -1004,7 +1120,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const issued = await startEmail(account.name);
       const code = issued.delivery!.code;
       const refusals: (() => Promise<unknown>)[] = [
-        () => completeEmail(username("nobody"), issued.resetId, code, newKey()),
+        () => completeEmail(username("nobody"), issued.delivery!.resetId, code, newKey()),
         () => completeEmail(account.name, crypto.randomUUID(), code, newKey()),
         async () => {
           // A malformed reset id (signed over a well-formed one: no builder signs this one).
@@ -1016,14 +1132,14 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
             ctx(),
           );
         },
-        () => completeEmail(account.name, issued.resetId, "AAAAAAAA", newKey()),
+        () => completeEmail(account.name, issued.delivery!.resetId, "AAAAAAAA", newKey()),
         async () => {
           // A challenge of another username.
           const challenge = await service.createChallenge(username("someone"), "rotation", ctx());
           const next = newKey();
-          const message = messageFor(challenge, "email-reset", `email:${issued.resetId}`, keyPrincipal(next));
+          const message = messageFor(challenge, "email-reset", `email:${issued.delivery!.resetId}`, keyPrincipal(next));
           return service.completeAccountReset(
-            { username: account.name, resetId: issued.resetId, code, challengeId: challenge.id, newKey: enrolled(next), subjectSignature: sign(next, message) },
+            { username: account.name, resetId: issued.delivery!.resetId, code, challengeId: challenge.id, newKey: enrolled(next), subjectSignature: sign(next, message) },
             ctx(),
           );
         },
@@ -1037,15 +1153,15 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const second = await startEmail(toggled.name);
       await setSetting(toggled, toggled.session.token, "email-reset", false);
       await enableEmailReset(toggled);
-      await expectCode(() => completeEmail(toggled.name, second.resetId, second.delivery!.code, newKey()), "invalid-signature");
+      await expectCode(() => completeEmail(toggled.name, second.delivery!.resetId, second.delivery!.code, newKey()), "invalid-signature");
       // A suspended account.
       const suspended = await emailAccount("email-uniform-suspended");
       const third = await startEmail(suspended.name);
       await suspend(suspended.accountId);
-      await expectCode(() => completeEmail(suspended.name, third.resetId, third.delivery!.code, newKey()), "invalid-signature");
+      await expectCode(() => completeEmail(suspended.name, third.delivery!.resetId, third.delivery!.code, newKey()), "invalid-signature");
       // The right code naming the current key is key-unchanged: only the code's holder gets this far.
-      const fourth = await startEmail(account.name);
-      await expectCode(() => completeEmail(account.name, fourth.resetId, fourth.delivery!.code, account.key), "key-unchanged");
+      const fourth = issued;
+      await expectCode(() => completeEmail(account.name, fourth.delivery!.resetId, fourth.delivery!.code, account.key), "key-unchanged");
       for (const each of [account, toggled, suspended]) {
         expect((await service.listWallets(each.accountId)).map((wallet) => wallet.publicKey)).toEqual([each.key.identifier]);
       }
@@ -1718,7 +1834,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
         () => service.startSignedInReset(other.token, ctx()),
         () => service.abortSignedInReset(other.token, ctx()),
         () => completeSignedIn(account.name, account.session.token, pending.reset.id, newKey()),
-        () => completeEmail(account.name, emailed.resetId, emailed.delivery!.code, newKey()),
+        () => completeEmail(account.name, emailed.delivery!.resetId, emailed.delivery!.code, newKey()),
         () => reauth(account, account.session.token, "example-label"),
       ];
       for (const run of refusals) {
@@ -1737,10 +1853,10 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       await enableEmailReset(account);
       const issued = await startEmail(account.name);
       await service.pruneExpired({ now: new Date(issued.expiresAt.getTime() + 60_000) });
-      expect(await resetRow(issued.resetId)).toBeDefined();
+      expect(await resetRow(issued.delivery!.resetId)).toBeDefined();
       const dayAfter = await service.pruneExpired({ now: new Date(issued.expiresAt.getTime() + 86_400_000 + 1) });
       expect(dayAfter.accountResets).toBeGreaterThanOrEqual(1);
-      expect(await resetRow(issued.resetId)).toBeUndefined();
+      expect(await resetRow(issued.delivery!.resetId)).toBeUndefined();
     });
   });
 
@@ -1762,7 +1878,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       } else {
         const issued = await startEmail(account.name);
         complete = (via) =>
-          completeEmail(account.name, issued.resetId, issued.delivery!.code, newKey(), { via }).then((result) => result.revokedSessionIds);
+          completeEmail(account.name, issued.delivery!.resetId, issued.delivery!.code, newKey(), { via }).then((result) => result.revokedSessionIds);
       }
       return { account, sessions, complete };
     }
@@ -2089,7 +2205,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
           let change: Promise<unknown>;
           if (viaEmail) {
             const issued = await startEmail(account.name);
-            change = completeEmail(account.name, issued.resetId, issued.delivery!.code, next, { via: connections[0]!.service });
+            change = completeEmail(account.name, issued.delivery!.resetId, issued.delivery!.code, next, { via: connections[0]!.service });
           } else {
             const started = await service.startSignedInReset(account.session.token, ctx());
             await age(started.reset.id);

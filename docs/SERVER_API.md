@@ -1091,13 +1091,15 @@ the current key, which signs, so a stolen session alone can change neither.
 ### Account recovery by email
 
 `startAccountReset` answers **every username the same way**: a fresh random
-`resetId`, an `expiresAt` 15 minutes on, and the same statements, whether or
-not the account exists, has a verified email, has the setting on or is active.
-It stores a code row (its SHA-256 bound to the reset id under its own domain, 5
-attempts) only for an active account with a verified email and the setting on,
-and only while the address is under its per-recipient cap
-(`account-reset-recipient`, [below](#reset-rate-limits)). Then, and only then,
-`delivery` is `{ email, code }`, for the host to send; otherwise it is `null`.
+decoy `resetId` and an `expiresAt` 15 minutes on, whether or not the account
+exists, has a verified email, has the setting on or is active. An account row
+lock coalesces starts while one email challenge is open. Only a new challenge
+counts against the address's per-recipient cap (`account-reset-recipient`,
+[below](#reset-rate-limits)). Then, and only then, `delivery` is
+`{ email, resetId, code }`, for the host to send; otherwise it is `null`.
+The usable `delivery.resetId` must reach the mailbox owner with the code.
+Never return it in the anonymous start response. The public decoy cannot
+spend the challenge's five attempts.
 The code is 16 symbols of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (80 bits),
 returned ungrouped; a host may show it in four groups of four, since a
 completion ignores case and separators. It replaces the enrolled key with no
@@ -1114,11 +1116,20 @@ return Response.json({ resetId: issued.resetId, expiresAt: issued.expiresAt });
 ```
 
 Never put `delivery` in a response, never answer differently when it is
-`null`, and pad every response to one fixed time: the SDK's work is the same
-for every username, the delivery is not. No hook runs for a start, for the same
+`null`, and pad every response to one fixed time: the SDK's internal work and
+mail delivery vary by eligibility. No hook runs for a start, for the same
 reason. The client signs the `email-reset` message over `email:<resetId>` and
-`key:<new key>` with the new key, and completes with the code the email
-carries.
+`key:<new key>` with the new key, and completes with the id and code the email
+carries, including in a different browser from the one that started it.
+Deploy the host's email template and completion form with this SDK change:
+an old host that mails only the code leaves the new challenge unusable.
+Run migration 10 before enabling the new start path, and stop older SDK
+instances from serving it; they can still expose a usable id and spend the
+shared username quota. Migration 9 is the signed-in reset generation fence;
+both migrations must be applied before this combined SDK serves traffic.
+Migration 10 closes open email challenges whose ids earlier SDKs exposed and
+clears legacy reset-recipient counters. A mailbox owner can request a new
+challenge after the cutover.
 
 Every failure of `completeAccountReset` that an unauthenticated caller can
 cause is one `invalid-signature`: an unknown username or reset id, a wrong,
@@ -1245,14 +1256,12 @@ completing; the next start closes the stale row.
 
 | rule | limit | subject |
 | --- | --- | --- |
-| `account-reset-start` | 3 per 3,600 s | normalized username, whoever asks |
-| `account-reset-start-day` | 10 per 86,400 s | normalized username, whoever asks |
 | `account-reset-start-ip` | 20 per 3,600 s | hashed IP, only when the host supplies one |
-| `account-reset-recipient` | 8 per 3,600 s | the address, counted inside the start's statement for an eligible account only, and never surfaced: over the cap the start issues no code and answers as always |
+| `account-reset-recipient` | 8 per 3,600 s | the address, counted only for a fresh challenge; coalesced starts spend no recipient quota and over-cap starts answer as always |
 | `account-change` | 10 per 300 s | hashed IP and account id for the signed-in methods; hashed IP and normalized username for `completeAccountReset` |
 
-The username rules count every request, whether or not a code is issued, so
-they answer alike for every username. `account-reset-recipient` is a bucket of
+There is no shared anonymous per-username quota to exhaust.
+`account-reset-recipient` is a bucket of
 its own, read by nothing but the start, whose answer is uniform. Sharing email
 verification's `email-verification-recipient` bucket would leak and silence:
 `startEmailVerification` is unauthenticated and answers `429` from that
