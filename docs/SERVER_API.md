@@ -1117,8 +1117,8 @@ offline within its 15 minutes.
 ```ts
 const issued = await service.startAccountReset({ username }, context);
 if (issued.delivery !== null) {
-  const sent = await sendResetCode(issued.delivery); // with a time budget
-  if (!sent) {
+  const delivery = await sendResetCode(issued.delivery); // 'sent' | 'failed' | 'uncertain'
+  if (delivery === 'failed') { // only a definitive provider refusal or pre-send failure
     await service.cancelUndeliveredAccountReset({
       resetId: issued.delivery.resetId,
       code: issued.delivery.code,
@@ -1128,6 +1128,10 @@ if (issued.delivery !== null) {
 await padTo(start, 3_500); // the same total time for every username
 return Response.json({ resetId: issued.resetId, expiresAt: issued.expiresAt });
 ```
+
+A provider timeout, network error, or malformed success response is
+`uncertain`: the email may still arrive, so leave its challenge valid. A
+definitive refusal may be cancelled to let the owner retry immediately.
 
 Never put `delivery` in a response, never answer differently when it is
 `null`, and pad every response to one fixed time: the SDK's internal work and
