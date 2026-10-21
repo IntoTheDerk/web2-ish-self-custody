@@ -70,7 +70,7 @@ export function identityMigrations(
 
   const mutationGuard = `${p}_reject_immutable_mutation`;
 
-  return Object.freeze([
+  const migrations = Object.freeze([
     Object.freeze({
       version: 1,
       name: "service-profile",
@@ -674,6 +674,22 @@ export function identityMigrations(
          END;
          $reset$`,
       ]),
+    }),
+  ]);
+  // Migration 10 was recorded by some environments before its exhausted-row
+  // and failed-delivery fixes. Reapply only its current function definitions;
+  // its one-time cutover UPDATE and quota DELETE must not run again.
+  const emailFunctions = migrations.find((migration) => migration.version === 10)?.statements
+    .filter((statement) => statement.startsWith("CREATE OR REPLACE FUNCTION "));
+  if (emailFunctions?.length !== 2) {
+    throw new Error("Migration 10 must define both email reset functions.");
+  }
+  return Object.freeze([
+    ...migrations,
+    Object.freeze({
+      version: 11,
+      name: "refresh-email-reset-functions",
+      statements: Object.freeze(emailFunctions),
     }),
   ]);
 }

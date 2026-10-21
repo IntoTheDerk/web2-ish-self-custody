@@ -21,7 +21,8 @@
  * after the canceller's snapshot. The email start takes `FOR NO KEY UPDATE`
  * on the account before inspecting its live reset.
  *
- *   account (FOR SHARE, or FOR NO KEY UPDATE for cancellation, setting change or email start)
+ *   account (FOR SHARE, or FOR NO KEY UPDATE for cancellation, setting change,
+ *            email start or email completion)
  *   → enrolled key (FOR UPDATE to replace it, FOR SHARE to check it)
  *   → recovery key (FOR SHARE, a setting change only)
  *   → resets: the one completing (FOR UPDATE), then the others it closes
@@ -236,8 +237,9 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
 
   /**
    * The emailed code still completes a reset only while all of this holds.
-   * A completion runs after its own attempt was counted (`<=`); the status
-   * reports whether an attempt is left (`<`).
+   * Email completion counts its attempt in the same statement that decides
+   * success; status and that completion require an attempt left (`<`). A
+   * signed-in reset counts its code attempt before completion (`<=`).
    */
   const emailCodeLive = (reset: string, acct: string, attempts: "<" | "<=" = "<="): string =>
     `${reset}.code_hash IS NOT NULL
@@ -624,33 +626,10 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
         throw resetRefused();
       }
 
-      // One attempt, counted in its own statement before the code is
-      // compared, so parallel guesses cannot share an attempt.
-      const attempt = optionalRow(
-        await sql.query(
-          `WITH clock AS (SELECT COALESCE($5::timestamptz, now()) AS at)
-           UPDATE ${p}_account_resets r
-              SET attempts = r.attempts + 1
-             FROM ${p}_accounts a
-            WHERE r.id = $1::uuid
-              AND r.kind = 'email'
-              AND a.id = r.account_id
-              AND a.service_profile_id = $2::text
-              AND a.username_normalized = $3::text
-              AND r.completed_at IS NULL
-              AND r.aborted_at IS NULL
-              AND r.expires_at > (SELECT at FROM clock)
-              AND r.attempts < $4::integer
-            RETURNING r.account_id, r.code_hash`,
-          [resetId, serviceProfileId, usernameNormalized, ACCOUNT_RESET_MAX_ATTEMPTS, requestNow(context)],
-        ),
-      );
+      // The code decision, attempt count and successful completion share one
+      // SQL statement. Its account lock orders them with new starts; no caller
+      // can observe a fifth attempt before a valid completion is committed.
       const codeHash = hashAccountResetCode(serviceProfileId, resetId, reduceCode(input.code));
-      if (attempt === null || !constantTimeEqualHex(textColumn(attempt, "code_hash"), codeHash)) {
-        throw resetRefused();
-      }
-      const accountId = textColumn(attempt, "account_id");
-
       const sessionTokenValue = generateSessionToken();
       const client = deps.sessionClientColumns(context);
       let rows: SqlRow[];
@@ -660,15 +639,19 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                 acct AS (
                   SELECT ${bare("a", ACCOUNT_COLUMNS)}, a.email_reset_enabled
                     FROM ${p}_accounts a
-                   WHERE a.id = $2::uuid
+                   WHERE a.username_normalized = $2::text
                      AND a.service_profile_id = $3::text
-                     AND a.status = 'active'
-                     FOR SHARE OF a
+                     AND EXISTS (
+                       SELECT 1 FROM ${p}_account_resets r
+                        WHERE r.id = $4::uuid AND r.account_id = a.id AND r.kind = 'email'
+                     )
+                     FOR NO KEY UPDATE OF a
                 ),
                 wallet AS (
                   SELECT w.id, w.account_id
                     FROM ${p}_account_wallets w, acct
                    WHERE w.account_id = acct.id
+                     AND acct.status = 'active'
                      AND w.is_primary
                      AND w.public_key <> $7::text
                      AND NOT EXISTS (
@@ -677,22 +660,47 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                      )
                      FOR UPDATE OF w
                 ),
-                reset AS (
+                wallet_ready AS (
+                  SELECT count(*) = 1 AS ready FROM wallet
+                ),
+                reset_lock AS (
                   SELECT r.id
-                    FROM ${p}_account_resets r, wallet, acct
+                    FROM ${p}_account_resets r, acct, wallet_ready
                    WHERE r.id = $4::uuid
-                     AND r.account_id = wallet.account_id
+                     AND r.account_id = acct.id
                      AND r.kind = 'email'
-                     AND r.code_hash = $13::text
                      AND r.completed_at IS NULL
                      AND r.aborted_at IS NULL
                      AND r.expires_at > (SELECT at FROM clock)
-                     AND ${emailCodeLive("r", "acct")}
-                     FOR UPDATE OF r
+                     AND r.attempts < ${String(ACCOUNT_RESET_MAX_ATTEMPTS)}
+                     AND wallet_ready.ready IS NOT NULL
+                   FOR UPDATE OF r
+                ),
+                attempted AS (
+                  UPDATE ${p}_account_resets r
+                     SET attempts = r.attempts + 1,
+                         completed_at = CASE
+                           WHEN r.code_hash = $13::text
+                             AND acct.status = 'active'
+                             AND wallet_ready.ready
+                             AND ${emailCodeLive("r", "acct", "<")}
+                           THEN (SELECT at FROM clock)
+                           ELSE r.completed_at END
+                    FROM acct, wallet_ready, reset_lock
+                   WHERE r.id = reset_lock.id
+                     AND r.account_id = acct.id
+                     AND r.kind = 'email'
+                     AND r.completed_at IS NULL
+                     AND r.aborted_at IS NULL
+                     AND r.expires_at > (SELECT at FROM clock)
+                     AND r.attempts < ${String(ACCOUNT_RESET_MAX_ATTEMPTS)}
+                   RETURNING r.id, r.account_id, r.code_hash = $13::text AS code_matched,
+                             r.completed_at
                 ),
                 ok AS (
-                  SELECT wallet.id AS wallet_id, wallet.account_id, reset.id AS reset_id
-                    FROM wallet, reset
+                  SELECT wallet.id AS wallet_id, attempted.account_id, attempted.id AS reset_id
+                    FROM wallet, attempted
+                   WHERE attempted.completed_at IS NOT NULL
                 ),
                 rotated AS (
                   UPDATE ${p}_account_wallets w
@@ -705,11 +713,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                    RETURNING ${bare("w", WALLET_COLUMNS)}
                 ),
                 completed AS (
-                  UPDATE ${p}_account_resets r
-                     SET completed_at = (SELECT at FROM clock)
-                    FROM ok
-                   WHERE r.id = ok.reset_id
-                   RETURNING r.id
+                  SELECT id FROM attempted WHERE completed_at IS NOT NULL
                 ),
                 closed_resets AS (
                   UPDATE ${p}_account_resets r
@@ -727,7 +731,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                    WHERE s.account_id = ok.account_id
                      AND s.revoked_at IS NULL
                      AND s.expires_at > (SELECT at FROM clock)
-                     AND (SELECT count(*) FROM completed) >= 0
+                     AND (SELECT count(*) FROM completed) = 1
                      AND (SELECT count(*) FROM closed_resets) >= 0
                    ORDER BY s.id
                      FOR NO KEY UPDATE OF s
@@ -765,19 +769,23 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                    WHERE (SELECT count(*) FROM completed) = 1
                   RETURNING 1
                 )
-           SELECT (SELECT at FROM clock) AS occurred_at,
+           SELECT clock.at AS occurred_at,
+                  t.account_id AS attempt_account_id,
+                  t.code_matched AS attempt_code_matched,
                   ${columns("a", ACCOUNT_COLUMNS, "account_")},
                   ${columns("r", WALLET_COLUMNS, "wallet_")},
                   ${columns("n", SESSION_COLUMNS, "session_")},
                   v.id AS revoked_id
-             FROM acct a
-             JOIN rotated r ON true
-             JOIN new_session n ON true
+             FROM clock
+             LEFT JOIN attempted t ON true
+             LEFT JOIN acct a ON a.id = t.account_id
+             LEFT JOIN rotated r ON true
+             LEFT JOIN new_session n ON true
              LEFT JOIN revoked v ON true
             ORDER BY v.id`,
           [
             requestNow(context),
-            accountId,
+            usernameNormalized,
             serviceProfileId,
             resetId,
             newKey.address,
@@ -799,8 +807,12 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
         throw error;
       }
       const first = optionalRow(rows);
-      if (first === null) {
-        // The caller holds the emailed code, so these may name the cause.
+      if (first === null || optionalTextColumn(first, "session_id") === null) {
+        if (first?.["attempt_code_matched"] !== true) {
+          throw resetRefused();
+        }
+        // Only a matching emailed code may receive a specific key conflict.
+        const accountId = textColumn(first, "attempt_account_id");
         const state = await enrolledKeyState(accountId);
         if (state.walletCount !== 1) {
           throw walletConflict();
@@ -811,8 +823,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
             "key-unchanged",
           );
         }
-        // Spent, expired or closed between the attempt and the statement, the
-        // setting turned off, the email changed, or the account suspended.
+        // The setting turned off, the email changed, or the account suspended.
         throw resetRefused();
       }
       const account = mapAccount(first, "account_");

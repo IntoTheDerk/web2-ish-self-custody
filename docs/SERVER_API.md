@@ -1150,17 +1150,20 @@ both migrations must be applied before this combined SDK serves traffic.
 Migration 10 closes open email challenges whose ids earlier SDKs exposed and
 clears legacy reset-recipient counters. A mailbox owner can request a new
 challenge after the cutover.
-If an environment already recorded an earlier revision of migration 10, its
-migrator will not rerun these function definitions. Recreate that disposable
-database or apply the updated migration 10 functions before serving this SDK.
+Migration 11 reapplies only the current email-reset function definitions on
+databases that already recorded an earlier migration 10. It does not replay
+migration 10's cutover UPDATE or recipient-quota DELETE. Run it before serving
+this SDK on such a database.
 
 Every failure of `completeAccountReset` that an unauthenticated caller can
 cause is one `invalid-signature`: an unknown username or reset id, a wrong,
 spent or expired code, a code out of attempts, the setting turned off, the
 email changed or unverified, a suspended account, a bad signature, a challenge
-of another username. Each attempt is counted in its own statement before the
-code is compared, so parallel guesses cannot share one, and the completion
-statement re-checks the code's digest, the attempts, the expiry, the setting
+of another username. One SQL statement locks the account, then the reset,
+counts an attempt, and completes when the code and account checks pass.
+Parallel guesses cannot share an attempt; a concurrent start cannot retire a
+valid fifth attempt between counting and completion. The statement checks
+the code's digest, the attempts, the expiry, the setting
 and the verified email (verified before the code was issued) under the row
 locks. A code that verified but names the current key is `key-unchanged`.
 
@@ -1245,7 +1248,7 @@ with the resets after the enrolled key and before the sessions, and never
 `FOR UPDATE` on the account row:
 
 1. the account row: `FOR SHARE` (`FOR NO KEY UPDATE` for login, abort, rotation,
-   reset-setting and recovery-factor changes, an address change and
+   email start and completion, reset-setting and recovery-factor changes, an address change and
    `updateAccount`);
 2. the enrolled-key row (`FOR UPDATE` to replace it, `FOR SHARE` to check it);
 3. a setting change only: the active recovery key, `FOR SHARE`;

@@ -413,7 +413,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   }, 60_000);
 
   afterAll(async () => {
@@ -464,7 +464,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect(expected.filter((object) => object.endsWith(":c"))).toHaveLength(6);
 
       const statements = identityMigrations(one.config)
-        .filter((migration) => migration.version === 8 || migration.version === 9 || migration.version === 10)
+        .filter((migration) => migration.version === 8 || migration.version === 9 || migration.version === 10 || migration.version === 11)
         .flatMap((migration) => migration.statements);
       for (const statement of statements) {
         await applyMigrationStatement(pgDriver(first), statement);
@@ -492,7 +492,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
 
       // The whole runner, twice at once, with version 8 not yet recorded.
       await drop();
-      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version IN (8, 9, 10)`);
+      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version IN (8, 9, 10, 11)`);
       const [ranOne, ranTwo] = await Promise.all([one.migrate(), two.migrate()]);
       expect([...ranOne, ...ranTwo]).toContain(8);
       expect(await resetObjects()).toEqual(expected);
@@ -631,6 +631,43 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const next = newKey();
       await completeEmail(account.name, fresh.delivery!.resetId, fresh.delivery!.code, next, { via: legacy });
       expect((await legacy.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+    });
+
+    it("refreshes old migration-10 functions through migration 11 without replaying cutover data changes", async () => {
+      const legacy = createIdentityService(pgDriver(first), config(concurrencyPrefix));
+      const account = await register(username("old-email-functions"), {
+        via: legacy, email: `old-functions-${suffix}@example.org`, verify: true,
+      });
+      await setSetting(account, account.session.token, "email-reset", true, { via: legacy });
+      const exhausted = (await startEmail(account.name, legacy)).delivery!;
+      await first.query(`UPDATE ${concurrencyPrefix}_account_resets SET attempts = 5 WHERE id = $1::uuid`, [exhausted.resetId]);
+
+      const currentStart = identityMigrations(legacy.config).find((migration) => migration.version === 10)!.statements
+        .find((statement) => statement.startsWith("CREATE OR REPLACE FUNCTION "))!;
+      const oldStart = currentStart.replace(
+        "(r.expires_at <= clock_at OR r.attempts >= 5)", "r.expires_at <= clock_at",
+      );
+      expect(oldStart).not.toBe(currentStart);
+      await applyMigrationStatement(pgDriver(first), oldStart);
+      await first.query(`DROP FUNCTION ${concurrencyPrefix}_cancel_undelivered_email_reset(text,uuid,text,timestamptz)`);
+      await first.query(`DELETE FROM ${concurrencyPrefix}_schema_migrations WHERE version = 11`);
+      await first.query(
+        `UPDATE ${concurrencyPrefix}_rate_limits SET count = 7 WHERE rule_id = 'account-reset-recipient'`,
+      );
+      expect((await startEmail(account.name, legacy)).delivery).toBeNull();
+
+      expect(await legacy.migrate()).toEqual([11]);
+      const retainedQuota = await first.query(
+        `SELECT count FROM ${concurrencyPrefix}_rate_limits WHERE rule_id = 'account-reset-recipient'`,
+      );
+      expect(retainedQuota.rows).toContainEqual({ count: 7 });
+      const replacement = (await startEmail(account.name, legacy)).delivery!;
+      expect(replacement.resetId).not.toBe(exhausted.resetId);
+      const retired = await first.query(
+        `SELECT aborted_at FROM ${concurrencyPrefix}_account_resets WHERE id = $1::uuid`, [exhausted.resetId],
+      );
+      expect(retired.rows[0]?.["aborted_at"]).not.toBeNull();
+      expect(await legacy.cancelUndeliveredAccountReset(replacement)).toEqual({ cancelled: true });
     });
   });
 
@@ -1183,6 +1220,106 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect((await resetRow(issued.delivery!.resetId))?.["attempts"]).toBe(5);
       await expectCode(() => completeEmail(account.name, issued.delivery!.resetId, issued.delivery!.code, newKey()), "invalid-signature");
       expect((await resetRow(issued.delivery!.resetId))?.["attempts"]).toBe(5);
+    });
+
+    it("commits a valid fifth code before a wrong guess and start can see it", async () => {
+      const account = await emailAccount("email-fifth-start-race");
+      const issued = (await startEmail(account.name)).delivery!;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await expectCode(() => completeEmail(account.name, issued.resetId, "WRONGCOD", newKey()), "invalid-signature");
+      }
+      expect((await resetRow(issued.resetId))?.["attempts"]).toBe(4);
+
+      let signalAttempt!: () => void;
+      let resumeCompletion!: () => void;
+      const attemptFinished = new Promise<void>((resolve) => { signalAttempt = resolve; });
+      const mayComplete = new Promise<void>((resolve) => { resumeCompletion = resolve; });
+      const driver = pgDriver(second);
+      const pausedDriver: SqlDriver = {
+        kind: driver.kind,
+        async query<T extends SqlRow = SqlRow>(statement: string, parameters?: readonly SqlParameter[]): Promise<T[]> {
+          const rows = await driver.query<T>(statement, parameters);
+          // Intercept the SQL boundary: the old two-statement implementation
+          // stopped here after counting attempt five but before completion.
+          if (statement.includes(`${prefix}_account_resets`) &&
+              (statement.includes("SET attempts = r.attempts + 1") || statement.includes("SET attempts = r.attempts + CASE"))) {
+            signalAttempt();
+            await mayComplete;
+          }
+          return rows;
+        },
+      };
+      const completingService = createIdentityService(pausedDriver, config(prefix));
+      const next = newKey();
+      const completion = completeEmail(account.name, issued.resetId, issued.code, next, { via: completingService });
+      void completion.catch(() => undefined);
+      try {
+        await attemptFinished;
+        await expectCode(() => completeEmail(account.name, issued.resetId, "WRONGCOD", newKey()), "invalid-signature");
+        const racedStart = await startEmail(account.name);
+        expect(racedStart.delivery).not.toBeNull();
+        expect(racedStart.delivery!.resetId).not.toBe(issued.resetId);
+        resumeCompletion();
+        await completion;
+        expect((await resetRow(issued.resetId))?.["attempts"]).toBe(5);
+        expect((await resetRow(issued.resetId))?.["completed_at"]).not.toBeNull();
+        expect((await resetRow(issued.resetId))?.["aborted_at"]).toBeNull();
+        expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+      } finally {
+        resumeCompletion();
+        await Promise.allSettled([completion]);
+      }
+    });
+
+    it("orders a fifth correct code before a queued wrong guess and new start", async () => {
+      const account = await emailAccount("email-fifth-lock-race");
+      const issued = (await startEmail(account.name)).delivery!;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await expectCode(() => completeEmail(account.name, issued.resetId, "WRONGCOD", newKey()), "invalid-signature");
+      }
+      const preparedInput = async (code: string, key: Key) => {
+        const challenge = await service.createChallenge(account.name, "rotation", ctx());
+        const signed = messageFor(challenge, "email-reset", `email:${issued.resetId}`, keyPrincipal(key));
+        return {
+          username: account.name, resetId: issued.resetId, code,
+          challengeId: challenge.id, newKey: enrolled(key), subjectSignature: sign(key, signed),
+        };
+      };
+      const next = newKey();
+      const correctInput = await preparedInput(issued.code, next);
+      const wrongInput = await preparedInput("WRONGCOD", newKey());
+      const lanes = await openConnections(4);
+      const [holder, correct, wrong, starter] = lanes as [Connection, Connection, Connection, Connection];
+      let validCompletion: ReturnType<IdentityService["completeAccountReset"]> | undefined;
+      let wrongCompletion: ReturnType<IdentityService["completeAccountReset"]> | undefined;
+      let queuedStart: Promise<IssuedAccountReset> | undefined;
+      try {
+        await holder.client.query("BEGIN");
+        await holder.client.query(`SELECT 1 FROM ${prefix}_accounts WHERE id = $1::uuid FOR UPDATE`, [account.accountId]);
+        validCompletion = correct.service.completeAccountReset(correctInput, ctx());
+        void validCompletion.catch(() => undefined);
+        await waitUntilBlocked(correct.pid);
+        wrongCompletion = wrong.service.completeAccountReset(wrongInput, ctx());
+        void wrongCompletion.catch(() => undefined);
+        await waitUntilBlocked(wrong.pid);
+        queuedStart = startEmail(account.name, starter.service);
+        void queuedStart.catch(() => undefined);
+        await waitUntilBlocked(starter.pid);
+        await holder.client.query("COMMIT");
+
+        await validCompletion;
+        await expectCode(() => wrongCompletion!, "invalid-signature");
+        const raced = await queuedStart;
+        if (raced.delivery !== null) expect(raced.delivery.resetId).not.toBe(issued.resetId);
+        expect((await resetRow(issued.resetId))?.["attempts"]).toBe(5);
+        expect((await resetRow(issued.resetId))?.["completed_at"]).not.toBeNull();
+        expect((await resetRow(issued.resetId))?.["aborted_at"]).toBeNull();
+        expect((await service.listWallets(account.accountId))[0]?.publicKey).toBe(next.identifier);
+      } finally {
+        await holder.client.query("ROLLBACK");
+        await Promise.allSettled([validCompletion, wrongCompletion, queuedStart].filter((value) => value !== undefined));
+        await closeConnections(lanes);
+      }
     });
 
     it("counts parallel guesses one attempt each", async () => {
@@ -1999,7 +2136,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       return { account, sessions, complete };
     }
 
-    it("completions hold the account FOR SHARE, lock the key and the reset first, then sessions in id order, never the caller's", async () => {
+    it("completions lock the account, key and reset before sessions in id order, never the caller's", async () => {
       const pair = await openConnections(2);
       const [holder, actor] = [pair[0]!, pair[1]!];
       try {
@@ -2055,7 +2192,8 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       // sessions below X and waits on X; the completion takes the account,
       // the key and the reset, then waits on a session revoke-others holds;
       // the holder commits and revoke-others' audit insert takes FOR KEY
-      // SHARE on the account, which the completion's FOR SHARE admits.
+      // SHARE on the account, which completion's FOR SHARE or FOR NO KEY
+      // UPDATE admits.
       const trio = await openConnections(3);
       const [holder, revoker, actor] = [trio[0]!, trio[1]!, trio[2]!];
       try {
