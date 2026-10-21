@@ -9,13 +9,15 @@
  * recovery token, the account's `active` status, and the enrolled key.
  *
  * Lock order. Every statement here takes its row locks in this one order, and
- * never `FOR UPDATE` on the account row:
+ * never `FOR UPDATE` on the account row. Reset cancellations also advance the
+ * account's generation so starts invisible to a canceller's snapshot cannot
+ * complete:
  *
- *   account (FOR SHARE, or FOR NO KEY UPDATE for the email change)
+ *   account (FOR SHARE, or FOR NO KEY UPDATE when advancing the reset generation)
  *   → enrolled key (`<p>_account_wallets`)
  *   → recovery key → recovery token
- *   → account resets (the rotation aborts a pending signed-in reset; the
- *     email change closes live emailed codes)
+ *   → account resets (rotation and factor changes close pending signed-in
+ *     resets; an email change also closes live emailed codes)
  *   → sessions, in id order (FOR NO KEY UPDATE), never the caller's own row
  *   → inserts (a new session, the audit row)
  *
@@ -24,7 +26,8 @@
  * account row; FOR KEY SHARE conflicts with none of the account locks above,
  * so those revocations never wait on an account change, and the account
  * changes take session locks in the same id order. `authenticate` locks one
- * session row and nothing after it, and login inserts only. No cycle exists.
+ * session row and nothing after it. Login locks the account and enrolled key
+ * before inserting a session, advancing the generation and closing resets.
  */
 import { hexToBytes } from "@noble/hashes/utils.js";
 import {
@@ -666,7 +669,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                    WHERE a.id = caller.account_id
                      AND a.service_profile_id = $3::text
                      AND a.status = 'active'
-                     FOR SHARE OF a
+                     FOR NO KEY UPDATE OF a
                 ),
                 rotated AS (
                   UPDATE ${p}_account_wallets w
@@ -685,6 +688,13 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      )
                    RETURNING ${bare("w", WALLET_COLUMNS)}
                 ),
+                fenced AS (
+                  UPDATE ${p}_accounts a
+                     SET reset_generation = a.reset_generation + 1
+                    FROM rotated
+                   WHERE a.id = rotated.account_id
+                   RETURNING a.id
+                ),
                 -- A password change proves the password is not forgotten, so
                 -- it aborts the account's pending signed-in reset, as a
                 -- password sign-in does. The caller's session survives the
@@ -694,8 +704,8 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                 aborted_resets AS (
                   UPDATE ${p}_account_resets r
                      SET aborted_at = (SELECT at FROM clock)
-                    FROM rotated
-                   WHERE r.account_id = rotated.account_id
+                    FROM fenced
+                   WHERE r.account_id = fenced.id
                      AND r.kind = 'signed-in'
                      AND r.completed_at IS NULL
                      AND r.aborted_at IS NULL
@@ -847,6 +857,10 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          WHEN $5::text IS DISTINCT FROM acct.previous_email THEN false
                          ELSE a.email_reset_enabled
                        END,
+                       reset_generation = CASE
+                         WHEN $5::text IS DISTINCT FROM acct.previous_email
+                         THEN a.reset_generation + 1 ELSE a.reset_generation
+                       END,
                        updated_at = (SELECT at FROM clock)
                   FROM acct, keyed
                  WHERE a.id = acct.id AND keyed.account_id = acct.id
@@ -858,7 +872,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                   FROM updated, acct
                  WHERE r.account_id = updated.id
                    AND $5::text IS DISTINCT FROM acct.previous_email
-                   AND r.kind = 'email'
+                   AND r.kind IN ('email', 'signed-in')
                    AND r.completed_at IS NULL
                    AND r.aborted_at IS NULL
                    AND r.expires_at > (SELECT at FROM clock)
@@ -946,7 +960,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                    WHERE a.id = caller.account_id
                      AND a.service_profile_id = $3::text
                      AND a.status = 'active'
-                     FOR SHARE OF a
+                   FOR NO KEY UPDATE OF a
                 ),
                 keyed AS (
                   SELECT w.id, w.account_id
@@ -980,6 +994,22 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      AND (SELECT count(*) FROM retired) >= 0
                   RETURNING id, account_id, ${RECOVERY_KEY_COLUMNS.join(", ")}
                 ),
+                fenced AS (
+                  UPDATE ${p}_accounts a
+                     SET reset_generation = a.reset_generation + 1
+                    FROM inserted
+                   WHERE a.id = inserted.account_id
+                   RETURNING a.id
+                ),
+                closed_resets AS (
+                  UPDATE ${p}_account_resets r
+                     SET aborted_at = (SELECT at FROM clock)
+                    FROM fenced
+                   WHERE r.account_id = fenced.id
+                     AND r.kind = 'signed-in'
+                     AND r.completed_at IS NULL AND r.aborted_at IS NULL
+                   RETURNING r.id
+                ),
                 revoked_tokens AS (
                   UPDATE ${p}_account_recoveries r
                      SET revoked_at = (SELECT at FROM clock)
@@ -997,6 +1027,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          ),
                          (SELECT at FROM clock)
                     FROM inserted, caller
+                   WHERE (SELECT count(*) FROM closed_resets) >= 0
                   RETURNING 1
                 )
            SELECT (SELECT count(*) FROM caller)::int AS caller_found,
@@ -1078,7 +1109,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                  WHERE a.id = caller.account_id
                    AND a.service_profile_id = $3::text
                    AND a.status = 'active'
-                   FOR SHARE OF a
+                   FOR NO KEY UPDATE OF a
               ),
               keyed AS (
                 SELECT w.id, w.account_id
@@ -1094,6 +1125,22 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                   FROM keyed
                  WHERE k.account_id = keyed.account_id AND k.status = 'active'
                  RETURNING k.id, k.account_id
+              ),
+              fenced AS (
+                UPDATE ${p}_accounts a
+                   SET reset_generation = a.reset_generation + 1
+                  FROM removed
+                 WHERE a.id = removed.account_id
+                 RETURNING a.id
+              ),
+              closed_resets AS (
+                UPDATE ${p}_account_resets r
+                   SET aborted_at = (SELECT at FROM clock)
+                  FROM fenced
+                 WHERE r.account_id = fenced.id
+                   AND r.kind = 'signed-in'
+                   AND r.completed_at IS NULL AND r.aborted_at IS NULL
+                 RETURNING r.id
               ),
               revoked_tokens AS (
                 UPDATE ${p}_account_recoveries r
@@ -1112,6 +1159,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                        ),
                        (SELECT at FROM clock)
                   FROM removed, caller
+                 WHERE (SELECT count(*) FROM closed_resets) >= 0
                 RETURNING 1
               )
          SELECT (SELECT count(*) FROM caller)::int AS caller_found,

@@ -1050,15 +1050,18 @@ before any SQL); reauthentication runs in every mode. Every method requires an
 account's caller gets `invalid-signature`, and `startAccountReset` answers as
 for any other username. The rule for turning the signed-in reset off is
 checked when it is turned off: removing the other method later leaves it off.
-A change of either setting, in either direction, closes that kind's open
-resets: a turn-off closes the live ones, and a turn-on closes any that a start
-inserted while the turn-off waited for the account row, which the turn-off's
-snapshot could not see (no start inserts while the setting is off).
+A change of either setting, in either direction, cancels pending signed-in
+resets; changing the email-reset setting also closes its open email codes.
+Migration 9 adds a durable reset generation to each account and reset. A
+signed-in reset is pending or completable only while the generations match,
+including when a concurrent start was invisible to the cancelling statement's
+snapshot. The next start closes such a stale row before issuing a new reset.
 
 With `signedInReset` on, every account's signed-in reset is on until its owner
 turns it off: a stolen session can then replace the enrolled key after the
-72-hour wait unless another session aborts it or the owner signs in with the
-password or changes it ([security model](SECURITY_MODEL.md#account-resets)). The
+72-hour wait unless another session aborts it, the owner signs in with the
+password or changes it, or an email or recovery factor changes
+([security model](SECURITY_MODEL.md#account-resets)). The
 initiating session must outlive the wait, since only it completes the reset
 and a session's expiry is fixed: without an emailed code, `startSignedInReset`
 refuses a session that expires before `availableAt` (`reset-unavailable`,
@@ -1071,7 +1074,7 @@ session can start one during its first 11 days.
 
 | method | signed by | effect |
 | --- | --- | --- |
-| `setAccountResetSetting(token, { challengeId, setting, enabled, authorizerSignature }, context?)` | the current key, action `email-reset-setting` or `signed-in-reset-setting`, subject `setting:on` or `setting:off` | one statement: sets the setting (the account row `FOR NO KEY UPDATE`, the key and any recovery key `FOR SHARE`, so a change that committed while it waited is seen), closes that kind's open resets when it changes the value ([above](#opt-ins-settings-and-status)), audits `account.reset-setting { setting, enabled, closedResets, sessionId }`. Returns `{ settings, changed }`; `changed: false` when it already had the value. |
+| `setAccountResetSetting(token, { challengeId, setting, enabled, authorizerSignature }, context?)` | the current key, action `email-reset-setting` or `signed-in-reset-setting`, subject `setting:on` or `setting:off` | one statement: sets the setting (the account row `FOR NO KEY UPDATE`, the key and any recovery key `FOR SHARE`, so a change that committed while it waited is seen), cancels pending signed-in resets and closes email codes when the email-reset setting changes ([above](#opt-ins-settings-and-status)), audits `account.reset-setting { setting, enabled, closedResets, sessionId }`. Returns `{ settings, changed }`; `changed: false` when it already had the value. |
 | `accountResetStatus(token, context?)` | — | `{ settings: { emailReset, signedInReset }, emailVerified, pendingSignedInReset }`. The pending reset is `{ id, createdAt, availableAt, expiresAt, initiatedByCaller, codeUsable }`, or `null` when none is live, its session is gone, or the signed-in reset setting is off. A host shows every other session a banner with **Abort** from it. |
 | `startAccountReset({ username }, context?)` | — | [below](#account-recovery-by-email). Returns `{ resetId, expiresAt, delivery }`. |
 | `completeAccountReset({ username, resetId, code, challengeId, newKey, subjectSignature }, context?)` | `newKey` only, action `email-reset`, authorizer `email:<resetId>` | one statement: replaces the enrolled key, marks the reset completed, closes the account's other live resets, revokes **every** session and issues a new one, audits `account.email-reset { method: "email", revokedSessions, closedResets, sessionId }`. Returns `{ account, wallets, session, revokedSessionIds }`. |
@@ -1207,8 +1210,9 @@ Each change is one statement, in the [account changes' order](#statements-and-lo
 with the resets after the enrolled key and before the sessions, and never
 `FOR UPDATE` on the account row:
 
-1. the account row: `FOR SHARE` (`FOR NO KEY UPDATE` for a setting change, an
-   address change and `updateAccount`);
+1. the account row: `FOR SHARE` (`FOR NO KEY UPDATE` for login, abort, rotation,
+   reset-setting and recovery-factor changes, an address change and
+   `updateAccount`);
 2. the enrolled-key row (`FOR UPDATE` to replace it, `FOR SHARE` to check it);
 3. a setting change only: the active recovery key, `FOR SHARE`;
 4. the reset being completed (`FOR UPDATE`), then the other live resets it
@@ -1216,27 +1220,26 @@ with the resets after the enrolled key and before the sessions, and never
 5. sessions, in id order (`FOR NO KEY UPDATE`), never the caller's own row;
 6. inserts: a new session, the audit rows.
 
-The login statement locks the one reset row it aborts and no session;
-`abortSignedInReset` takes the account `FOR SHARE` and the reset row; the
-rotation takes the account `FOR SHARE`, the key, the pending reset and then
-sessions, in the order above; the revocations only read the resets. So a completion and revoke-others, revoke-all,
-`authenticate`, a login or an abort never close a cycle, and a rotation and a
-completion of one account serialize on the enrolled key: the second finds the
-key moved (`stale-key`). `accountResets.integration.test.ts` drives these
-interleavings with a lock holder and fails with PostgreSQL 40P01 when a
-completion takes the account `FOR UPDATE`.
+Login locks the account `FOR NO KEY UPDATE` and rechecks the enrolled key
+`FOR SHARE` before inserting its session, advancing the reset generation and
+closing visible resets. A concurrent signed-in completion holds the account
+`FOR SHARE`: login first invalidates its reset, even if the completion's
+snapshot cannot see the new session; completion first makes login recheck the
+moved key after it waits. `abortSignedInReset` also takes the account
+`FOR NO KEY UPDATE` and then the reset row; rotation takes the account, key, pending
+reset and sessions in that order. Revocations only read resets.
+`accountResets.integration.test.ts` forces both login/completion orders and
+the existing lock-order cases.
 
 A completion that is already waiting when a revoke-others revokes its
 initiating session can still commit: its snapshot saw the session live. The
-abort, the password login and the password change are the race-safe stops,
-because they lock the reset row the completion locks.
+abort, password login and password change also fence a start that their
+statement snapshot could not see.
 
 A setting change cannot close a reset that a start inserted while the change
 waited for the account row, because the change's snapshot predates the row.
-So a signed-in reset counts as pending (the status, `reset-pending`) and
-completes only while its setting is on, and turning the setting on closes the
-leftover. What remains needs the owner's own signed turn-off and turn-on in
-flight at once, both overlapping the start.
+The account generation prevents that reset from counting as pending or
+completing; the next start closes the stale row.
 
 ### Reset rate limits
 
@@ -1622,7 +1625,9 @@ from concurrent runners.
 `id uuid` (PK), `account_id` (FK, cascade), `kind` (`email` or `signed-in`),
 `code_hash` (64 lowercase hex, or NULL), `attempts`, `session_id` (the
 initiating session; no foreign key), `created_at`, `available_at`,
-`expires_at`, `completed_at`, `aborted_at`. CHECKs: an `email` row has a code
+`expires_at`, `completed_at`, `aborted_at`, `reset_generation` (migration 9).
+The account also stores `reset_generation`; both default to zero for existing
+rows. CHECKs: an `email` row has a code
 digest, no session and `available_at = created_at`; a `signed-in` row has a
 session; `available_at >= created_at` and `expires_at > available_at`; never
 both completed and aborted; `attempts >= 0`. A live reset is neither completed
@@ -1641,7 +1646,8 @@ from them would lock reset rows behind session locks, against the order every
 reset statement takes. A reset whose session is gone cannot complete. Each of
 migration 8's six statements is one `ADD COLUMN IF NOT EXISTS` or `CREATE …
 IF NOT EXISTS` with its constraints inline, safe to re-run and to run from
-concurrent runners.
+concurrent runners. Migration 9 adds its two columns with
+`ADD COLUMN IF NOT EXISTS`.
 
 ### There is no salt adoption
 
@@ -1762,6 +1768,19 @@ runner skips applied versions — but it adds round trips to user-facing request
 and, worse, makes salt provisioning a side effect of traffic. Run it from a
 one-off script or a deploy step, and treat its first successful run against a
 new database as the moment the salt came into existence.
+
+**Migration 9 cutover.** Do not run old and new SDK workers together. An old
+worker ignores `reset_generation`; migration 9 alone cannot stop its login or
+reset-completion statements from bypassing the cancellation fence. On a
+platform with no live accounts or data, stop identity traffic and drain all
+old workers, run `migrate()` with the new SDK against the configured database,
+then start only new workers and reopen traffic. If draining cannot be
+confirmed, keep identity routes closed; do not use a rolling cutover. Verify
+that `<p>_schema_migrations` records version 9 before reopening. The new
+SDK's login and reset SQL requires the migration 9 columns and fails before
+issuing a session or reset when they are absent. Preserve the existing `.env`
+file and credentials throughout; a disposable database does not make them
+disposable.
 
 **pgcrypto.** Migration 1 issues `CREATE EXTENSION IF NOT EXISTS pgcrypto` and
 depends on `gen_random_bytes` and `gen_random_uuid`. Neon permits this. On a

@@ -561,6 +561,14 @@ export function identityMigrations(
            ON ${p}_account_resets (expires_at)`,
       ]),
     }),
+    Object.freeze({
+      version: 9,
+      name: "signed-in-reset-cancellation-fence",
+      statements: Object.freeze([
+        `ALTER TABLE ${p}_accounts ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0`,
+        `ALTER TABLE ${p}_account_resets ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0`,
+      ]),
+    }),
   ]);
 }
 

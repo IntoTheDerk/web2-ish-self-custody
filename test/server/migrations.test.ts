@@ -405,6 +405,17 @@ describe("migration 8, account resets", () => {
   });
 });
 
+describe("migration 9, signed-in reset cancellation fence", () => {
+  it("adds durable generations to accounts and existing reset rows", () => {
+    const migration = migrations.find((candidate) => candidate.version === 9);
+    expect(migration?.name).toBe("signed-in-reset-cancellation-fence");
+    expect(migration?.statements).toEqual([
+      "ALTER TABLE acme_id_accounts ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0",
+      "ALTER TABLE acme_id_account_resets ADD COLUMN IF NOT EXISTS reset_generation bigint NOT NULL DEFAULT 0",
+    ]);
+  });
+});
+
 describe("migration 6, session client labels", () => {
   const migration = migrations.find((candidate) => candidate.version === 6);
 
