@@ -232,6 +232,7 @@ function resetPendingSql(p: string): string {
              WHERE r.account_id = s.account_id
                AND r.session_id = s.id
                AND r.kind = 'signed-in'
+               AND r.reset_generation = a.reset_generation
                AND r.completed_at IS NULL
                AND r.aborted_at IS NULL
                AND r.expires_at > (SELECT at FROM clock)
@@ -467,17 +468,17 @@ export function createIdentityService(
   };
 
   /**
-   * Issues a login session, only while `verifiedPublicKey` (the key whose
-   * signature the login just checked) is still an enrolled key of the
-   * account: a rotation or recovery that committed after the login read the
-   * account's keys must not leave the old key's login a session it could not
-   * revoke. That leaves a window of one overlapping statement, which the
-   * sessions list shows and revoke-others closes (docs/SERVER_API.md).
+   * Issues a login session only while `verifiedPublicKey` is still enrolled.
+   * Lock the account before the key and before inserting the session. Reset
+   * completion holds FOR SHARE on the account: if login goes first, its
+   * generation increment makes completion's old reset unusable even when
+   * completion's snapshot cannot see the new session; if completion goes
+   * first, login rechecks the moved key after waiting for the account lock.
    *
    * The same statement aborts the account's pending signed-in reset: a
-   * sign-in with the password proves it is not forgotten. It locks that one
-   * reset row and no session, so it closes no cycle with a reset completion
-   * (reset, then sessions) or a revocation (sessions only).
+   * sign-in with the password proves it is not forgotten. Advancing the
+   * account generation also invalidates a concurrent start invisible to this
+   * statement's snapshot.
    */
   const issueSession = async (
     accountId: string,
@@ -490,20 +491,37 @@ export function createIdentityService(
     const client = sessionClientColumns(context);
     const rows = await sql.query(
       `WITH clock AS (SELECT COALESCE($1::timestamptz, now()) AS at),
+            acct AS (
+              SELECT a.id
+                FROM ${p}_accounts a
+               WHERE a.id = $2::uuid
+                 AND a.service_profile_id = $11::text
+                 AND a.status = 'active'
+                 FOR NO KEY UPDATE OF a
+            ),
+            keyed AS (
+              SELECT w.account_id
+                FROM ${p}_account_wallets w, acct
+               WHERE w.account_id = acct.id AND w.public_key = $10::text
+               FOR SHARE OF w
+            ),
             new_session AS (
               INSERT INTO ${p}_sessions (
                 account_id, token_hash, issued_at, expires_at, last_seen_at,
                 ip_hash, user_agent_hash, client_label
               )
-              SELECT $2::uuid, $3::text, clock.at,
+              SELECT keyed.account_id, $3::text, clock.at,
                      date_trunc('milliseconds', clock.at + (interval '1 second' * $4::double precision)),
                      clock.at, $5::text, $6::text, $9::text
-              FROM clock
-              WHERE EXISTS (
-                SELECT 1 FROM ${p}_account_wallets w
-                 WHERE w.account_id = $2::uuid AND w.public_key = $10::text
-              )
+              FROM clock, keyed
               RETURNING id, account_id, issued_at, expires_at, last_seen_at
+            ),
+            fenced AS (
+              UPDATE ${p}_accounts a
+                 SET reset_generation = a.reset_generation + 1
+                FROM new_session
+               WHERE a.id = new_session.account_id
+               RETURNING a.id
             ),
             logged AS (
               INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -516,8 +534,8 @@ export function createIdentityService(
             aborted_resets AS (
               UPDATE ${p}_account_resets r
                  SET aborted_at = (SELECT at FROM clock)
-                FROM new_session
-               WHERE r.account_id = new_session.account_id
+                FROM fenced
+               WHERE r.account_id = fenced.id
                  AND r.kind = 'signed-in'
                  AND r.completed_at IS NULL
                  AND r.aborted_at IS NULL
@@ -547,6 +565,7 @@ export function createIdentityService(
         metadataJson(metadata),
         client.clientLabel,
         verifiedPublicKey,
+        serviceProfileId,
       ],
     );
     const row = requireSingleRow(
@@ -1618,6 +1637,10 @@ export function createIdentityService(
                          THEN false
                          ELSE a.email_reset_enabled
                        END,
+                       reset_generation = CASE
+                         WHEN $4::text IS NOT NULL AND $4::text IS DISTINCT FROM a.email
+                         THEN a.reset_generation + 1 ELSE a.reset_generation
+                       END,
                        updated_at = (SELECT at FROM clock)
                   FROM prior
                  WHERE a.id = prior.id
@@ -1633,7 +1656,7 @@ export function createIdentityService(
                   FROM updated
                  WHERE r.account_id = updated.id
                    AND updated.email_changed
-                   AND r.kind = 'email'
+                   AND r.kind IN ('email', 'signed-in')
                    AND r.completed_at IS NULL
                    AND r.aborted_at IS NULL
                    AND r.expires_at > (SELECT at FROM clock)
@@ -1836,16 +1859,27 @@ export function createIdentityService(
               acct AS (
                 UPDATE ${p}_accounts
                    SET email_verified_at = (SELECT consumed_at FROM consumed),
+                       reset_generation = reset_generation + 1,
                        updated_at = (SELECT consumed_at FROM consumed)
                  WHERE service_profile_id = $2::text
                    AND username_normalized = (SELECT username_normalized FROM consumed)
                    AND email = (SELECT email FROM consumed)
                  RETURNING id
               ),
+              closed_resets AS (
+                UPDATE ${p}_account_resets r
+                   SET aborted_at = (SELECT at FROM clock)
+                  FROM acct
+                 WHERE r.account_id = acct.id
+                   AND r.kind = 'signed-in'
+                   AND r.completed_at IS NULL AND r.aborted_at IS NULL
+                 RETURNING r.id
+              ),
               logged AS (
                 INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
                 SELECT (SELECT id FROM acct), 'email.verified', $4::jsonb, consumed.consumed_at
                 FROM consumed
+               WHERE (SELECT count(*) FROM closed_resets) >= 0
                 RETURNING 1
               )
          SELECT username_normalized, email, consumed_at FROM consumed`,

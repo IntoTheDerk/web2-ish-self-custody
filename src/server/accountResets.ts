@@ -17,28 +17,25 @@
  *
  * Lock order: the order of `accountChanges.ts`, with the resets after the
  * enrolled key and before the sessions, and never `FOR UPDATE` on the account
- * row:
+ * row. Cancellation advances the account's durable reset generation; closing
+ * rows alone cannot catch a start inserted after the canceller's snapshot.
  *
- *   account (FOR SHARE, or FOR NO KEY UPDATE for a setting change)
+ *   account (FOR SHARE, or FOR NO KEY UPDATE for cancellation/setting change)
  *   → enrolled key (FOR UPDATE to replace it, FOR SHARE to check it)
  *   → recovery key (FOR SHARE, a setting change only)
  *   → resets: the one completing (FOR UPDATE), then the others it closes
  *   → sessions, in id order (FOR NO KEY UPDATE), never the caller's own row
  *   → inserts (a new session, the audit rows).
  *
- * The login statement locks one reset row and no session, `abortSignedInReset`
- * the account (FOR SHARE) and one reset row, the rotation the account (FOR
- * SHARE), the key, the reset row and then sessions, as above, and the
- * revocations read the resets without locking them, so none of them closes a
- * cycle with the order above.
+ * The login statement locks the account and enrolled key before inserting a
+ * session, advancing the generation and locking a reset row.
+ * `abortSignedInReset` locks the account (FOR NO KEY UPDATE) and a reset row;
+ * rotation locks the account, key, reset and then
+ * sessions. Revocations read resets without locking them.
  *
  * A setting change cannot see a reset that a start inserted while the change
- * waited for the account row: the change's snapshot predates that row. So a
- * change of a setting closes that kind's open resets in either direction (a
- * turn-on finds only such leftovers, since no start inserts while the
- * setting is off), and a signed-in reset counts as pending, or completes,
- * only while its setting is on. What remains needs the owner's own signed
- * turn-off and turn-on in flight at once, both overlapping the start.
+ * waited for the account row: the change's snapshot predates that row. The
+ * generation check at completion and pending reads closes that race.
  */
 import { hostLabelPattern } from "../accountChange.js";
 import { fingerprint } from "../encoding.js";
@@ -356,6 +353,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                        signed_in_reset_enabled = CASE
                          WHEN $5::text = 'signed-in-reset' THEN $6::boolean ELSE a.signed_in_reset_enabled
                        END,
+                       reset_generation = a.reset_generation + 1,
                        updated_at = (SELECT at FROM clock)
                   FROM rule
                  WHERE a.id = rule.account_id
@@ -363,15 +361,16 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                    AND rule.current_value IS DISTINCT FROM $6::boolean
                  RETURNING a.id, a.email_reset_enabled, a.signed_in_reset_enabled
               ),
-              -- Either direction: turning a setting off closes its live
-              -- resets, and turning it on closes any a start inserted after
-              -- the turn-off's snapshot (see the header).
+              -- Either direction closes visible resets of the changed method;
+              -- an email-reset setting change also cancels signed-in resets
+              -- that could use an emailed code. The generation fences rows
+              -- that this statement's snapshot cannot see.
               closed_resets AS (
                 UPDATE ${p}_account_resets r
                    SET aborted_at = (SELECT at FROM clock)
                   FROM updated
                  WHERE r.account_id = updated.id
-                   AND r.kind = CASE WHEN $5::text = 'email-reset' THEN 'email' ELSE 'signed-in' END
+                   AND (r.kind = 'signed-in' OR ($5::text = 'email-reset' AND r.kind = 'email'))
                    AND r.completed_at IS NULL
                    AND r.aborted_at IS NULL
                    AND r.expires_at > (SELECT at FROM clock)
@@ -457,7 +456,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
         `WITH clock AS (SELECT COALESCE($3::timestamptz, now()) AS at),
               caller AS (
                 SELECT s.id, s.account_id, a.status, a.email, a.email_verified_at,
-                       a.email_reset_enabled, a.signed_in_reset_enabled
+                       a.email_reset_enabled, a.signed_in_reset_enabled, a.reset_generation
                   FROM ${p}_sessions s
                   JOIN ${p}_accounts a ON a.id = s.account_id AND a.service_profile_id = $2::text
                  WHERE s.token_hash = $1::text
@@ -482,6 +481,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
               WHERE r.account_id = caller.account_id
                 AND caller.signed_in_reset_enabled
                 AND r.kind = 'signed-in'
+                AND r.reset_generation = caller.reset_generation
                 AND r.completed_at IS NULL
                 AND r.aborted_at IS NULL
                 AND r.expires_at > (SELECT at FROM clock)
@@ -890,7 +890,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                 ),
                 acct AS (
                   SELECT a.id, a.email, a.email_verified_at, a.email_reset_enabled,
-                         a.signed_in_reset_enabled
+                         a.signed_in_reset_enabled, a.reset_generation
                     FROM ${p}_accounts a, caller
                    WHERE a.id = caller.account_id
                      AND a.service_profile_id = $3::text
@@ -909,7 +909,8 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                 ),
                 open_resets AS (
                   SELECT r.id,
-                         r.expires_at > (SELECT at FROM clock)
+                         r.reset_generation = acct.reset_generation
+                           AND r.expires_at > (SELECT at FROM clock)
                            AND EXISTS (
                              SELECT 1 FROM ${p}_sessions rs
                               WHERE rs.id = r.session_id
@@ -936,12 +937,12 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                 ),
                 issued AS (
                   INSERT INTO ${p}_account_resets (
-                    id, account_id, kind, code_hash, attempts, session_id,
+                    id, account_id, kind, code_hash, attempts, session_id, reset_generation,
                     created_at, available_at, expires_at
                   )
                   SELECT $4::uuid, plan.account_id, 'signed-in',
                          CASE WHEN plan.coded THEN $5::text END,
-                         0, plan.session_id, clock.at, plan.available_at,
+                         0, plan.session_id, acct.reset_generation, clock.at, plan.available_at,
                          plan.available_at + (interval '1 second' * $8::double precision)
                     FROM plan, acct, clock
                    WHERE acct.signed_in_reset_enabled
@@ -1050,13 +1051,20 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                  WHERE a.id = caller.account_id
                    AND a.service_profile_id = $3::text
                    AND a.status = 'active'
-                   FOR SHARE OF a
+                   FOR NO KEY UPDATE OF a
+              ),
+              fenced AS (
+                UPDATE ${p}_accounts a
+                   SET reset_generation = a.reset_generation + 1
+                  FROM acct
+                 WHERE a.id = acct.id
+                 RETURNING a.id
               ),
               aborted AS (
                 UPDATE ${p}_account_resets r
                    SET aborted_at = (SELECT at FROM clock)
-                  FROM acct
-                 WHERE r.account_id = acct.id
+                  FROM fenced
+                 WHERE r.account_id = fenced.id
                    AND r.kind = 'signed-in'
                    AND r.completed_at IS NULL
                    AND r.aborted_at IS NULL
@@ -1178,7 +1186,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                 ),
                 acct AS (
                   SELECT a.id, a.email, a.email_verified_at, a.email_reset_enabled,
-                         a.signed_in_reset_enabled
+                         a.signed_in_reset_enabled, a.reset_generation
                     FROM ${p}_accounts a, caller
                    WHERE a.id = caller.account_id
                      AND a.service_profile_id = $3::text
@@ -1204,6 +1212,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                      AND r.account_id = wallet.account_id
                      AND r.kind = 'signed-in'
                      AND r.session_id = caller.id
+                     AND r.reset_generation = acct.reset_generation
                      AND acct.signed_in_reset_enabled
                      AND r.completed_at IS NULL
                      AND r.aborted_at IS NULL
@@ -1414,8 +1423,10 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
       await sql.query(
         `SELECT r.available_at,
                 r.completed_at IS NULL AND r.aborted_at IS NULL
+                  AND r.reset_generation = a.reset_generation
                   AND r.expires_at > COALESCE($4::timestamptz, now()) AS live
            FROM ${p}_account_resets r
+           JOIN ${p}_accounts a ON a.id = r.account_id
           WHERE r.id = $1::uuid
             AND r.account_id = $2::uuid
             AND r.session_id = $3::uuid

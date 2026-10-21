@@ -413,7 +413,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
   }, 60_000);
 
   afterAll(async () => {
@@ -1395,6 +1395,196 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       expect((await service.listWallets(account.accountId)).map((wallet) => wallet.publicKey)).toEqual([account.key.identifier]);
       expect(await authenticates(other.token)).toBe(true);
     });
+
+    it("fences a start invisible to a concurrent authorized abort, then permits a fresh reset", async () => {
+      const account = await register(username("abort-start-fence"));
+      const connections = await openConnections(2);
+      const [starter, canceller] = [connections[0]!, connections[1]!];
+      let started: Awaited<ReturnType<IdentityService["startSignedInReset"]>>;
+      let abort: Promise<{ aborted: boolean }> | undefined;
+      try {
+        await starter.client.query("BEGIN");
+        try {
+          started = await starter.service.startSignedInReset(account.session.token, ctx());
+          abort = canceller.service.abortSignedInReset(account.session.token, ctx());
+          void abort.catch(() => undefined);
+          await waitUntilBlocked(canceller.pid);
+        } finally {
+          await starter.client.query("COMMIT");
+        }
+        // The abort's statement snapshot cannot see the uncommitted insert.
+        expect(await abort).toEqual({ aborted: false });
+      } finally {
+        await closeConnections(connections);
+      }
+      expect((await resetRow(started!.reset.id))?.["aborted_at"]).toBeNull();
+      expect((await service.accountResetStatus(account.session.token)).pendingSignedInReset).toBeNull();
+      await age(started!.reset.id);
+      await expectCode(() => completeSignedIn(account.name, account.session.token, started!.reset.id, newKey()), "reset-unavailable");
+      const fresh = await service.startSignedInReset(account.session.token, ctx());
+      expect((await resetRow(started!.reset.id))?.["aborted_at"]).not.toBeNull();
+      await age(fresh.reset.id);
+      const next = newKey();
+      await completeSignedIn(account.name, account.session.token, fresh.reset.id, next);
+      expect((await service.listWallets(account.accountId)).map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
+    });
+
+    it("fences starts invisible to concurrent email and recovery-factor changes", async () => {
+      for (const factor of ["email", "update-email", "recovery-enroll", "recovery-remove"] as const) {
+        const account = await verifiedAccount(`factor-${factor}`);
+        await enableEmailReset(account);
+        const recovery = newKey();
+        if (factor === "recovery-remove") {
+          const challenge = await service.createChallenge(account.name, "rotation", ctx());
+          const signed = messageFor(challenge, "recovery-key-enrollment", keyPrincipal(account.key), `recovery-key:${recovery.publicKeyHex}`);
+          await service.enrollRecoveryKey(account.session.token, {
+            challengeId: challenge.id,
+            recoveryPublicKey: recovery.publicKeyHex,
+            authorizerSignature: sign(account.key, signed),
+            subjectSignature: sign(recovery, signed),
+          }, ctx());
+        }
+        const challenge = factor === "update-email" ? null : await service.createChallenge(account.name, "rotation", ctx());
+        const connections = await openConnections(2);
+        const [starter, changer] = [connections[0]!, connections[1]!];
+        let started: Awaited<ReturnType<IdentityService["startSignedInReset"]>>;
+        let change: Promise<unknown> | undefined;
+        try {
+          await starter.client.query("BEGIN");
+          try {
+            started = await starter.service.startSignedInReset(account.session.token, ctx());
+            change = (() => {
+              if (factor === "email") {
+                const signed = messageFor(challenge!, "email-change", keyPrincipal(account.key), "email:moved@example.org");
+                return changer.service.changeEmail(account.session.token, {
+                  challengeId: challenge!.id,
+                  email: "moved@example.org",
+                  authorizerSignature: sign(account.key, signed),
+                }, ctx());
+              }
+              if (factor === "update-email") {
+                return changer.service.updateAccount(account.accountId, { email: "moved@example.org" }, ctx());
+              }
+              if (factor === "recovery-enroll") {
+                const signed = messageFor(challenge!, "recovery-key-enrollment", keyPrincipal(account.key), `recovery-key:${recovery.publicKeyHex}`);
+                return changer.service.enrollRecoveryKey(account.session.token, {
+                  challengeId: challenge!.id,
+                  recoveryPublicKey: recovery.publicKeyHex,
+                  authorizerSignature: sign(account.key, signed),
+                  subjectSignature: sign(recovery, signed),
+                }, ctx());
+              }
+              const signed = messageFor(challenge!, "recovery-key-removal", keyPrincipal(account.key), "none");
+              return changer.service.removeRecoveryKey(account.session.token, {
+                challengeId: challenge!.id,
+                authorizerSignature: sign(account.key, signed),
+              }, ctx());
+            })();
+            void change.catch(() => undefined);
+            await waitUntilBlocked(changer.pid);
+          } finally {
+            await starter.client.query("COMMIT");
+          }
+          await change;
+        } finally {
+          await closeConnections(connections);
+        }
+        expect((await resetRow(started!.reset.id))?.["aborted_at"]).toBeNull();
+        expect((await service.accountResetStatus(account.session.token)).pendingSignedInReset).toBeNull();
+        await age(started!.reset.id);
+        await expectCode(() => completeSignedIn(account.name, account.session.token, started!.reset.id, newKey()), "reset-unavailable");
+        expect((await service.listWallets(account.accountId)).map((wallet) => wallet.publicKey)).toEqual([account.key.identifier]);
+        const fresh = await service.startSignedInReset(account.session.token, ctx());
+        expect(fresh.reset.id).not.toBe(started!.reset.id);
+      }
+    }, 60_000);
+
+    it("fences a reset start concurrent with password sign-in", async () => {
+      const account = await register(username("login-start-fence"));
+      const connections = await openConnections(2);
+      const [starter, signer] = [connections[0]!, connections[1]!];
+      let started: Awaited<ReturnType<IdentityService["startSignedInReset"]>>;
+      let signedIn: Promise<IssuedSession> | undefined;
+      try {
+        await starter.client.query("BEGIN");
+        try {
+          started = await starter.service.startSignedInReset(account.session.token, ctx());
+          signedIn = login(account.name, account.key, signer.service);
+          void signedIn.catch(() => undefined);
+          await waitUntilBlocked(signer.pid);
+        } finally {
+          await starter.client.query("COMMIT");
+        }
+        expect(await signedIn).toMatchObject({ token: expect.any(String) });
+      } finally {
+        await closeConnections(connections);
+      }
+      expect((await service.accountResetStatus(account.session.token)).pendingSignedInReset).toBeNull();
+      await age(started!.reset.id);
+      await expectCode(() => completeSignedIn(account.name, account.session.token, started!.reset.id, newKey()), "reset-unavailable");
+    });
+
+    it("serializes password login and reset completion in both orders, without a surviving old-key session", async () => {
+      const connections = await openConnections(3);
+      const [holder, signer, completer] = [connections[0]!, connections[1]!, connections[2]!];
+      try {
+        {
+          const account = await register(username("login-before-completion"));
+          const started = await service.startSignedInReset(account.session.token, ctx());
+          await age(started.reset.id);
+          const next = newKey();
+          await signer.client.query("BEGIN");
+          let pendingCompletion: Promise<unknown> | undefined;
+          try {
+            const issued = await login(account.name, account.key, signer.service);
+            pendingCompletion = completeSignedIn(account.name, account.session.token, started.reset.id, next, { via: completer.service });
+            void pendingCompletion.catch(() => undefined);
+            await waitUntilBlocked(completer.pid);
+            expect((await service.listWallets(account.accountId)).map((wallet) => wallet.publicKey)).toEqual([account.key.identifier]);
+            await signer.client.query("COMMIT");
+            await expectCode(() => pendingCompletion!, "reset-unavailable");
+            expect((await resetRow(started.reset.id))?.["aborted_at"]).not.toBeNull();
+            expect(await authenticates(issued.token)).toBe(true);
+          } finally {
+            // Harmless if already committed; avoid leaving a transaction open on assertion failure.
+            await signer.client.query("ROLLBACK");
+          }
+        }
+
+        {
+          const account = await register(username("completion-before-login"));
+          const started = await service.startSignedInReset(account.session.token, ctx());
+          await age(started.reset.id);
+          const next = newKey();
+          const signedChallenge = await signer.service.createChallenge(account.name, "login", ctx());
+          await holder.client.query("BEGIN");
+          let pendingLogin: Promise<unknown> | undefined;
+          try {
+            // FOR SHARE admits completion but blocks login's account lock.
+            // Old login SQL inserted a session before this wait, which the
+            // completion's snapshot could not see or revoke.
+            await holder.client.query(`SELECT 1 FROM ${prefix}_accounts WHERE id = $1::uuid FOR SHARE`, [account.accountId]);
+            pendingLogin = signer.service.login({
+              username: account.name,
+              challengeId: signedChallenge.id,
+              signature: sign(account.key, signedChallenge.message),
+            }, ctx());
+            void pendingLogin.catch(() => undefined);
+            await waitUntilBlocked(signer.pid);
+            const done = await completeSignedIn(account.name, account.session.token, started.reset.id, next, { via: completer.service });
+            expect(done.wallets.map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
+          } finally {
+            await holder.client.query("COMMIT");
+          }
+          await expectCode(() => pendingLogin!, "invalid-signature");
+          expect((await resetRow(started.reset.id))?.["completed_at"]).not.toBeNull();
+          expect((await first.query(`SELECT count(*)::int AS count FROM ${prefix}_sessions WHERE account_id = $1::uuid AND revoked_at IS NULL`, [account.accountId])).rows[0]?.["count"]).toBe(1);
+          await login(account.name, next);
+        }
+      } finally {
+        await closeConnections(connections);
+      }
+    }, 60_000);
 
     it("answers stale-key when the enrolled key moves while the completion waits for it", async () => {
       const account = await register(username("signed-in-stale"));
