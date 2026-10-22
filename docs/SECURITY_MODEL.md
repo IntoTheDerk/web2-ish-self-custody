@@ -20,6 +20,73 @@ The public key or wallet address is a password-verification oracle. An attacker 
 
 The username is domain and identity context, not a secret. It must not be counted as password entropy.
 
+## Offline guessing cost
+
+Each offline guess costs one run of the profile's KDF, so the KDF sets the price
+of a guess and the password's entropy sets how many guesses are needed. The
+sign-in profile v2 (`signInEd25519ExternalSaltV2`,
+[protocol](PROTOCOL.md#the-sign-in-profile-v2)) raises the price four times
+over v1; it adds no entropy, and a weak password stays weak.
+
+**Measured** on an Apple M5 Max laptop, Node 24.21.0, one derivation at a time,
+`@noble/hashes` 2.0.1 (the SDK's KDF code, pure JavaScript, in a
+`worker_threads` worker unless noted) against Node's native OpenSSL scrypt and
+Argon2id (`crypto.scrypt`, `crypto.argon2`) as a stand-in for an attacker's
+optimized code, p = 1 and a 32-byte output throughout. "Attacker cost" is the
+memory a guess needs times the native time it takes, a proxy for the
+area-time cost of guessing in parallel on dedicated hardware.
+
+| KDF | memory | SDK (JS) | native | JS / native | attacker cost (MiB·s per guess) |
+| --- | --- | --- | --- | --- | --- |
+| scrypt N=2^16, r=8 (v1, Kalvora) | 64 MiB | 0.11 s | 0.097 s | 1.2 | 6 |
+| scrypt N=2^17, r=8 | 128 MiB | 0.22 s | 0.20 s | 1.1 | 25 |
+| **scrypt N=2^18, r=8 (v2)** | **256 MiB** | **0.45 s** | **0.41 s** | **1.1** | **105** |
+| scrypt N=2^19, r=8 (not chosen) | 512 MiB | 0.90 s | — | — | — |
+| Argon2id m=64 MiB, t=2 | 64 MiB | 0.93 s | 0.056 s | 17 | 4 |
+| Argon2id m=64 MiB, t=3 | 64 MiB | 1.30 s | 0.081 s | 16 | 5 |
+| Argon2id m=64 MiB, t=4 | 64 MiB | 1.80 s | 0.12 s | 15 | 8 |
+| Argon2id m=128 MiB, t=2 | 128 MiB | 1.90 s | 0.13 s | 15 | 16 |
+| Argon2id m=128 MiB, t=3 | 128 MiB | 2.65 s | 0.18 s | 15 | 23 |
+| Argon2id m=128 MiB, t=4 | 128 MiB | 3.66 s | 0.31 s | 12 | 39 |
+| Argon2id m=256 MiB, t=2 | 256 MiB | 4.20 s | 0.31 s | 14 | 79 |
+| Argon2id m=256 MiB, t=3 | 256 MiB | 5.44 s | 0.35 s | 16 | 89 |
+| Argon2id m=256 MiB, t=4 | 256 MiB | 7.69 s | 0.61 s | 13 | 155 |
+
+The Argon2id rows and every native column were measured on the main thread;
+a worker gave the same times (Argon2id t=3: 1.33 s at 64 MiB, 2.63 s at
+128 MiB; scrypt on the main thread: 0.11, 0.23 and 0.50 s).
+
+**Why scrypt at N = 2^18.** The SDK's scrypt runs within about 1.2 times of
+native code, its Argon2id about 15 times slower, because pure JavaScript has no
+fast 64-bit arithmetic for Argon2's BLAKE2b rounds. Even at a fraction of the
+user wait, scrypt buys several times the attacker cost: at 0.45 s here, scrypt
+N=2^18 costs a native attacker 105 MiB·s per guess, while the Argon2id setting
+nearest a 2-3 s budget on this, a fast, laptop (m=128 MiB, t=3, 2.6 s) costs
+23, and the only one within 2-3 s on a typical laptop (m=64 MiB, t=2) costs 4,
+less than v1. Argon2id would win with a native or WebAssembly implementation;
+that is a new dependency, so it is left to a later profile. N = 2^19 doubles
+the cost again but needs a single 512 MiB allocation per derivation, which a
+mid-range phone's browser may refuse or answer by killing the tab, and an
+application that runs two derivations in one entry (a password change) would
+double the wait.
+
+**Estimated wait for v2** (not measured; scaled from the M5 Max by typical
+single-thread JavaScript ratios): a typical laptop 0.9-1.4 s; a recent iPhone
+0.7-0.9 s; a mid-range Android phone 1.8-2.7 s; a low-end phone about 4-5 s,
+with 256 MiB allocated in the worker in every case. v1 takes a quarter of
+that.
+
+**What v2 buys.** A guess costs four times the scrypt work of v1 (2 bits), and
+four times the memory too, about 16 times the area-time (4 bits) for an
+attacker who keeps the whole table in memory. scrypt allows trading memory for
+recomputation, so the 4-times work is the floor, not the 16. The gain is the
+same for every holder of an oracle: the service's database (the sign-in public
+key) and anyone with a published wallet address and the username. It is a
+constant factor: a password an attacker would guess in a day against v1 falls
+in about four days against v2 on the same hardware. Only password entropy
+changes the order of magnitude, so the application's strength policy (below)
+remains the main defence.
+
 ## Password floor
 
 Every derivation, vault creation, and vault password change requires a password of at least 10 characters (Unicode code points of well-formed UTF-8) and at most 1,024 UTF-8 bytes. That floor exists to reject the obviously unusable; it is not a strength guarantee. Length says little about guessability — a ten-character dictionary word with a digit appended falls early to an offline attacker who holds the public identity.
@@ -65,16 +132,17 @@ The loss and change rows are about a wallet: the key a chain wallet profile deri
 
 ## Sign-in profile
 
-`signInEd25519ExternalSalt` derives a sign-in key: an Ed25519 key whose `S_` identifier no chain accepts, for an identity service to enroll in place of a wallet. An application that also needs a wallet derives its master seed as an application secret of the same run and opens it with `withKalvoraWalletFromMasterSeed` ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)).
+`signInEd25519ExternalSalt` (v1) and `signInEd25519ExternalSaltV2` (v2, the same construction at four times the scrypt cost) derive a sign-in key: an Ed25519 key whose `S_` identifier no chain accepts, for an identity service to enroll in place of a wallet. An application that also needs a wallet derives its master seed as an application secret of the same run and opens it with `withKalvoraWalletFromMasterSeed` ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)).
 
 | property | consequence |
 | --- | --- |
 | Not a wallet | The service stores the sign-in key's public key and receives its signatures, and nothing about the wallet. A sign-in key holds no funds, but it is lost exactly when the credentials are, and a wallet derived from an application secret of the same run is lost with it unless the application keeps its own encrypted backup of the master seed. |
-| Still a password oracle | The sign-in public key is a password verifier at scrypt cost, like a wallet public key. Anyone holding the service's database can guess offline, and a correct guess gives the password, and with it every key of the run: the sign-in key, every application secret, and the wallet derived from one. |
+| Still a password oracle | The sign-in public key is a password verifier at scrypt cost, like a wallet public key; the sign-in profile v2 raises that cost four times ([offline guessing cost](#offline-guessing-cost)). Anyone holding the service's database can guess offline, and a correct guess gives the password, and with it every key of the run: the sign-in key, every application secret, and the wallet derived from one. |
 | A published wallet address is an oracle too | Once a wallet's address is public, anyone who also knows the username and the public salt can guess offline with no service data at all, and a hit gives the sign-in key as well as the wallet. Only high-entropy, password-manager-generated passwords resist either attack. |
 | Independent branches | The sign-in key and the application secrets are HKDF-SHA256 outputs of the same scrypt output under different public domain strings. Neither the sign-in key nor its signatures give a secret, and a secret does not give the sign-in key. |
 | No check value for the wallet | A mistyped password derives a different wallet without any error. The application compares the run's sign-in public key with the enrolled one before it uses or shows the wallet. |
-| Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Released sign-in profiles therefore stay exported after they are retired. |
+| Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Moving a user from v1 to v2 is such a change. Released sign-in profiles therefore stay exported after they are retired. |
+| Memory | v2 allocates about 256 MiB per derivation, v1 about 64 MiB. Run one derivation at a time in a dedicated worker and terminate it afterwards. |
 | Bounded lifetime | `withKalvoraWalletFromMasterSeed` works on its own copy of the master seed and zeroes it, and zeroes the wallet key when its synchronous callback returns or throws. The master seed passed in stays the caller's: an application secret's own array is zeroed by `withDerivedWallet` when its callback returns, and any copy the caller made is the caller's to zero. |
 
 ## Account changes
@@ -89,7 +157,7 @@ each is authorized by signatures over the
 | Strict Ed25519 | Every account-change signature is checked against RFC 8032's strict rules (S < L, canonical A and R, A not of small order) before noble's `zip215: false` verification. The permissive rule, and some OpenSSL releases (3.5.4, as bundled with `cryptography` 46.0.3), accept a small-order key with R = identity and S = 0 for every message; no submitted key of small order or in a non-canonical encoding is ever enrolled, at registration either. |
 | Proof of the password, not a session | A stolen session token alone cannot rotate the key, make a signed email change (`changeEmail`), or add or remove a recovery key: each needs a fresh signature by the enrolled key over a single-use challenge. `updateAccount` and the router's `PATCH /accounts/me` still change the email with a session alone and report nothing to `onSecurityEvent`; a host that treats the email as a security channel refuses `email` there and changes it only through `changeEmail`. A session can still list and revoke sessions. |
 | One statement | Each change re-checks its session or recovery token, the account's `active` status and the enrolled key under row locks, and revokes sessions in the same statement. A signed-in change whose enrolled key a rotation or a recovery moved before its statement locked the key is refused (`stale-key`), and of two completions of one recovery the second gets the uniform `invalid-signature`. Other concurrent changes apply one after the other ([details](SERVER_API.md#statements-and-lock-order)). |
-| Other sessions end | A rotation revokes every other session of the account and a recovery revokes every session. A login that verified the old key and whose final statement runs while the rotation's does can still keep its session; the sessions list shows it and revoking other sessions ends it. |
+| Other sessions end | A rotation revokes every other session of the account and a recovery revokes every session. Login locks the account and rechecks the enrolled key before issuing a session, so a concurrent key replacement cannot leave a newly issued old-key session outside the completion's revocation snapshot. |
 | A recovery key is a full credential | With the username, it takes over the account login without the password. It is single use (`used` at completion), a new enrollment retires the previous one, and the operator can revoke it (`revokeRecoveryKeys`). Its secret never reaches the service; the application must make it high-entropy, because its public key is stored. |
 | Recovery is not key recovery | A completed recovery binds a new key. Under a chain wallet profile the old wallet is not recovered; under the sign-in profile a wallet derived from the old password is not either. Data an application sealed under the old password needs its own recovery path. |
 | The server is trusted for account control | An operator with database write access can bind any key or recovery key, as it always could bind any enrolled key; audit rows and the alerts in [SERVER_API.md](SERVER_API.md#what-an-operator-with-database-access-can-and-cannot-do) make that visible, not impossible. |
@@ -106,14 +174,14 @@ default ([server API](SERVER_API.md#account-resets-opt-in)).
 | property | consequence |
 | --- | --- |
 | The email inbox becomes a credential | With account recovery by email on, whoever reads the account's verified inbox can replace the enrolled key with a 15-minute, 5-attempt code and no password. The code is 80 bits, so a database read of its SHA-256 digest does not yield it within those 15 minutes. It is off for every account until its owner turns it on with a signature by the key and a verified email. |
-| A session becomes a credential after a wait | With the signed-in reset (on for every account once the deployment opts in), a stolen session can replace the enrolled key after 72 hours unless another session aborts it or the owner signs in with the password or changes it. The password change aborts it even when made on the session that started it, which a rotation keeps, so a stolen copy of the owner's own session cannot outlast a new password. While it waits, that session cannot sign out the others (`reset-pending`), and the start is reported to `onSecurityEvent` with `availableAt` so the owner can be told. A start from a session that expires before the wait ends is refused, and no session is extended. Turning it off needs the key's signature and another reset method; a reset counts as pending, and completes, only while it is on. |
+| A session becomes a credential after a wait | With the signed-in reset (on for every account once the deployment opts in), a stolen session can replace the enrolled key after 72 hours unless another session aborts it, the owner signs in with the password or changes it, or an email or recovery factor changes. The password change aborts it even when made on the session that started it, which a rotation keeps, so a stolen copy of the owner's own session cannot outlast a new password. While it waits, that session cannot sign out the others (`reset-pending`), and the start is reported to `onSecurityEvent` with `availableAt` so the owner can be told. A start from a session that expires before the wait ends is refused, and no session is extended. Turning it off needs the key's signature and another reset method; a reset counts as pending, and completes, only while it is on. |
 | Reset is not key recovery | As with a recovery key, a reset binds a new key and recovers nothing derived from the old password. |
 | The email-change interlock | Any address change, signed or not (`updateAccount` too), turns account recovery by email off and closes its live codes in the same statement, so a session alone cannot point the recovery channel at another inbox; a code also stops working once the address is re-verified after it was sent. |
 | The settings bind their value | A setting is changed only by a fresh signature over `setting:on` or `setting:off`, so a stolen session cannot turn either reset on or off, and a signature for one value or one setting is useless for another. |
-| Uniform start | `startAccountReset` answers every username with a fresh reset id and the same expiry, in the same statements, whether or not a code is issued; its username limits count every request. Its per-recipient cap is a bucket of its own that nothing else reads, so email verification's `429` for an address neither reveals a start that found an eligible account there nor silences that account's codes. The delivery, and so the response time, is the host's: it must pad every response to one fixed time and never surface a delivery failure. |
+| Uniform start | `startAccountReset` answers every username with a fresh decoy id and the same expiry, whether or not a code is issued. The usable id and code go only to the verified mailbox; an open challenge is coalesced without spending recipient quota. Its per-recipient cap is a bucket of its own that nothing else reads, so email verification's `429` for an address neither reveals an eligible account nor silences its codes. The delivery, and so the response time, is the host's: it must pad every response to one fixed time and never surface a delivery failure. |
 | Uniform refusals | Every failure of `completeAccountReset` an unauthenticated caller can cause is one `invalid-signature`; no code is added to `enumerationSensitiveCodes`. |
 | Reauthentication is a proof, not a change | `verifyReauthentication` proves a fresh current-password run for a host label and audits it (`account.reauth`); what it unlocks is the host's own statement. |
-| One statement, one lock order | Each reset is one statement that re-checks its code or wait, the session, the status and the enrolled key under row locks, in the account changes' lock order with the resets before the sessions. The abort, the password login and the password change lock the reset row the completion locks, so each stops it race-free; revoking the initiating session stops it except for a completion already in flight. A setting change cannot see a reset that a start inserted while it waited, so a change of a setting closes that kind's open resets in either direction. |
+| One statement, one lock order | Each reset is one statement that re-checks its code or wait, the session, the status and the enrolled key under row locks, in the account changes' lock order with the resets before the sessions. Abort, password login, password change, and email or recovery-factor changes advance a durable account generation. A signed-in reset completes only when its stored generation still matches, so a cancellation also stops a concurrent start invisible to its SQL snapshot. Revoking the initiating session stops its reset except for a completion already in flight. |
 
 ## Server boundary
 

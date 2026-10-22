@@ -335,7 +335,7 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   }, 60_000);
 
   afterAll(async () => {

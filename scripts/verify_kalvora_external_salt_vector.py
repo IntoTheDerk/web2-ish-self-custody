@@ -5,12 +5,14 @@ This reimplements the whole derivation, including SLIP-0010, from the standard
 library and `cryptography` alone. It shares no code with kalvora.js or this
 package, so agreement is evidence that both follow the specification.
 
-Three fixtures are checked, each loaded by its explicit path with the same strict
+Four fixtures are checked, each loaded by its explicit path with the same strict
 shape checks: the Kalvora wallet vector; the application-secret vector, whose
-HKDF-SHA256 over the same scrypt output is reimplemented with stdlib `hmac`; and
-the sign-in vector, which runs the same credentials through the sign-in
-profile's own transcript and HKDF key step, its application secrets, and the
-Kalvora wallet opened from one of those secrets as a SLIP-0010 master seed.
+HKDF-SHA256 over the same scrypt output is reimplemented with stdlib `hmac`; the
+sign-in vector, which runs the same credentials through the sign-in profile's
+own transcript and HKDF key step, its application secrets, and the Kalvora
+wallet opened from one of those secrets as a SLIP-0010 master seed; and the
+sign-in v2 vector, the same construction under the v2 profile's own domains and
+scrypt at N = 2^18, which must differ from v1 in every derived value.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ APPLICATION_SECRET_FIXTURE_PATH = (
     ROOT / "vectors" / "kalvora-ed25519-external-salt-v1.application-secret-v1.json"
 )
 SIGN_IN_FIXTURE_PATH = ROOT / "vectors" / "sign-in-ed25519-external-salt-v1.json"
+SIGN_IN_V2_FIXTURE_PATH = ROOT / "vectors" / "sign-in-ed25519-external-salt-v2.json"
 PROFILE = "web2ish-kalvora-ed25519-external-salt-v1"
 KALVORA_PASSWORD_HASH_DOMAIN = b"web2-ish-self-custody password hash v1\n"
 KALVORA_ENTROPY_DOMAIN = "web2-ish-self-custody Kalvora Ed25519 external salt entropy v1"
@@ -47,6 +50,27 @@ SIGN_IN_ENTROPY_DOMAIN = "web2-ish-self-custody sign-in Ed25519 external salt en
 SIGN_IN_KEY_DOMAIN = "web2-ish-self-custody sign-in key v1"
 SIGN_IN_KEY_DERIVATION = "hkdf-sha256-sign-in-key-v1"
 SIGN_IN_CODEC = "web2ish-sign-in-ed25519-hex-v1"
+# scrypt parameters per profile. N is the only one that differs.
+SCRYPT_N_V1 = 65_536
+SCRYPT_N_V2 = 262_144
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_DKLEN = 32
+# hashlib's maxmem must exceed scrypt's 128 * r * N bytes (256 MiB at N = 2^18).
+SCRYPT_MAXMEM = 512 * 1_024 * 1_024
+# The sign-in profile v2: v1's construction, key step and codec, with its own
+# id, algorithm label and transcript domains, and scrypt at N = 2^18.
+SIGN_IN_V2_PROFILE = "web2ish-sign-in-ed25519-external-salt-v2"
+SIGN_IN_V2_ALGORITHM = "scrypt-sha512-hkdf-sha256-ed25519-external-32-v2"
+SIGN_IN_V2_PASSWORD_HASH_DOMAIN = b"web2-ish-self-custody sign-in password hash v2\n"
+SIGN_IN_V2_ENTROPY_DOMAIN = "web2-ish-self-custody sign-in Ed25519 external salt entropy v2"
+SIGN_IN_V2_KDF = {
+    "name": "scrypt",
+    "N": SCRYPT_N_V2,
+    "r": SCRYPT_R,
+    "p": SCRYPT_P,
+    "dkLen": SCRYPT_DKLEN,
+}
 # SLIP-44 coin type 5258: account 0, change 0, address 0, all hardened.
 KALVORA_PATH = (44, 5258, 0, 0, 0)
 HARDENED = 0x8000_0000
@@ -112,6 +136,10 @@ SIGN_IN_EXPECTED_KEYS = frozenset(
         "kalvoraWallet",
     }
 )
+# v2 adds one field, the KDF parameters, so a reimplementer reads them from the
+# vector rather than from this script.
+SIGN_IN_V2_EXPECTED_KEYS = frozenset({*SIGN_IN_EXPECTED_KEYS, "kdf"})
+SIGN_IN_KDF_EXPECTED_KEYS = frozenset({"name", "N", "r", "p", "dkLen"})
 SIGN_IN_KEY_EXPECTED_KEYS = frozenset(
     {
         "keyDerivation",
@@ -275,22 +303,38 @@ def require_string_fields(
     return {key: require_string(value[key], f"{location}.{key}") for key in keys}
 
 
-def load_sign_in_fixture() -> dict[str, Any]:
-    """Load the sign-in fixture, nested objects included, with the same strictness."""
-    location = "sign-in fixture"
-    decoded = require_exact_keys(
-        read_strict_json(SIGN_IN_FIXTURE_PATH, location), SIGN_IN_EXPECTED_KEYS, location
-    )
-    nested = {"signInKey", "applicationSecrets", "kalvoraWallet"}
-    fixture: dict[str, Any] = require_string_fields(
-        decoded, SIGN_IN_EXPECTED_KEYS - nested, location
-    )
+def load_sign_in_fixture(
+    path: Path = SIGN_IN_FIXTURE_PATH,
+    location: str = "sign-in fixture",
+    profile: str = SIGN_IN_PROFILE,
+    algorithm: str = SIGN_IN_ALGORITHM,
+    kdf: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load a sign-in fixture, nested objects included, with the same strictness.
+
+    v1 has no `kdf` field; v2 (`kdf` given) requires one equal to `kdf`, with
+    integer parameters that are not booleans.
+    """
+    expected = SIGN_IN_EXPECTED_KEYS if kdf is None else SIGN_IN_V2_EXPECTED_KEYS
+    decoded = require_exact_keys(read_strict_json(path, location), expected, location)
+    nested = {"signInKey", "applicationSecrets", "kalvoraWallet", "kdf"}
+    fixture: dict[str, Any] = require_string_fields(decoded, expected - nested, location)
     if fixture["warning"] != WARNING:
         fail(f"{location}.warning does not contain the required test-only warning")
-    if fixture["profile"] != SIGN_IN_PROFILE:
-        fail(f"{location}.profile must be {SIGN_IN_PROFILE!r}")
-    if fixture["algorithm"] != SIGN_IN_ALGORITHM:
-        fail(f"{location}.algorithm must be {SIGN_IN_ALGORITHM!r}")
+    if fixture["profile"] != profile:
+        fail(f"{location}.profile must be {profile!r}")
+    if fixture["algorithm"] != algorithm:
+        fail(f"{location}.algorithm must be {algorithm!r}")
+    if kdf is not None:
+        kdf_location = f"{location}.kdf"
+        raw_kdf = require_exact_keys(decoded["kdf"], SIGN_IN_KDF_EXPECTED_KEYS, kdf_location)
+        if require_string(raw_kdf["name"], f"{kdf_location}.name") != kdf["name"]:
+            fail(f"{kdf_location}.name must be {kdf['name']!r}")
+        for key in ("N", "r", "p", "dkLen"):
+            value = raw_kdf[key]
+            if type(value) is not int or value != kdf[key]:
+                fail(f"{kdf_location}.{key} must be the integer {kdf[key]}")
+        fixture["kdf"] = dict(raw_kdf)
     require_hex(fixture["saltHex"], 32, f"{location}.saltHex")
     require_hex(fixture["passwordHashHex"], 64, f"{location}.passwordHashHex")
     require_hex(fixture["entropyHex"], 64, f"{location}.entropyHex")
@@ -451,6 +495,7 @@ def derive_transcript(
     location: str,
     password_hash_domain: bytes,
     entropy_domain: str,
+    scrypt_n: int = SCRYPT_N_V1,
 ) -> tuple[str, str, str, bytes, bytes, bytes]:
     """Steps 1-4 of a profile's transcript, returning its intermediates too."""
     normalized_username = normalize_username(fixture["username"])
@@ -485,11 +530,11 @@ def derive_transcript(
     master_seed = hashlib.scrypt(
         wallet_entropy,
         salt=bytes.fromhex(fixture["saltHex"]),
-        n=65_536,
-        r=8,
-        p=1,
-        dklen=32,
-        maxmem=128 * 1_024 * 1_024,
+        n=scrypt_n,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        dklen=SCRYPT_DKLEN,
+        maxmem=SCRYPT_MAXMEM,
     )
     return (
         normalized_username,
@@ -617,8 +662,12 @@ def verify_sign_in_vector(
     fixture: dict[str, Any],
     wallet_fixture: dict[str, str],
     secret_fixture: dict[str, Any],
-) -> None:
-    location = "sign-in fixture"
+    location: str = "sign-in fixture",
+    password_hash_domain: bytes = SIGN_IN_PASSWORD_HASH_DOMAIN,
+    entropy_domain: str = SIGN_IN_ENTROPY_DOMAIN,
+    scrypt_n: int = SCRYPT_N_V1,
+) -> dict[str, Any]:
+    """Reproduce a sign-in fixture and return its derived values for comparison."""
     for key in SIGN_IN_SHARED_CREDENTIAL_KEYS:
         if fixture[key] != wallet_fixture[key]:
             fail(f"{location}.{key} differs from the wallet fixture")
@@ -631,7 +680,7 @@ def verify_sign_in_vector(
         entropy,
         master_seed,
     ) = derive_transcript(
-        fixture, location, SIGN_IN_PASSWORD_HASH_DOMAIN, SIGN_IN_ENTROPY_DOMAIN
+        fixture, location, password_hash_domain, entropy_domain, scrypt_n
     )
     if password_hash.hex() != fixture["passwordHashHex"]:
         fail(f"independent password hash does not match {location}.passwordHashHex")
@@ -745,6 +794,59 @@ def verify_sign_in_vector(
             fail(f"{secrets_location} {label!r} equals the Kalvora profile's secret")
     if not any(label in kalvora_secrets for label in secrets_by_label):
         fail(f"{secrets_location} shares no label with the Kalvora application-secret fixture")
+    return {
+        "masterSeed": master_seed,
+        "passwordHash": password_hash,
+        "entropy": entropy,
+        "signInPublicKey": sign_in_public_key,
+        "walletPublicKey": wallet_public_key,
+        "secrets": secrets_by_label,
+    }
+
+
+def verify_sign_in_v2_vector(
+    fixture: dict[str, Any],
+    wallet_fixture: dict[str, str],
+    secret_fixture: dict[str, Any],
+    v1_fixture: dict[str, Any],
+    v1_values: dict[str, Any],
+) -> None:
+    """Reproduce the v2 fixture at N = 2^18 and require it to differ from v1."""
+    location = "sign-in v2 fixture"
+    v2_values = verify_sign_in_vector(
+        fixture,
+        wallet_fixture,
+        secret_fixture,
+        location,
+        SIGN_IN_V2_PASSWORD_HASH_DOMAIN,
+        SIGN_IN_V2_ENTROPY_DOMAIN,
+        SCRYPT_N_V2,
+    )
+    for key in SIGN_IN_SHARED_CREDENTIAL_KEYS:
+        if fixture[key] != v1_fixture[key]:
+            fail(f"{location}.{key} differs from the sign-in v1 fixture")
+    if fixture["profile"] == v1_fixture["profile"] or fixture["algorithm"] == v1_fixture["algorithm"]:
+        fail(f"{location} reuses the v1 profile id or algorithm label")
+    for key in ("passwordHash", "entropy", "masterSeed", "signInPublicKey", "walletPublicKey"):
+        if v2_values[key] == v1_values[key]:
+            fail(f"{location} {key} equals the sign-in v1 fixture's")
+    for label, secret in v2_values["secrets"].items():
+        if v1_values["secrets"].get(label) == secret:
+            fail(f"{location} secret {label!r} equals the sign-in v1 fixture's")
+    if not any(label in v1_values["secrets"] for label in v2_values["secrets"]):
+        fail(f"{location} shares no label with the sign-in v1 fixture")
+    # The v2 cost is the point: the same entropy at v1's N must not give v2's seed.
+    at_v1_cost = hashlib.scrypt(
+        v2_values["entropy"],
+        salt=bytes.fromhex(fixture["saltHex"]),
+        n=SCRYPT_N_V1,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        dklen=SCRYPT_DKLEN,
+        maxmem=SCRYPT_MAXMEM,
+    )
+    if at_v1_cost == v2_values["masterSeed"]:
+        fail(f"{location}.masterSeedHex does not depend on N = 2^18")
 
 
 def main() -> int:
@@ -755,7 +857,21 @@ def main() -> int:
         verify_vector(wallet_fixture)
         secret_fixture = load_application_secret_fixture()
         verify_application_secret_vector(secret_fixture, wallet_fixture)
-        verify_sign_in_vector(load_sign_in_fixture(), wallet_fixture, secret_fixture)
+        sign_in_fixture = load_sign_in_fixture()
+        sign_in_values = verify_sign_in_vector(sign_in_fixture, wallet_fixture, secret_fixture)
+        verify_sign_in_v2_vector(
+            load_sign_in_fixture(
+                SIGN_IN_V2_FIXTURE_PATH,
+                "sign-in v2 fixture",
+                SIGN_IN_V2_PROFILE,
+                SIGN_IN_V2_ALGORITHM,
+                SIGN_IN_V2_KDF,
+            ),
+            wallet_fixture,
+            secret_fixture,
+            sign_in_fixture,
+            sign_in_values,
+        )
     except VerificationError as error:
         print(f"External-salt vector verification failed: {error}", file=sys.stderr)
         return 1
@@ -775,7 +891,9 @@ def main() -> int:
         "shape, its transcript intermediates and scrypt output, the HKDF-SHA256 "
         "sign-in key, S_ identifier, fingerprint and signature, its application "
         "secrets, the Kalvora wallet from one of them at m/44'/5258'/0'/0'/0', "
-        "and separation from the Kalvora vectors."
+        "and separation from the Kalvora vectors; and for the sign-in profile "
+        "v2: the same checks under its own domains with scrypt at N=2^18, its "
+        "KDF field, and separation from every v1 value."
     )
     return 0
 

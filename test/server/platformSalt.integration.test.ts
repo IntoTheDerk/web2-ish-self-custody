@@ -157,7 +157,7 @@ describe.skipIf(client === null)("provisioning the public salt", () => {
     const minted = await storedSaltHex(sql, prefix);
     const second = await runIdentityMigrations(sql, config);
 
-    expect(first).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(first).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(second).toEqual([]);
     expect(minted).toMatch(/^[0-9a-f]{64}$/u);
     expect(minted).not.toBe("0".repeat(64));

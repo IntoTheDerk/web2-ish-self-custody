@@ -205,8 +205,14 @@ wallet signature at every sign-in. An application that must not hold or see
 its users' wallets keeps the two apart:
 
 - **The sign-in profile enrolls with the identity service.** Configure the
-  service with `signInEd25519ExternalSalt`. The enrolled key is an `S_` sign-in
-  key, which no chain accepts; the service stores and verifies only that.
+  service with `signInEd25519ExternalSalt`, or with its successor
+  `signInEd25519ExternalSaltV2`, the same construction at four times the
+  scrypt cost (about 256 MiB and, on a mid-range phone, an estimated 2-3 s
+  per derivation; [the security model](SECURITY_MODEL.md#offline-guessing-cost)).
+  The enrolled key is an `S_` sign-in key, which no chain accepts; the service
+  stores and verifies only that. The two profiles derive different keys,
+  secrets and wallets from the same credentials, so pick one before users
+  enroll; moving users later is a key and wallet change for each of them.
 - **The wallet is an application secret of the same run.** Request a label for
   the wallet's master seed and open it with `withKalvoraWalletFromMasterSeed`
   inside the callback. Once the callback returns the secret is zeroed, and the
@@ -265,8 +271,9 @@ Rules for the pattern:
 - **The offline-guessing exposure stays.** The enrolled sign-in public key is a
   password oracle at scrypt cost, and so is the wallet's address once it is
   public to anyone who also knows the username and the public salt. A correct
-  guess gives the wallet and the sign-in key together. See
-  [the security model](SECURITY_MODEL.md#sign-in-profile).
+  guess gives the wallet and the sign-in key together. v2 makes each guess
+  cost four times v1's; only password strength changes the order of
+  magnitude. See [the security model](SECURITY_MODEL.md#sign-in-profile).
 
 The construction is in [the protocol](PROTOCOL.md#part-3--the-sign-in-profile).
 
