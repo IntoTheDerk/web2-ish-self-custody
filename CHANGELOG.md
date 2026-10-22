@@ -5,7 +5,97 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased
+## v0.13.0-alpha.0 — 2026-10-22 (alpha pre-release)
+
+Two account-reset security fixes and a harder sign-in profile. The signed-in
+reset is fenced against concurrent cancellations by a per-account reset
+generation (#19, migration 9). Account recovery by email coalesces its
+challenges, answers anonymous starts with a decoy reset id, mails the usable
+id with the code, and no longer has a shared per-username start quota (#20,
+migrations 10 and 11). Sign-in profile v2 (#22) is a new, additive profile at
+scrypt N=2^18. Derivation under every existing profile, codec, transcript and
+committed vector is unchanged; one vector is added,
+`vectors/sign-in-ed25519-external-salt-v2.json`. The release is breaking for
+existing deployments, which must migrate with every older worker drained, for
+hosts that send recovery emails, and for hand-written `IdentityService`
+implementations.
+
+### Breaking changes
+
+- **Apply migrations 9, 10 and 11 before this version serves traffic, with no
+  rolling cutover.** Stop identity traffic, drain every older SDK worker, run
+  `migrate()` with this version, check that `<p>_schema_migrations` records
+  version 11, then start only new workers. An older worker ignores
+  `reset_generation` and bypasses the cancellation fence, and on the email
+  path can still expose a usable reset id. This version's login and reset
+  statements fail on a schema without migration 9, and `startAccountReset`
+  calls the functions migration 10 creates. The steps are in
+  `docs/SERVER_API.md` ("Migration 9 cutover").
+- **Migration 10 closes every open emailed reset** (their ids were public
+  under earlier versions) and deletes the `account-reset-recipient` rate-limit
+  counters. A mailbox owner requests a new code after the cutover. Migration 11
+  reapplies only migration 10's two function definitions, for a database that
+  recorded an earlier migration 10; it does not replay the cutover.
+- **`startAccountReset` returns a decoy `resetId`; the usable one is in
+  `delivery`.** `IssuedAccountReset.delivery` becomes `{ email, resetId, code }`.
+  A host must email `delivery.resetId` with the code, and its completion form
+  must take both: the client signs `email:<delivery.resetId>`, so a host that
+  mails only the code leaves every new challenge unusable. Never put
+  `delivery.resetId` in the start response. Deploy the email template and the
+  completion form with this version.
+- **`IdentityService` gains a required method,
+  `cancelUndeliveredAccountReset({ resetId, code }, context?)`**, which breaks
+  hand-written implementations and test doubles. Services made by
+  `createIdentityService` and the adapters already have it. It is host-only
+  cleanup after a definitive mail-send failure and is not routed.
+- **More changes cancel a pending signed-in reset.** A change of either reset
+  setting, in either direction, an email change and a recovery-factor change
+  now cancel it (they advance the reset generation), as an abort, a password
+  sign-in and `rotateSignInKey` already did.
+
+Sign-in profile v2 is additive and breaks nothing.
+
+### Account reset fixes
+
+#### Signed-in reset cancellation fence (#19, migration 9 `signed-in-reset-cancellation-fence`)
+
+- Migration 9 adds `reset_generation bigint NOT NULL DEFAULT 0` to
+  `<p>_accounts` and to `<p>_account_resets` (`ADD COLUMN IF NOT EXISTS`, safe
+  to re-run). A signed-in reset is pending, and completes, only while its
+  generation matches the account's, so a start that a cancelling statement's
+  snapshot could not see cannot complete. The next start closes such a stale
+  row.
+- Login locks the account `FOR NO KEY UPDATE` and rechecks the enrolled key
+  `FOR SHARE` before it inserts its session, so login and a signed-in reset
+  completion serialize in either order. `abortSignedInReset` also locks the
+  account `FOR NO KEY UPDATE`.
+- Tests force both login/completion orders and the other cancellation races
+  against PostgreSQL.
+
+#### Email recovery challenges (#20, migrations 10 `coalesced-email-resets` and 11 `refresh-email-reset-functions`)
+
+- One live email challenge per account (a partial unique index). A start while
+  one is open is coalesced under the account lock and spends no recipient
+  quota; only a new challenge counts against `account-reset-recipient`. An
+  unexpired challenge whose five attempts are spent is closed before
+  coalescing, so the owner can get a new code while quota remains.
+- The anonymous start response carries a fresh decoy `resetId` that cannot
+  spend the real challenge's attempts. The usable id goes only to the verified
+  mailbox, so recovery completes in a different browser from the one that
+  started it.
+- The `account-reset-start` and `account-reset-start-day` per-username rules
+  are removed: an anonymous caller can no longer exhaust a username's quota.
+  `account-reset-start-ip` still counts every request when the host supplies
+  an IP hash.
+- `cancelUndeliveredAccountReset` closes only the named unexpired challenge
+  after the mail provider refuses the send; the recipient quota stays spent. A
+  timeout or an ambiguous provider answer leaves the challenge valid.
+- Migration 10's start and cancel functions (`<p>_start_email_reset`,
+  `<p>_cancel_undelivered_email_reset`) hold the account lock across the
+  fresh snapshot, the recipient reservation and the issue. Completion counts
+  the attempt and completes in one statement.
+- Docs: `docs/SERVER_API.md` (the delivery contract, the cutover, the lock
+  order and the reset rate limits) and `docs/SECURITY_MODEL.md`.
 
 ### Sign-in profile v2 (harder KDF)
 
