@@ -178,6 +178,7 @@ The bundled profiles, which satisfy the policy:
 | --- | --- | --- | --- | --- | --- |
 | `web2ish-kalvora-ed25519-external-salt-v1` | `kalvora-ed25519-base58-v1` | ed25519 | `scrypt-sha512-slip10-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 | the Kalvora wallet (`A_…`) |
 | `web2ish-sign-in-ed25519-external-salt-v1` | `web2ish-sign-in-ed25519-hex-v1` | ed25519 | `scrypt-sha512-hkdf-sha256-ed25519-external-32-v1` | N=65536, r=8, p=1, dkLen=32 | a sign-in key (`S_…`), not a wallet |
+| `web2ish-sign-in-ed25519-external-salt-v2` | `web2ish-sign-in-ed25519-hex-v1` | ed25519 | `scrypt-sha512-hkdf-sha256-ed25519-external-32-v2` | N=262144, r=8, p=1, dkLen=32 | a sign-in key (`S_…`), not a wallet, at four times v1's scrypt cost |
 
 A service configured with the sign-in profile refuses a Kalvora key at
 registration (`invalid-public-key`): the codec decodes only `S_` identifiers.

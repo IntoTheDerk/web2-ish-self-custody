@@ -146,3 +146,45 @@ export const signInEd25519ExternalSalt: DerivationProfile = defineDerivationProf
   keyDerivation: signInHkdfEd25519,
   codec: signInEd25519Codec,
 });
+
+/**
+ * Service-salted sign-in profile v2: the v1 construction at four times the
+ * scrypt cost, `N = 2^18` (256 MiB of working memory per derivation) instead
+ * of `2^16`, under its own id, algorithm label and transcript domains.
+ *
+ * It exists because a sign-in public key, and a wallet address derived from an
+ * application secret of the same run once it is published, are password
+ * oracles: anyone with the username and the public salt can test guesses
+ * offline at one scrypt per guess (docs/SECURITY_MODEL.md#offline-guessing-cost).
+ * v2 makes each guess cost four times the scrypt work and memory of v1. scrypt
+ * was kept rather than Argon2id because, in a pure-JavaScript browser worker,
+ * the pinned @noble/hashes Argon2id runs about 15 times slower than a native attacker's
+ * while its scrypt runs within about 1.2 times, so in the same time budget
+ * scrypt costs the attacker far more per guess (docs/SECURITY_MODEL.md).
+ *
+ * Everything else is v1's: the transcript layout, the `external-32` salt,
+ * `signInHkdfEd25519` (whose domain separates the sign-in key from the
+ * application secrets of one run; the run itself differs from v1's by its
+ * transcript domains and KDF), and `signInEd25519Codec`. Application secrets
+ * work exactly as under v1, with this profile's id in their `info`, so every
+ * secret, and every wallet an application derives from one, differs from v1's
+ * for the same credentials. Moving a user from v1 to v2 is therefore a key and
+ * wallet change, not an upgrade in place; v1 stays exported so an application
+ * can derive the old keys once while it moves a user.
+ *
+ * Every string below is fixed wire surface; any change, including to the KDF,
+ * is a new profile id, never an edit.
+ */
+export const signInEd25519ExternalSaltV2: DerivationProfile = defineDerivationProfile({
+  id: "web2ish-sign-in-ed25519-external-salt-v2",
+  curve: "ed25519",
+  algorithm: "scrypt-sha512-hkdf-sha256-ed25519-external-32-v2",
+  saltPolicy: "external-32",
+  kdf: { N: 262_144, r: 8, p: 1, dkLen: 32 },
+  domains: {
+    passwordHash: "web2-ish-self-custody sign-in password hash v2\n",
+    entropy: "web2-ish-self-custody sign-in Ed25519 external salt entropy v2",
+  },
+  keyDerivation: signInHkdfEd25519,
+  codec: signInEd25519Codec,
+});

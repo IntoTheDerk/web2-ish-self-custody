@@ -20,6 +20,73 @@ The public key or wallet address is a password-verification oracle. An attacker 
 
 The username is domain and identity context, not a secret. It must not be counted as password entropy.
 
+## Offline guessing cost
+
+Each offline guess costs one run of the profile's KDF, so the KDF sets the price
+of a guess and the password's entropy sets how many guesses are needed. The
+sign-in profile v2 (`signInEd25519ExternalSaltV2`,
+[protocol](PROTOCOL.md#the-sign-in-profile-v2)) raises the price four times
+over v1; it adds no entropy, and a weak password stays weak.
+
+**Measured** on an Apple M5 Max laptop, Node 24.21.0, one derivation at a time,
+`@noble/hashes` 2.0.1 (the SDK's KDF code, pure JavaScript, in a
+`worker_threads` worker unless noted) against Node's native OpenSSL scrypt and
+Argon2id (`crypto.scrypt`, `crypto.argon2`) as a stand-in for an attacker's
+optimized code, p = 1 and a 32-byte output throughout. "Attacker cost" is the
+memory a guess needs times the native time it takes, a proxy for the
+area-time cost of guessing in parallel on dedicated hardware.
+
+| KDF | memory | SDK (JS) | native | JS / native | attacker cost (MiB·s per guess) |
+| --- | --- | --- | --- | --- | --- |
+| scrypt N=2^16, r=8 (v1, Kalvora) | 64 MiB | 0.11 s | 0.097 s | 1.2 | 6 |
+| scrypt N=2^17, r=8 | 128 MiB | 0.22 s | 0.20 s | 1.1 | 25 |
+| **scrypt N=2^18, r=8 (v2)** | **256 MiB** | **0.45 s** | **0.41 s** | **1.1** | **105** |
+| scrypt N=2^19, r=8 (not chosen) | 512 MiB | 0.90 s | — | — | — |
+| Argon2id m=64 MiB, t=2 | 64 MiB | 0.93 s | 0.056 s | 17 | 4 |
+| Argon2id m=64 MiB, t=3 | 64 MiB | 1.30 s | 0.081 s | 16 | 5 |
+| Argon2id m=64 MiB, t=4 | 64 MiB | 1.80 s | 0.12 s | 15 | 8 |
+| Argon2id m=128 MiB, t=2 | 128 MiB | 1.90 s | 0.13 s | 15 | 16 |
+| Argon2id m=128 MiB, t=3 | 128 MiB | 2.65 s | 0.18 s | 15 | 23 |
+| Argon2id m=128 MiB, t=4 | 128 MiB | 3.66 s | 0.31 s | 12 | 39 |
+| Argon2id m=256 MiB, t=2 | 256 MiB | 4.20 s | 0.31 s | 14 | 79 |
+| Argon2id m=256 MiB, t=3 | 256 MiB | 5.44 s | 0.35 s | 16 | 89 |
+| Argon2id m=256 MiB, t=4 | 256 MiB | 7.69 s | 0.61 s | 13 | 155 |
+
+The Argon2id rows and every native column were measured on the main thread;
+a worker gave the same times (Argon2id t=3: 1.33 s at 64 MiB, 2.63 s at
+128 MiB; scrypt on the main thread: 0.11, 0.23 and 0.50 s).
+
+**Why scrypt at N = 2^18.** The SDK's scrypt runs within about 1.2 times of
+native code, its Argon2id about 15 times slower, because pure JavaScript has no
+fast 64-bit arithmetic for Argon2's BLAKE2b rounds. Even at a fraction of the
+user wait, scrypt buys several times the attacker cost: at 0.45 s here, scrypt
+N=2^18 costs a native attacker 105 MiB·s per guess, while the Argon2id setting
+nearest a 2-3 s budget on this, a fast, laptop (m=128 MiB, t=3, 2.6 s) costs
+23, and the only one within 2-3 s on a typical laptop (m=64 MiB, t=2) costs 4,
+less than v1. Argon2id would win with a native or WebAssembly implementation;
+that is a new dependency, so it is left to a later profile. N = 2^19 doubles
+the cost again but needs a single 512 MiB allocation per derivation, which a
+mid-range phone's browser may refuse or answer by killing the tab, and an
+application that runs two derivations in one entry (a password change) would
+double the wait.
+
+**Estimated wait for v2** (not measured; scaled from the M5 Max by typical
+single-thread JavaScript ratios): a typical laptop 0.9-1.4 s; a recent iPhone
+0.7-0.9 s; a mid-range Android phone 1.8-2.7 s; a low-end phone about 4-5 s,
+with 256 MiB allocated in the worker in every case. v1 takes a quarter of
+that.
+
+**What v2 buys.** A guess costs four times the scrypt work of v1 (2 bits), and
+four times the memory too, about 16 times the area-time (4 bits) for an
+attacker who keeps the whole table in memory. scrypt allows trading memory for
+recomputation, so the 4-times work is the floor, not the 16. The gain is the
+same for every holder of an oracle: the service's database (the sign-in public
+key) and anyone with a published wallet address and the username. It is a
+constant factor: a password an attacker would guess in a day against v1 falls
+in about four days against v2 on the same hardware. Only password entropy
+changes the order of magnitude, so the application's strength policy (below)
+remains the main defence.
+
 ## Password floor
 
 Every derivation, vault creation, and vault password change requires a password of at least 10 characters (Unicode code points of well-formed UTF-8) and at most 1,024 UTF-8 bytes. That floor exists to reject the obviously unusable; it is not a strength guarantee. Length says little about guessability — a ten-character dictionary word with a digit appended falls early to an offline attacker who holds the public identity.
@@ -65,16 +132,17 @@ The loss and change rows are about a wallet: the key a chain wallet profile deri
 
 ## Sign-in profile
 
-`signInEd25519ExternalSalt` derives a sign-in key: an Ed25519 key whose `S_` identifier no chain accepts, for an identity service to enroll in place of a wallet. An application that also needs a wallet derives its master seed as an application secret of the same run and opens it with `withKalvoraWalletFromMasterSeed` ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)).
+`signInEd25519ExternalSalt` (v1) and `signInEd25519ExternalSaltV2` (v2, the same construction at four times the scrypt cost) derive a sign-in key: an Ed25519 key whose `S_` identifier no chain accepts, for an identity service to enroll in place of a wallet. An application that also needs a wallet derives its master seed as an application secret of the same run and opens it with `withKalvoraWalletFromMasterSeed` ([protocol](PROTOCOL.md#part-3--the-sign-in-profile)).
 
 | property | consequence |
 | --- | --- |
 | Not a wallet | The service stores the sign-in key's public key and receives its signatures, and nothing about the wallet. A sign-in key holds no funds, but it is lost exactly when the credentials are, and a wallet derived from an application secret of the same run is lost with it unless the application keeps its own encrypted backup of the master seed. |
-| Still a password oracle | The sign-in public key is a password verifier at scrypt cost, like a wallet public key. Anyone holding the service's database can guess offline, and a correct guess gives the password, and with it every key of the run: the sign-in key, every application secret, and the wallet derived from one. |
+| Still a password oracle | The sign-in public key is a password verifier at scrypt cost, like a wallet public key; the sign-in profile v2 raises that cost four times ([offline guessing cost](#offline-guessing-cost)). Anyone holding the service's database can guess offline, and a correct guess gives the password, and with it every key of the run: the sign-in key, every application secret, and the wallet derived from one. |
 | A published wallet address is an oracle too | Once a wallet's address is public, anyone who also knows the username and the public salt can guess offline with no service data at all, and a hit gives the sign-in key as well as the wallet. Only high-entropy, password-manager-generated passwords resist either attack. |
 | Independent branches | The sign-in key and the application secrets are HKDF-SHA256 outputs of the same scrypt output under different public domain strings. Neither the sign-in key nor its signatures give a secret, and a secret does not give the sign-in key. |
 | No check value for the wallet | A mistyped password derives a different wallet without any error. The application compares the run's sign-in public key with the enrolled one before it uses or shows the wallet. |
-| Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Released sign-in profiles therefore stay exported after they are retired. |
+| Bound to the profile | The wallet depends on the password, the username, the salt, the context, the application's label and the sign-in profile (its id, domains and KDF). A change to any of them is a different wallet; only an application's own encrypted backup of the master seed carries a wallet across one. Moving a user from v1 to v2 is such a change. Released sign-in profiles therefore stay exported after they are retired. |
+| Memory | v2 allocates about 256 MiB per derivation, v1 about 64 MiB. Run one derivation at a time in a dedicated worker and terminate it afterwards. |
 | Bounded lifetime | `withKalvoraWalletFromMasterSeed` works on its own copy of the master seed and zeroes it, and zeroes the wallet key when its synchronous callback returns or throws. The master seed passed in stays the caller's: an application secret's own array is zeroed by `withDerivedWallet` when its callback returns, and any copy the caller made is the caller's to zero. |
 
 ## Account changes
