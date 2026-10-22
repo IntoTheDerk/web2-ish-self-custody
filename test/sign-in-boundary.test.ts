@@ -16,6 +16,7 @@ describe("the sign-in profile's import boundary", () => {
   it("loads from the core entry with kalvora.js unavailable", async () => {
     const core = await import("../src/index.js");
     expect(core.signInEd25519ExternalSalt.id).toBe("web2ish-sign-in-ed25519-external-salt-v1");
+    expect(core.signInEd25519ExternalSaltV2.id).toBe("web2ish-sign-in-ed25519-external-salt-v2");
     expect(core.signInEd25519Codec.id).toBe("web2ish-sign-in-ed25519-hex-v1");
     expect(core.signInHkdfEd25519.id).toBe("hkdf-sha256-sign-in-key-v1");
     expect(core.SIGN_IN_KEY_DOMAIN).toBe("web2-ish-self-custody sign-in key v1");

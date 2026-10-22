@@ -776,6 +776,7 @@ before defining either.
 | `normalizeEmail(address)` | function | the identity service's email normalization, for an `email:` subject |
 | `ACCOUNT_CHANGE_DOMAIN` / `accountChangeActions` | constant / list | `"web2-ish-self-custody account change v1"` and this release's eleven actions |
 | `signInEd25519ExternalSalt` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v1`: service-salted sign-in key, not a wallet ([sign-in profile](#a-sign-in-key-separate-from-the-wallet)) |
+| `signInEd25519ExternalSaltV2` | `DerivationProfile` | `web2ish-sign-in-ed25519-external-salt-v2`: the sign-in profile at scrypt N=2^18, four times v1's cost ([protocol](docs/PROTOCOL.md#the-sign-in-profile-v2)) |
 | `signInEd25519Codec` | `IdentityCodec` | `web2ish-sign-in-ed25519-hex-v1`: `S_` and 64 lowercase hex digits, decoded strictly |
 | `signInHkdfEd25519` | `KeyDerivation` | `hkdf-sha256-sign-in-key-v1`: the sign-in profile's HKDF-SHA256 step |
 | `SIGN_IN_KEY_DOMAIN` | constant | `"web2-ish-self-custody sign-in key v1"`, that step's salt and info |
@@ -838,7 +839,10 @@ and the `kalvora-ed25519-base58-v1` codec. Its test vector is committed in
 changes it is wrong. The chain-neutral sign-in profile,
 `web2ish-sign-in-ed25519-external-salt-v1`, has its own vector,
 [`vectors/sign-in-ed25519-external-salt-v1.json`](vectors/sign-in-ed25519-external-salt-v1.json),
-under the same rule, and so do the account-change message's,
+under the same rule, as does its successor at a higher scrypt cost,
+`web2ish-sign-in-ed25519-external-salt-v2`
+([`vectors/sign-in-ed25519-external-salt-v2.json`](vectors/sign-in-ed25519-external-salt-v2.json)),
+and so do the account-change message's,
 [`vectors/account-change-v1.json`](vectors/account-change-v1.json) and
 [`vectors/account-change-resets-v1.json`](vectors/account-change-resets-v1.json):
 a release that adds actions adds a vector file beside the released ones. Retired profile ids are listed in

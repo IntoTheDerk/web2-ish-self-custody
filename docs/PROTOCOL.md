@@ -9,7 +9,8 @@ This document is the wire specification. It has four parts:
    rule into the bundled Kalvora profile, and the Kalvora wallet opened from a
    master seed.
 3. **The sign-in profile** — the chain-neutral profile whose key signs in to an
-   identity service and is not a wallet on any chain.
+   identity service and is not a wallet on any chain, and its successor at a
+   higher scrypt cost, the sign-in profile v2.
 4. **The account-change message** — the bytes a client signs to change its own
    identity-service account: rotate its enrolled key, change its email, enroll
    or remove a recovery key, or recover the account with one.
@@ -235,9 +236,11 @@ masterSeed = scrypt(password = walletEntropy, salt = salt,
 
 The 64-byte `walletEntropy` is the scrypt password input and the 32-byte salt is
 the scrypt salt input. `dkLen` is fixed at 32, so the result is 32 bytes with no
-truncation or expansion. At `N = 65536, r = 8`
-scrypt requires roughly 64 MiB of working memory, so implementations that impose
-a `maxmem` limit must raise it accordingly.
+truncation or expansion. scrypt's working memory is `128 · r · N` bytes: at
+`N = 65536, r = 8` roughly 64 MiB, and at the sign-in profile v2's
+`N = 262144, r = 8` roughly 256 MiB, so implementations that impose a `maxmem`
+limit must raise it accordingly (Python's `hashlib.scrypt` needs `maxmem` above
+256 MiB for v2).
 
 ### 5. Key derivation
 
@@ -729,7 +732,9 @@ checks `PRK`, every label against the label rule and for uniqueness, every
 
 It loads the [sign-in vector](#sign-in-test-vector) as a third fixture, by its
 explicit path and with the same strict shape checks, nested objects included;
-see [its verification](#independent-verification-of-the-sign-in-vector).
+see [its verification](#independent-verification-of-the-sign-in-vector). It
+loads the [sign-in v2 vector](#sign-in-v2-test-vector) as a fourth; see
+[its verification](#independent-verification-of-the-sign-in-v2-vector).
 
 This is cross-implementation regression evidence for the committed vector. It
 is not a cryptographic audit, does not prove browser or deployment safety, does
@@ -939,6 +944,138 @@ fixture's, then recomputes, with no code shared with this package:
   that no secret equals the Kalvora profile's secret for the same label.
 
 The same assurance boundary applies as for the other vectors.
+
+## The sign-in profile v2
+
+`signInEd25519ExternalSaltV2` is the [sign-in profile](#the-sign-in-profile)
+at four times the scrypt cost. It is a new profile, not an edit: v1 keeps its
+id, domains, KDF and vector, and stays exported.
+
+**Why.** The sign-in public key is a password oracle, and so is the address of
+a wallet derived from an application secret of the same run once it is
+published: anyone who also knows the username and the public salt can test
+password guesses offline, one scrypt per guess, with no service data
+([security model](SECURITY_MODEL.md#offline-guessing-cost)). v2 raises the
+memory and the work of each guess by four. It keeps scrypt, rather than
+moving to Argon2id, because in a pure-JavaScript browser worker the SDK's
+scrypt runs within about 1.2 times of a native implementation while Argon2id
+runs about 15 times slower, so within the same time budget scrypt costs a
+native attacker several times more per guess (measurements in the
+[security model](SECURITY_MODEL.md#offline-guessing-cost)).
+
+It uses `signInEd25519Codec`, the Ed25519 curve, scrypt
+`N = 262144 (2^18), r = 8, p = 1, dkLen = 32`, and v1's key step
+`signInHkdfEd25519`:
+
+| field | value |
+| --- | --- |
+| `id` | `web2ish-sign-in-ed25519-external-salt-v2` |
+| `algorithm` | `scrypt-sha512-hkdf-sha256-ed25519-external-32-v2` |
+| `saltPolicy` | `external-32` |
+| `kdf` | `{ N: 262144, r: 8, p: 1, dkLen: 32 }`, about 256 MiB of working memory |
+| `domains.salt` | *(absent)* |
+| `keyDerivation.id` | `hkdf-sha256-sign-in-key-v1` (unchanged) |
+| `codec.id` | `web2ish-sign-in-ed25519-hex-v1` (unchanged) |
+
+All UTF-8. Only the password-hash domain carries a trailing newline:
+
+| constant | exact value |
+| --- | --- |
+| `D_pw` | `web2-ish-self-custody sign-in password hash v2\n` (47 bytes, including its LF) |
+| `D_ent` | `web2-ish-self-custody sign-in Ed25519 external salt entropy v2` (62 bytes) |
+| `D_s` | `web2-ish-self-custody sign-in key v1` (36 bytes, v1's) |
+
+```
+passwordHash  = SHA-512( utf8("web2-ish-self-custody sign-in password hash v2\n") ‖ passwordBytes )
+walletEntropy = SHA-512( utf8(
+                  "web2-ish-self-custody sign-in Ed25519 external salt entropy v2" ‖ "\n" ‖
+                  applicationId ‖ "\n" ‖ networkId ‖ "\n" ‖
+                  normalizedUsername ‖ "\n" ‖ hex(passwordHash) ) )
+salt          = the caller's exact 32 bytes
+masterSeed    = scrypt(walletEntropy, salt, N=262144, r=8, p=1, dkLen=32)
+seed_s        = HKDF-SHA256(masterSeed, salt = info = "web2-ish-self-custody sign-in key v1", L = 32)
+publicKey     = Ed25519 public key of seed_s
+address       = "S_" ‖ hex(publicKey)
+identifier    = address
+secret(label) = the application-secret construction, with profile.id = "web2ish-sign-in-ed25519-external-salt-v2"
+```
+
+- **Own transcript domains.** Both transcript domains end in `v2`, so even the
+  pre-scrypt values (`passwordHash`, `walletEntropy`) differ from v1's, and no
+  intermediate is shared between the two profiles.
+- **The key step and the codec are v1's.** `D_s` separates the sign-in key from
+  the application secrets of one run; the run itself is v2's. Both profiles
+  enroll `S_` keys, and a service tells them apart by the profile id it is
+  configured with and stores with each key, as for any two profiles.
+- **Application secrets work exactly as under v1.** The construction, the
+  label rules, the refusals and the lifetime are unchanged; only `profile.id`
+  in `info` is v2's. Every secret, and every wallet an application derives
+  from one, therefore differs from v1's for the same credentials.
+- **Moving a user from v1 to v2 is a key change.** Same password, same salt: a
+  different sign-in key, different secrets, a different wallet. It needs an
+  enrollment step, like any profile move ([versioning](#versioning)): the
+  application derives under v1 once, in the user's next password entry, to
+  prove the old key and to read what it sealed under v1's secrets, then
+  enrolls the v2 key and re-protects that data under v2's secrets. The SDK
+  migrates nothing itself, and the identity service binds one profile per
+  schema (below).
+- **Memory.** One derivation allocates about 256 MiB. An application running
+  it in a browser worker should run one derivation at a time and terminate
+  the worker afterwards.
+- **Identity service.** No code change: the service is generic over the
+  profile, bakes `web2ish-sign-in-ed25519-external-salt-v2`, its algorithm and
+  `kdf_n = 262144` into its CHECK constraints at first migration, serves it in
+  the deterministic modes, and refuses it in `random-vault` mode, as it does
+  v1. A deployment's schema names one profile, so a deployment moves from v1
+  to v2 with a new schema or a reset, not by reconfiguring a running one.
+
+## Sign-in v2 test vector
+
+`vectors/sign-in-ed25519-external-salt-v2.json`. **Test-only credentials.** It
+has the shape of the [sign-in vector](#sign-in-test-vector) plus a `kdf`
+object (`name`, `N`, `r`, `p`, `dkLen`), and the same credentials, context,
+salt, labels and messages, so the two can be compared value by value. It is a
+new file, never regenerated; every earlier vector is untouched by it.
+
+| field | value |
+| --- | --- |
+| `kdf` | `{ "name": "scrypt", "N": 262144, "r": 8, "p": 1, "dkLen": 32 }` |
+| `passwordHash` | `b85fcf08454f12b0a46d5d406101c13b3fa11f33e01e48f7b4a5d8180a301ba345a6007c0140d2d73ae226e86ac6c918d52ad5404b5c1f3a55d11b9e4603dd1c` |
+| `walletEntropy` | `d362213447a416db73384466b6b4a2118e2c1cc6cf2875d990f8d841b7e42dfcef4050662e57e1dca91ab6c12a51660f14829534dac04895b3320ee1cd002a6a` |
+| `masterSeed` | `f6e9158612e711b0245d4ec6a07501130c8f881b165b6ffe4285397fb42e358d` |
+| `PRK_s` | `6135c7d6ce3950888198f8dd58e05924e54b19c1c8539dcecde018ae0b6d8ec5` |
+| `seed_s` | `f70e06b5c9a7e6f035bd5f84c022d006630c049a1a265c01d6beae24bf715010` |
+| sign-in public key | `10e253a206d13c110d6b260c68eb4fe5342a36e465a3841278683f99b87e7ca2` |
+| sign-in identifier and address | `S_10e253a206d13c110d6b260c68eb4fe5342a36e465a3841278683f99b87e7ca2` |
+| fingerprint | `S10E 253A 206D 13C1` |
+| message | `fixture-sign-in-key-message-v1` |
+| signature | `daa15c3e31f46936e1b2fe797984b3fe20bde9eb759b49d5d1ca72733bfc817ecd1e1d2f0d5e4d25addadb7bf608f74a7a4b1f0c51d989d36ca8c7038fb79209` |
+| application-secret `PRK` | `96889d5e9425e8cdd7dd6ad4bc6fe516bf40cb375e6190dd4479d4da50c6f4ff` |
+| `example-secret-v1` | `d1062f49a7b2f4ca17d9dfdd53485eb47f57885f25f110364ad70d8099bec830` |
+| `example-wallet-seed-v1` | `6253c72fde8bb4dd9457cecdc7f17e85e718796540c8d260e1541b7173f5b238` |
+| wallet public key | `6df34af31b0eb4f87ca2cad050eccfd692538d94bbd4b07d2aa1b57fa22777ba` |
+| wallet address | `8QCcHiS8gBbbsTUiNsFE2ERx43ci4PVK5y6C9fwoAHE1` |
+| wallet identifier | `A_8QCcHiS8gBbbsTUiNsFE2ERx43ci4PVK5y6C9fwoAHE1` |
+| wallet message | `fixture-governance-intent-kalvora-master-seed-v1` |
+| wallet signature | `3b4003cf9709a913d65ea2b46d9b62bf9f19777737be3aaf9e9e211ebcc424426633c0556c92f9940a56bbc3c1068b214614d0495c48fd244cff71d0cb7db70a` |
+
+## Independent verification of the sign-in v2 vector
+
+`scripts/verify_kalvora_external_salt_vector.py` loads the v2 vector as its
+fourth fixture, by its explicit path and with the same strict shape checks plus
+the `kdf` object, whose parameters must be integers (not booleans) equal to
+the profile's. It requires the credential fields to equal both the Kalvora
+wallet fixture's and the v1 sign-in fixture's, then runs every check of
+[the v1 verification](#independent-verification-of-the-sign-in-vector) under
+v2's domains and `hashlib.scrypt` at `N = 2^18`, with the same HKDF, SLIP-0010,
+base58 and Ed25519 code. It also requires that the profile id and algorithm
+differ from v1's; that `passwordHash`, `walletEntropy`, `masterSeed`, the
+sign-in public key, the wallet public key and every secret of a shared label
+differ from v1's; and that scrypt of the same entropy at v1's `N` does not give
+v2's `masterSeed`. The vector was generated by that construction in Python and
+reproduced by the TypeScript implementation (`test/sign-in-v2.test.ts`), so
+the two implementations agree on every value. The same assurance boundary
+applies as for the other vectors.
 
 ---
 

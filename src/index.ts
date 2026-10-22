@@ -33,6 +33,7 @@ export {
   SIGN_IN_KEY_DOMAIN,
   signInEd25519Codec,
   signInEd25519ExternalSalt,
+  signInEd25519ExternalSaltV2,
   signInHkdfEd25519,
 } from "./signIn.js";
 export type {

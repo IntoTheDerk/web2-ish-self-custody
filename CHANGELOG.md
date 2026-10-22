@@ -5,6 +5,60 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased
+
+### Sign-in profile v2 (harder KDF)
+
+A sign-in profile at four times the scrypt cost of v1, against offline
+password guessing: a sign-in public key, or a wallet address derived from an
+application secret of the same run once it is published, lets anyone with the
+username and the public salt test password guesses offline, one KDF run per
+guess. Additive:
+v1, every other profile, codec, transcript and committed vector are unchanged.
+
+- **New core export** (`web2-ish-self-custody`): `signInEd25519ExternalSaltV2`,
+  the `DerivationProfile` `web2ish-sign-in-ed25519-external-salt-v2`:
+  algorithm `scrypt-sha512-hkdf-sha256-ed25519-external-32-v2`,
+  `external-32`, scrypt N=262144 (2^18), r=8, p=1, dkLen=32 (about 256 MiB per
+  derivation), and its own transcript domains
+  (`web2-ish-self-custody sign-in password hash v2\n`,
+  `web2-ish-self-custody sign-in Ed25519 external salt entropy v2`). It reuses
+  v1's key step `signInHkdfEd25519` (`hkdf-sha256-sign-in-key-v1`) and codec
+  `signInEd25519Codec` (`web2ish-sign-in-ed25519-hex-v1`, `S_` keys).
+  Application secrets work exactly as under v1, with the v2 id in their
+  `info`. No other export changes; no type changes.
+- **Different keys from the same credentials.** v2 derives a different sign-in
+  key, different application secrets and so a different wallet than v1 for the
+  same password, username, salt and context. Moving a user from v1 to v2 is a
+  key and wallet change that needs an enrollment step; the SDK migrates
+  nothing. An identity-service schema names one profile, so a deployment moves
+  with a new schema or a reset. The service needs no code change: it serves v2
+  in the deterministic modes and refuses it in `random-vault` mode, as v1.
+- **Why scrypt and not Argon2id.** Measured in Node 24 on an Apple M5 Max, the
+  SDK's pure-JavaScript scrypt runs within about 1.2 times of native code and
+  its Argon2id (`@noble/hashes` 2.0.1) about 15 times slower, so scrypt at
+  N=2^18, at a sixth of the wait (0.45 s), costs a native attacker about 4.5
+  times more per guess than Argon2id at m=128 MiB, t=3 (2.6 s). The comparison table
+  and the phone estimates are in `docs/SECURITY_MODEL.md` "Offline guessing
+  cost". No new dependency.
+- **Vector** `vectors/sign-in-ed25519-external-salt-v2.json`: the v1 sign-in
+  vector's credentials, salt, labels and messages under v2, with a `kdf`
+  object and every intermediate, key, secret, wallet and signature.
+  `scripts/verify_kalvora_external_salt_vector.py` loads it as a fourth
+  fixture with the same strict shape checks, reproduces it with
+  `hashlib.scrypt` at N=2^18 and its own HKDF, SLIP-0010, base58 and Ed25519,
+  and checks that every derived value differs from v1's. The verifier now
+  passes `maxmem` = 512 MiB to `hashlib.scrypt` for every fixture (it was
+  128 MiB; v1's results are unchanged).
+- Tests: `test/sign-in-v2.test.ts` (constants, vector reproduction through
+  the profile, secrets and the Kalvora wallet helper, separation from v1,
+  `withAccountWallet`, the random-vault refusals and the schema the service
+  bakes); `test/sign-in-boundary.test.ts` also loads v2 from the core entry
+  without kalvora.js.
+- Docs: `docs/PROTOCOL.md` "The sign-in profile v2", its vector and its
+  verification; `docs/SECURITY_MODEL.md` "Offline guessing cost"; the README
+  export table; `docs/SERVER_API.md` bundled profiles; `docs/INTEGRATION.md`.
+
 ## v0.12.0-alpha.0 — 2026-10-19 (alpha pre-release)
 
 Account resets (#15): account recovery by email, the signed-in reset, the two
