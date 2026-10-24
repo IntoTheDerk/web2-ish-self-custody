@@ -17,6 +17,9 @@ and account recovery by email and the signed-in reset
 ([account resets](#account-resets-opt-in)), each off unless configured.
 `/profile` reports `walletMode`; in either new mode use `/challenges`'s
 `walletSetup`, not the service salt, to create the wallet.
+An optional [second sign-in factor](#second-sign-in-factor-opt-in) that the
+host verifies gates every session a password proof would issue, and
+[`deleteAccount`](#account-deletion) permanently deletes one account.
 
 It is chain-agnostic. The deployment hands it a `DerivationProfile` object, and
 every address and public-key operation runs through that profile's
@@ -426,9 +429,33 @@ Public. Login. Returns `200`.
 
 Returns `{ "account": …, "session": … }`, plus `token` in bearer mode.
 
+With the [second sign-in factor](#second-sign-in-factor-opt-in) and an account
+that needs it, it returns `200` with `{ "secondFactor": "totp", "ticket": "…",
+"expiresAt": "…" }` instead: no session, no cookie and no account. The client
+sends the ticket with the code to `POST /sessions/second-factor`.
+
 Errors: `challenge-not-found` (404), `challenge-expired` (410),
-`challenge-consumed` (409), `rate-limited` (429), and the collapsed
-authentication failure described in [anti-enumeration](#anti-enumeration).
+`challenge-consumed` (409), `rate-limited` (429, also rule `login-account`
+with the factor), and the collapsed authentication failure described in
+[anti-enumeration](#anti-enumeration).
+
+### `POST /sessions/second-factor`
+
+Public, and mounted only on a service configured with `secondFactor`
+(otherwise `404`). The second sign-in step.
+
+```json
+{ "ticket": "kQ3…43 base64url characters…x0", "code": "123456" }
+```
+
+Returns `200` with `{ "account": …, "session": … }` (and `token` in bearer
+mode) and the session cookie, as `POST /sessions` does. The session's client
+label and hashes are the ones the login request supplied.
+
+Errors: `second-factor-invalid` (401, a wrong code; the ticket has attempts
+left), `second-factor-locked` (423, the host's verifier refused),
+`second-factor-ticket-invalid` (401, sign in again), `invalid-request` (400, a
+missing or overlong code).
 
 ### `GET /sessions/current`
 
@@ -739,8 +766,9 @@ is spent; `email-verification-expired` (410); `rate-limited` (429).
 
 ### Not exposed over HTTP
 
-These `IdentityService` methods have no route, deliberately. Call the first
-three from code that already holds operator trust:
+These `IdentityService` methods have no route, deliberately. Call
+`revokeAllSessions`, `pruneExpired`, `migrate` and `deleteAccount` only from
+code that already holds operator trust:
 
 | method | why it is not routed |
 | --- | --- |
@@ -748,6 +776,7 @@ three from code that already holds operator trust:
 | `pruneExpired()` | maintenance; run it on a schedule (Vercel Cron, systemd timer, job runner). A dead session row that another statement holds locked is skipped, not waited on, and goes on the next run |
 | `migrate()` | provisions the salt on first run; belongs to a deploy step, not to traffic |
 | `liveSessionIds(token)` | every live session id of the caller's account, the caller's included, with no cap: for a host reconciling state it keeps per session against the sessions that still exist, never for display |
+| `deleteAccount(accountId, options?)` | permanent and server-side: the host decides who may delete what, and when ([account deletion](#account-deletion)) |
 
 `listSessions`, `revokeSessionById` and `revokeOtherSessions` are routed only
 with `accountSecurityRoutes` ([Session management](#session-management-opt-in)).
@@ -757,7 +786,8 @@ above all: it takes an account id and belongs to operator tooling.
 
 ```ts
 const removed = await service.pruneExpired();
-// { challenges, sessions, emailVerifications, rateLimits, recoveryTokens, accountResets, auditEvents }
+// { challenges, sessions, emailVerifications, rateLimits, recoveryTokens, accountResets,
+//   auditEvents, secondFactorTickets }
 ```
 
 ### Error envelope
@@ -1011,12 +1041,142 @@ return respond({ account: recovered.account }, recovered.session, 200);
 With `auditRetentionDays`, `pruneExpired` deletes this service's `account.*`
 and `session.*` audit rows older than that many days. Other audit rows
 (`email.*`, `wallet.*`) are kept. Unset keeps every audit row, as before. A row
-whose account was deleted (`account_id` is `ON DELETE SET NULL`) names no
-service profile, so no service's retention prunes it, and one service never
-prunes another's rows on a shared prefix: an operator that deletes an account
-deletes its audit rows first (`DELETE FROM <p>_audit_events WHERE account_id =
-$1`). Recovery-token rows are deleted one day after they expire, whatever
-the retention.
+whose account an operator deleted by hand (`account_id` is `ON DELETE SET
+NULL`) names no service profile, so no service's retention prunes it, and one
+service never prunes another's rows on a shared prefix: an operator that
+deletes an account by hand deletes its audit rows first (`DELETE FROM
+<p>_audit_events WHERE account_id = $1`), or uses `deleteAccount`, whose kept
+rows stay under the deleting service's retention
+([account deletion](#account-deletion)). Recovery-token and second-factor
+ticket rows are deleted one day after they expire, whatever the retention.
+
+## Account deletion
+
+`deleteAccount(accountId, options?, context?)` permanently deletes one account
+and everything this service stores for it. It is server-side only: no route
+mounts it, and the host authorizes and schedules it (for example a purge after
+a retention period).
+
+```ts
+const result = await service.deleteAccount(accountId, { revokeLiveSessions: true });
+// { deleted: true, revokedSessions: 2 }; { deleted: false, revokedSessions: 0 } when no such account
+```
+
+- **One statement.** It deletes the account row, its enrolled keys
+  (`<p>_account_wallets`, with any vault), its sessions, recovery keys and
+  recovery tokens, account resets and second-factor tickets, the challenges and
+  email verifications stored under its username, and its `login-account`
+  rate-limit row. Other rate-limit rows stay until `pruneExpired` removes them,
+  a day after their last use: those keyed with a caller's IP hash, and three
+  keyed by the account's email address alone or with its username
+  (`email-verification`, `email-verification-recipient`,
+  `account-reset-recipient`). Those three are unsalted SHA-256 digests, so
+  whoever knows the address can tell for that day that it was counted.
+  Deleting the recipient caps would let a caller reset a mail-flood cap by
+  deleting and re-registering, so they are kept.
+- **Live sessions.** An account with a live session (neither revoked nor
+  expired) is refused with `account-has-sessions` (409,
+  `details.liveSessions`) and nothing is deleted, unless `revokeLiveSessions:
+  true` revokes and deletes them in the same statement. `revokedSessions`
+  counts them. The check runs after the account lock, in a fresh snapshot
+  (the statement calls `<p>_delete_account`, migration 13), so a session that
+  a login or second-factor completion committed while the deletion waited for
+  that lock is counted, never cascaded away unseen.
+- **Idempotent.** A missing account resolves `{ deleted: false,
+  revokedSessions: 0 }`; a malformed id is `invalid-request`.
+- **Audit.** Rows older than `auditRetentionDays` that its rule would prune
+  (`account.*`, `session.*`) are deleted now. The others are kept, detached:
+  `account_id` NULL, `deleted_account_id` the account's id and
+  `deleted_service_profile_id` the service's (migration 13), so `pruneExpired`
+  keeps applying the retention to them. An `account.deleted` row records the
+  deletion with `deleted_account_id` and counts only (`revokedSessions`,
+  `keptAuditEvents`, `prunedAuditEvents`): no email, username, key or address.
+  Audit rows are detached in a snapshot taken after the locks, so one that a
+  concurrent statement committed while the deletion waited is detached like
+  the others. One committed later still, before the account row goes, is
+  detached by the foreign key's cascade; a trigger (migration 13) keeps its
+  `deleted_account_id`, and `pruneExpired` reaches it through the
+  `account.deleted` row.
+- **Lock order** (that of the account changes): the account `FOR NO KEY
+  UPDATE` (never `FOR UPDATE` first), then its enrolled keys, recovery keys,
+  recovery tokens, resets and tickets, then its sessions in id order, as
+  `revokeOtherSessions` and `rotateSignInKey` lock them, then the deletes. The
+  children are locked before the account row goes, so the cascade never takes
+  a lock after the account's. A login or a second-factor completion locks the
+  account first, so it waits, and then finds no account.
+- **Not deleted: `<p>_wallet_setups`.** Its rows are immutable by trigger
+  (migration 5), keyed by username, created for any username that requests a
+  challenge in the per-account modes, and hold the public salt of a
+  per-account wallet: deleting one would make a wallet that still exists
+  outside the service underivable. It holds no account id. In
+  `service-deterministic` mode it stays empty.
+
+## Second sign-in factor (opt-in)
+
+A service created from a `SecondFactorIdentityServiceConfig`, whose
+`secondFactor` is `{ required(accountId, context), verify(accountId,
+ticketId, code) }`, is an `IdentityService<true>`. Every step that would
+issue a session after a password proof asks the host first:
+
+| step | `context.purpose` | the ticket is bound to |
+| --- | --- | --- |
+| `login` (`POST /sessions`) | `login` | the key that signed the login challenge |
+| `completeAccountReset` | `email-reset` | the new key it enrolled |
+| `completeRecovery` | `recovery` | the new key it enrolled |
+
+When `required` answers anything but `false` (a throw refuses the step), the
+step issues no session. In the statement that would have inserted the
+session it inserts a ticket instead, and it answers `{ secondFactor:
+"totp", ticket, expiresAt }` in place of `session` (a reset or recovery still
+replaces the key, revokes the sessions and closes the resets as before; only
+its new session waits). `completeSecondFactor({ ticket, code })` (routed as
+`POST /sessions/second-factor`) then:
+
+1. reserves one of the ticket's five attempts in a single-row `UPDATE`, so
+   parallel guesses cannot share one, or refuses an unknown, used, expired or
+   exhausted ticket (`second-factor-ticket-invalid`) without calling the host;
+2. counts the code against the account's `login-account` rate limit (25 an
+   hour, keyed by the account alone, whatever the ticket, its purpose or the
+   caller's address), refusing with `rate-limited` past it, then calls
+   `verify(accountId, ticketId, code)`; `ticketId` is the ticket row's id,
+   never its secret. An `"ok"` or `"locked"` verdict gives the unit back, so
+   only wrong codes and verifier failures stay counted. A full bucket refuses
+   every outstanding ticket of the account, and a login or recovery that
+   needs the factor checks it before it issues a ticket;
+3. on `"ok"`, issues the session in the statement that consumes the ticket,
+   while the account is active and the ticket's key still enrolled; that
+   statement also advances the reset generation and aborts a pending signed-in
+   reset, as a login does. Audit: `session.second-factor-ok { purpose,
+   sessionId }`, plus `account.login { …, secondFactor: true }` for a login;
+4. on `"invalid"` (or any value but `"ok"` and `"locked"`), audits
+   `session.second-factor-failed { purpose, reason, attempts, exhausted }`
+   and answers `second-factor-invalid` with `details.attemptsRemaining`; the
+   fifth kills the ticket (`second-factor-ticket-invalid`);
+5. on `"locked"`, audits the failure (`reason: "locked"`) and answers
+   `second-factor-locked` (423).
+
+A ticket is 32 random bytes (base64url), valid 5 minutes, stored only as a
+domain-separated SHA-256 (`web2-ish-self-custody second-factor ticket v1`,
+the service profile id and the ticket, joined by newlines) in
+`<p>_second_factor_tickets` (migration 12), one per challenge. The SDK stores
+no factor data and never sees a secret: the code goes to `verify` and nowhere
+else.
+
+`completeSignedInReset` issues no session (the initiating session stays), so
+there is nothing to gate: that session was issued through the gate, and the
+next sign-in with the new password asks for the factor. `register` issues its
+session at once: a new account has no factor.
+
+For an account recovery by email, `required` runs before the emailed code is
+checked (the code is checked in the completion's statement), so it must
+answer from the account alone, change nothing, and not vary its timing in a
+way the host's response padding does not cover. The account-limit check is
+skipped there, so a refusal never tells an unauthenticated caller that the
+account exists.
+
+Without the option nothing above runs: each statement is the one earlier
+releases ran, the route is not mounted, and `completeSecondFactor` answers
+`invalid-request`.
 
 ## Account resets (opt-in)
 
@@ -1627,6 +1787,13 @@ by an action that issued a session, names that session in `sessionId`, which is
 how `listSecurityEvents` shows its label while the session row exists.
 `pruneExpired` deletes this service's `account.*` and `session.*` rows older
 than `auditRetentionDays` when that is set ([audit retention](#audit-retention)).
+Migration 13 adds `deleted_account_id uuid` and `deleted_service_profile_id
+text`, NULL except on the rows `deleteAccount` kept and its `account.deleted`
+row ([account deletion](#account-deletion)), a partial index on
+`deleted_account_id`, and a `BEFORE UPDATE OF account_id` trigger that fills
+`deleted_account_id` when the foreign key's cascade detaches a row. It also
+adds the `<p>_delete_account(...)` function that `deleteAccount` calls, which
+locks the account before it reads the account's sessions.
 
 ### `<p>_account_recovery_keys` (migration 7)
 
@@ -1689,6 +1856,18 @@ IF NOT EXISTS` with its constraints inline, safe to re-run and to run from
 concurrent runners. Migration 9 adds its two columns with
 `ADD COLUMN IF NOT EXISTS`.
 
+### `<p>_second_factor_tickets` (migration 12)
+
+`id uuid` (PK; the `ticketId` passed to `verify`), `account_id` (FK, cascade),
+`ticket_hash` (64 lowercase hex, UNIQUE), `challenge_id` (UNIQUE; no foreign
+key, since `pruneExpired` deletes challenges first), `public_key` (the bound
+enrolled key), `purpose` (`login`, `email-reset` or `recovery`), `attempts`
+(0 to 5), `ip_hash`, `user_agent_hash`, `client_label` (what the session will
+store, under the same rules as `<p>_sessions`), `created_at`, `expires_at`
+(after `created_at`), `consumed_at`. Indexes on `(account_id)` and
+`(expires_at)`; `pruneExpired` deletes a row a day after it expires. Each
+statement is one `CREATE … IF NOT EXISTS` with its constraints inline.
+
 ### There is no salt adoption
 
 Every deployment's salt is minted by the database on its first `migrate()`
@@ -1736,6 +1915,15 @@ type IdentityServiceConfig = {
   onSecurityEvent?: (event: SecurityEventNotice) => void | Promise<void>;
   auditRetentionDays?: number;
 };
+
+// IdentityServiceConfig plus the second sign-in factor; createIdentityService
+// (and the adapters) given one return an IdentityService<true>.
+type SecondFactorIdentityServiceConfig = Omit<IdentityServiceConfig, "secondFactor"> & {
+  secondFactor: {
+    required(accountId: string, context: SecondFactorContext): Promise<boolean>;
+    verify(accountId: string, ticketId: string, code: string): Promise<"ok" | "invalid" | "locked">;
+  };
+};
 ```
 
 `profile` is the profile **object**, not an id string. There is no registry to
@@ -1769,6 +1957,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 | `accountSecurity` | `{ signInKeyRotation: false, recoveryKeys: false, emailReset: false, signedInReset: false }`; each a strict boolean, an unknown key refused ([account changes](#account-changes-and-recovery-keys-opt-in), [account resets](#account-resets-opt-in)) |
 | `onSecurityEvent` | none; a function, awaited for at most 3 s after a change commits ([the hook](#the-security-event-hook)) |
 | `auditRetentionDays` | none (audit rows are kept); an integer from 1 to 36,500 ([audit retention](#audit-retention)) |
+| `secondFactor` | none; exactly `{ required, verify }`, both functions, any other shape refused ([second sign-in factor](#second-sign-in-factor-opt-in)) |
 
 ### Vercel + Neon
 
@@ -1969,6 +2158,16 @@ username; and `recovery-begin-ip`, 20 per hour per hashed IP. Starting an
 account recovery by email is bounded per username whoever asks (3 per hour, 10
 per day) and per hashed IP (20 per hour), and by a recipient bound of its own
 ([reset rate limits](#reset-rate-limits)).
+
+With the [second sign-in factor](#second-sign-in-factor-opt-in), each ticket
+allows 5 codes, and `login-account` counts, per account whatever the ticket or
+the IP, every code submitted to the factor, giving the unit back on `"ok"` or
+`"locked"`. At 25 wrong codes in an hour every submission on every outstanding
+ticket of the account is refused (`rate-limited`, rule `login-account`), as is
+a login or recovery that needs the factor, so a holder of the password gets at
+most 25 wrong guesses at the factor per hour, however many tickets it starts
+or abandons. It locks the owner out for that hour too; the host's own
+`"locked"` can be stricter.
 
 Starting an email verification is bounded three ways, each per hour: 5 per
 normalized username and address pair, 8 per recipient address whatever the

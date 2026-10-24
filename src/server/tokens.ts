@@ -170,3 +170,18 @@ export function constantTimeEqualHex(a: string, b: string): boolean {
 export function randomNonceHex(): string {
   return bytesToHex(randomBytes(NONCE_BYTES));
 }
+
+const SECOND_FACTOR_TICKET_DOMAIN = "web2-ish-self-custody second-factor ticket v1";
+
+/** A second-factor ticket: 32 random bytes, base64url, like a session token. */
+export function generateSecondFactorTicket(): string {
+  return base64url(randomBytes(SESSION_TOKEN_BYTES));
+}
+
+/**
+ * Its stored digest. Domain separated, so neither table's digests can stand
+ * in for the other's: a ticket's digest is never a session token's.
+ */
+export function hashSecondFactorTicket(serviceProfileId: string, ticket: string): string {
+  return sha256Hex([SECOND_FACTOR_TICKET_DOMAIN, serviceProfileId, ticket].join("\n"));
+}

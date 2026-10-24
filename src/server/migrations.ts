@@ -691,6 +691,193 @@ export function identityMigrations(
       name: "refresh-email-reset-functions",
       statements: Object.freeze(emailFunctions),
     }),
+    Object.freeze({
+      version: 12,
+      name: "second-factor-tickets",
+      statements: Object.freeze([
+        // A sign-in that passed its password proof but still owes the host's
+        // second factor (`secondFactor`). Only the ticket's domain-separated
+        // SHA-256 is stored. A ticket is bound to its account, to the
+        // challenge whose proof it continues (one ticket per challenge, by
+        // the UNIQUE), and to the enrolled key that proof was for: it issues
+        // a session only while that key is still enrolled. The client columns
+        // are the ones the session would have stored had it been issued at
+        // once. No factor data is ever stored here. `pruneExpired` deletes a
+        // row a day after it expires; the account cascade deletes the rest.
+        // One CREATE ... IF NOT EXISTS with its constraints inline, so a
+        // re-run is a no-op, like migration 7.
+        `CREATE TABLE IF NOT EXISTS ${p}_second_factor_tickets (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+           account_id uuid NOT NULL REFERENCES ${p}_accounts(id) ON DELETE CASCADE,
+           ticket_hash text NOT NULL UNIQUE,
+           challenge_id uuid NOT NULL UNIQUE,
+           public_key text NOT NULL,
+           purpose text NOT NULL,
+           attempts integer NOT NULL DEFAULT 0,
+           ip_hash text,
+           user_agent_hash text,
+           client_label text,
+           created_at timestamptz NOT NULL,
+           expires_at timestamptz NOT NULL,
+           consumed_at timestamptz,
+           CONSTRAINT ${p}_second_factor_tickets_hash CHECK (ticket_hash ~ '^[0-9a-f]{64}$'),
+           CONSTRAINT ${p}_second_factor_tickets_purpose CHECK (purpose IN ('login', 'email-reset', 'recovery')),
+           CONSTRAINT ${p}_second_factor_tickets_attempts CHECK (attempts BETWEEN 0 AND 5),
+           CONSTRAINT ${p}_second_factor_tickets_label CHECK (client_label IS NULL OR client_label ~ '^[A-Za-z0-9 .()-]{1,64}$'),
+           CONSTRAINT ${p}_second_factor_tickets_expiry CHECK (expires_at > created_at)
+         )`,
+        // The account cascade and the deletion's explicit lock.
+        `CREATE INDEX IF NOT EXISTS ${p}_second_factor_tickets_account_idx
+           ON ${p}_second_factor_tickets (account_id)`,
+        `CREATE INDEX IF NOT EXISTS ${p}_second_factor_tickets_expires_idx
+           ON ${p}_second_factor_tickets (expires_at)`,
+      ]),
+    }),
+    Object.freeze({
+      version: 13,
+      name: "account-deletion",
+      statements: Object.freeze([
+        // `deleteAccount` keeps the account's audit rows (or prunes them by
+        // `auditRetentionDays`) with `account_id` NULL. These two columns say
+        // whose they were and which service they belong to, so the deletion
+        // event can name the account it deleted and `pruneExpired` can still
+        // apply its retention to them. Both stay NULL on every other row. One
+        // ADD COLUMN IF NOT EXISTS each, like migration 9.
+        `ALTER TABLE ${p}_audit_events ADD COLUMN IF NOT EXISTS deleted_account_id uuid`,
+        `ALTER TABLE ${p}_audit_events ADD COLUMN IF NOT EXISTS deleted_service_profile_id text`,
+        `CREATE INDEX IF NOT EXISTS ${p}_audit_events_deleted_account_idx
+           ON ${p}_audit_events (deleted_account_id)
+           WHERE deleted_account_id IS NOT NULL`,
+        // A row that a concurrent statement committed for the account while
+        // the deletion waited for its locks is outside the deletion's
+        // snapshot; the ON DELETE SET NULL cascade detaches it. This trigger
+        // keeps its account id there too, so the account's
+        // "account.deleted" row still ties it to the service that deleted
+        // it. It only ever fills a NULL column, on the row being detached.
+        `CREATE OR REPLACE FUNCTION ${p}_audit_events_keep_deleted_account()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         SET search_path = pg_catalog, public
+         AS $$
+         BEGIN
+           IF OLD.account_id IS NOT NULL AND NEW.account_id IS NULL AND NEW.deleted_account_id IS NULL THEN
+             NEW.deleted_account_id := OLD.account_id;
+           END IF;
+           RETURN NEW;
+         END;
+         $$`,
+        createTriggerOnce(
+          `${p}_audit_events_keep_deleted_account`,
+          `BEFORE UPDATE OF account_id ON ${p}_audit_events
+           FOR EACH ROW EXECUTE FUNCTION ${p}_audit_events_keep_deleted_account()`,
+        ),
+        // `deleteAccount`. A function rather than one statement because the
+        // live-session check must see what committed while the deletion
+        // waited for the account lock: a session issuer that held the lock
+        // first would otherwise commit a session outside the statement's
+        // snapshot, the check would count none and the cascade would delete
+        // it. Each statement below takes a fresh READ COMMITTED snapshot,
+        // after the account lock; every session issuer locks the account row
+        // (FOR NO KEY UPDATE or FOR SHARE), so none can commit a session
+        // between that lock and the deletion. Lock order: the account, then
+        // its keys, recovery keys, recoveries, resets, second-factor tickets
+        // and sessions, each in id order.
+        `CREATE OR REPLACE FUNCTION ${p}_delete_account(
+           target_id uuid, profile_id text, request_at timestamptz,
+           revoke_live boolean, retention_days integer, login_bucket text
+         ) RETURNS TABLE (
+           account_found integer, live_sessions integer, account_deleted integer,
+           revoked_sessions integer, deletion_logged integer
+         )
+         LANGUAGE plpgsql AS $del$
+         DECLARE
+           clock_at timestamptz := COALESCE(request_at, now());
+           owner_name text;
+           kept_count integer;
+           pruned_count integer;
+         BEGIN
+           account_found := 0;
+           live_sessions := 0;
+           account_deleted := 0;
+           revoked_sessions := 0;
+           deletion_logged := 0;
+           SELECT a.username_normalized INTO owner_name
+             FROM ${p}_accounts a
+            WHERE a.id = target_id AND a.service_profile_id = profile_id
+            FOR NO KEY UPDATE OF a;
+           IF NOT FOUND THEN RETURN NEXT; RETURN; END IF;
+           account_found := 1;
+
+           SELECT count(*)::integer INTO live_sessions
+             FROM ${p}_sessions s
+            WHERE s.account_id = target_id
+              AND s.revoked_at IS NULL
+              AND s.expires_at > clock_at;
+           IF live_sessions > 0 AND NOT revoke_live THEN RETURN NEXT; RETURN; END IF;
+
+           PERFORM 1 FROM ${p}_account_wallets w
+            WHERE w.account_id = target_id ORDER BY w.id FOR UPDATE OF w;
+           PERFORM 1 FROM ${p}_account_recovery_keys k
+            WHERE k.account_id = target_id ORDER BY k.id FOR UPDATE OF k;
+           PERFORM 1 FROM ${p}_account_recoveries r
+            WHERE r.account_id = target_id ORDER BY r.id FOR UPDATE OF r;
+           PERFORM 1 FROM ${p}_account_resets r
+            WHERE r.account_id = target_id ORDER BY r.id FOR UPDATE OF r;
+           PERFORM 1 FROM ${p}_second_factor_tickets t
+            WHERE t.account_id = target_id ORDER BY t.id FOR UPDATE OF t;
+           SELECT count(*) FILTER (WHERE l.is_live)::integer INTO revoked_sessions
+             FROM (
+               SELECT s.id, (s.revoked_at IS NULL AND s.expires_at > clock_at) AS is_live
+                 FROM ${p}_sessions s
+                WHERE s.account_id = target_id
+                ORDER BY s.id
+                  FOR UPDATE OF s
+             ) l;
+           DELETE FROM ${p}_sessions s WHERE s.account_id = target_id;
+
+           -- auditRetentionDays applies now to what it would prune later; the
+           -- rest is kept, detached from the account row but still under this
+           -- service's retention.
+           DELETE FROM ${p}_audit_events e
+            WHERE e.account_id = target_id
+              AND retention_days IS NOT NULL
+              AND e.created_at <= clock_at - (interval '1 day' * retention_days)
+              AND (e.action LIKE 'account.%' OR e.action LIKE 'session.%');
+           GET DIAGNOSTICS pruned_count = ROW_COUNT;
+           UPDATE ${p}_audit_events e
+              SET account_id = NULL,
+                  deleted_account_id = target_id,
+                  deleted_service_profile_id = profile_id
+            WHERE e.account_id = target_id;
+           GET DIAGNOSTICS kept_count = ROW_COUNT;
+
+           DELETE FROM ${p}_auth_challenges c
+            WHERE c.service_profile_id = profile_id AND c.username_normalized = owner_name;
+           DELETE FROM ${p}_email_verifications v
+            WHERE v.service_profile_id = profile_id AND v.username_normalized = owner_name;
+           DELETE FROM ${p}_rate_limits rl WHERE rl.bucket = login_bucket;
+           DELETE FROM ${p}_accounts a WHERE a.id = target_id;
+           GET DIAGNOSTICS account_deleted = ROW_COUNT;
+
+           INSERT INTO ${p}_audit_events (
+             account_id, action, metadata, created_at,
+             deleted_account_id, deleted_service_profile_id
+           )
+           VALUES (
+             NULL, 'account.deleted',
+             jsonb_build_object(
+               'revokedSessions', revoked_sessions,
+               'keptAuditEvents', kept_count,
+               'prunedAuditEvents', pruned_count
+             ),
+             clock_at, target_id, profile_id
+           );
+           deletion_logged := 1;
+           RETURN NEXT;
+         END;
+         $del$`,
+      ]),
+    }),
   ]);
 }
 
