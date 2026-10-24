@@ -10,21 +10,31 @@
 import type { IdentityService } from "../contract.js";
 import { createIdentityService } from "../service.js";
 import { neonDriver, type NeonQueryable } from "../sql.js";
-import type { IdentityServiceConfig } from "../types.js";
+import type { IdentityServiceConfig, SecondFactorIdentityServiceConfig } from "../types.js";
 
 /** Structural shape of `neon` from `@neondatabase/serverless`. */
 export type NeonClientFactory = (connectionString: string) => NeonQueryable;
 
 export type NeonIdentityServiceOptions = Readonly<{
   connectionString: string;
-  config: IdentityServiceConfig;
+  /** A `SecondFactorIdentityServiceConfig` makes an `IdentityService<true>`. */
+  config: IdentityServiceConfig | SecondFactorIdentityServiceConfig;
   /** Pass the imported `neon` factory directly. */
   neon: NeonClientFactory;
 }>;
 
 export function createNeonIdentityService(
+  options: NeonIdentityServiceOptions & Readonly<{ config: SecondFactorIdentityServiceConfig }>,
+): IdentityService<true>;
+export function createNeonIdentityService(
+  options: NeonIdentityServiceOptions & Readonly<{ config: IdentityServiceConfig }>,
+): IdentityService;
+export function createNeonIdentityService(
   options: NeonIdentityServiceOptions,
-): IdentityService {
+): IdentityService<boolean>;
+export function createNeonIdentityService(
+  options: NeonIdentityServiceOptions,
+): IdentityService<boolean> {
   return createIdentityService(
     neonDriver(options.neon(options.connectionString)),
     options.config,

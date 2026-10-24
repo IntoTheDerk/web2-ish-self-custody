@@ -5,6 +5,8 @@ import { IdentityError } from "./errors.js";
 import type {
   IdentityServiceConfig,
   ResolvedIdentityServiceConfig,
+  SecondFactorIdentityServiceConfig,
+  SecondFactorOptions,
   SecurityEventHook,
 } from "./types.js";
 
@@ -47,7 +49,7 @@ function assertPositiveInteger(value: number, field: string, max: number): numbe
  * into a new wallet namespace. The type no longer has the field, but a spread
  * or an untyped caller can still deliver it.
  */
-function assertNoRemovedOptions(config: IdentityServiceConfig): void {
+function assertNoRemovedOptions(config: IdentityServiceConfig | SecondFactorIdentityServiceConfig): void {
   if ((config as Readonly<Record<string, unknown>>)["adoptPublicSaltHex"] !== undefined) {
     throw new IdentityError(
       "adoptPublicSaltHex was removed in v0.9.0; the salt is always minted by the database on first provisioning.",
@@ -156,6 +158,42 @@ function resolveSecurityEventHook(value: unknown): SecurityEventHook | null {
   return value as SecurityEventHook;
 }
 
+const secondFactorKeys: readonly string[] = Object.freeze(["required", "verify"]);
+
+/**
+ * `null` and `undefined` are unset. Otherwise exactly `{ required, verify }`,
+ * both functions: a typo must not leave sign-in without its factor.
+ */
+function resolveSecondFactor(value: unknown): SecondFactorOptions | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new IdentityError("secondFactor must be an object.", "invalid-service-profile");
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!secondFactorKeys.includes(key)) {
+      throw new IdentityError(
+        `secondFactor accepts only ${secondFactorKeys.join(", ")}.`,
+        "invalid-service-profile",
+      );
+    }
+  }
+  const required = record["required"];
+  const verify = record["verify"];
+  if (typeof required !== "function" || typeof verify !== "function") {
+    throw new IdentityError(
+      "secondFactor needs two functions, required and verify.",
+      "invalid-service-profile",
+    );
+  }
+  return Object.freeze({
+    required: required as SecondFactorOptions["required"],
+    verify: verify as SecondFactorOptions["verify"],
+  });
+}
+
 function resolveAuditRetentionDays(value: unknown): number | null {
   if (value === undefined || value === null) {
     return null;
@@ -170,7 +208,7 @@ function resolveAuditRetentionDays(value: unknown): number | null {
 }
 
 export function resolveIdentityServiceConfig(
-  config: IdentityServiceConfig,
+  config: IdentityServiceConfig | SecondFactorIdentityServiceConfig,
 ): ResolvedIdentityServiceConfig {
   assertNoRemovedOptions(config);
   const walletMode = config.walletMode ?? defaults.walletMode;
@@ -186,6 +224,7 @@ export function resolveIdentityServiceConfig(
       "invalid-service-profile",
     );
   }
+  const secondFactor = resolveSecondFactor(config.secondFactor);
   return Object.freeze({
     walletMode,
     serviceProfileId: config.serviceProfileId,
@@ -222,6 +261,7 @@ export function resolveIdentityServiceConfig(
     accountSecurity: resolveAccountSecurity(config.accountSecurity),
     onSecurityEvent: resolveSecurityEventHook(config.onSecurityEvent),
     auditRetentionDays: resolveAuditRetentionDays(config.auditRetentionDays),
+    ...(secondFactor === null ? {} : { secondFactor }),
   });
 }
 

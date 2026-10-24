@@ -74,6 +74,98 @@ export type IdentityServiceConfig = Readonly<{
    * rows indefinitely, as before. An integer from 1 to 36,500.
    */
   auditRetentionDays?: number | null;
+  /**
+   * Unset here. A service with a second sign-in factor is configured with
+   * `SecondFactorIdentityServiceConfig`, whose service type says that a
+   * sign-in may answer with a ticket instead of a session.
+   */
+  secondFactor?: null;
+}>;
+
+/**
+ * `IdentityServiceConfig` with an optional second sign-in factor that the
+ * host verifies (for example a TOTP code). When `required` answers true for
+ * an account after its password proof (a login signature, an emailed reset
+ * code or a recovery key), the service issues no session: it answers with a
+ * short-lived second-factor ticket instead, and `completeSecondFactor`
+ * issues the session once `verify` answers `"ok"`. The service never stores
+ * factor data and never sees a secret; it passes the submitted code to
+ * `verify` and nothing else. `createIdentityService` given this type returns
+ * an `IdentityService<true>`.
+ */
+export type SecondFactorIdentityServiceConfig = Readonly<
+  Omit<IdentityServiceConfig, "secondFactor"> & { secondFactor: SecondFactorOptions }
+>;
+
+/** What a second-factor ticket was issued for: the step that proved the password. */
+export type SecondFactorPurpose = "login" | "email-reset" | "recovery";
+
+/** The `context` argument of `SecondFactorOptions.required`. */
+export type SecondFactorContext = Readonly<
+  RequestContext & {
+    /** The sign-in step that is about to issue a session. */
+    purpose: SecondFactorPurpose;
+  }
+>;
+
+/**
+ * `verify`'s answer: `ok` issues the session, `invalid` counts an attempt of
+ * the ticket, and `locked` refuses (the host's own lockout). Any other value
+ * counts as `invalid`.
+ */
+export type SecondFactorVerdict = "ok" | "invalid" | "locked";
+
+/** `IdentityServiceConfig.secondFactor`. Both functions are the host's. */
+export type SecondFactorOptions = Readonly<{
+  /**
+   * Whether the account must pass the second factor before a session is
+   * issued. Called only after the password proof verified. Anything other
+   * than `false`, or a throw, fails closed: a resolved non-boolean counts as
+   * `true`, and a throw refuses the sign-in.
+   */
+  required(accountId: string, context: SecondFactorContext): Promise<boolean>;
+  /**
+   * Checks `code` for the account. `ticketId` is the ticket's stable id (not
+   * its secret), for a host that binds its own records to one ticket. Called
+   * once per attempt, at most five times per ticket; a throw refuses the
+   * attempt, which stays counted.
+   */
+  verify(accountId: string, ticketId: string, code: string): Promise<SecondFactorVerdict>;
+}>;
+
+/**
+ * Returned instead of a session while the second factor is pending. The
+ * ticket is a bearer secret for one account, valid for 5 minutes and 5
+ * attempts; only its SHA-256 (domain separated) is stored.
+ */
+export type IssuedSecondFactorTicket = Readonly<{
+  secondFactor: "totp";
+  ticket: string;
+  expiresAt: Date;
+}>;
+
+/** `completeSecondFactor`: the ticket and the code the user entered. */
+export type SecondFactorCompletionInput = Readonly<{
+  ticket: string;
+  code: string;
+}>;
+
+/** `deleteAccount`'s options. */
+export type AccountDeletionOptions = Readonly<{
+  /**
+   * Revoke (and delete) the account's live sessions in the same statement.
+   * Without it, an account with a live session is refused
+   * (`account-has-sessions`) and nothing is deleted.
+   */
+  revokeLiveSessions?: boolean;
+}>;
+
+/** What `deleteAccount` did. */
+export type AccountDeletion = Readonly<{
+  /** False when no such account existed (the call is idempotent). */
+  deleted: boolean;
+  /** How many live sessions the deletion revoked. */
+  revokedSessions: number;
 }>;
 
 /** The opt-ins of `IdentityServiceConfig.accountSecurity`. */
@@ -182,6 +274,8 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   }>;
   onSecurityEvent: SecurityEventHook | null;
   auditRetentionDays: number | null;
+  /** Present only when configured, so a config without it resolves as before. */
+  secondFactor?: SecondFactorOptions;
 }>;
 
 /**

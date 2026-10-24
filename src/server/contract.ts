@@ -1,4 +1,6 @@
 import type {
+  AccountDeletion,
+  AccountDeletionOptions,
   AccountResetCompletionInput,
   AccountResetSettingInput,
   AccountResetSettings,
@@ -15,6 +17,7 @@ import type {
   IssuedEmailVerification,
   IssuedAccountReset,
   IssuedRecovery,
+  IssuedSecondFactorTicket,
   IssuedSession,
   IssuedSignedInReset,
   ListedSession,
@@ -29,6 +32,8 @@ import type {
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
+  SecondFactorCompletionInput,
+  SecondFactorPurpose,
   SecurityEvent,
   SignedInResetCompletionInput,
   SignInKeyRotationInput,
@@ -36,6 +41,45 @@ import type {
   VerifiedReauthentication,
 } from "./types.js";
 import type { WalletVault } from "../vault.js";
+
+/**
+ * A session, or, with the `secondFactor` option and an account that needs it,
+ * a second-factor ticket in its place (`completeSecondFactor` turns it into
+ * the session). Without the option the result always has `session`.
+ */
+export type SessionOrSecondFactor<T> =
+  | SessionResult<T>
+  | (T & IssuedSecondFactorTicket & Readonly<{ session?: undefined }>);
+
+/**
+ * A result that carries a session, and no ticket: always, on a service
+ * without the option. The ticket's fields are declared absent so that either
+ * result can be read without a cast and narrowed on `session` or
+ * `secondFactor`.
+ */
+export type SessionResult<T> = T &
+  Readonly<{
+    session: IssuedSession;
+    secondFactor?: undefined;
+    ticket?: undefined;
+    expiresAt?: undefined;
+  }>;
+
+type LoginFields = Readonly<{ account: IdentityAccount }>;
+type ResetFields = Readonly<{
+  account: IdentityAccount;
+  wallets: readonly IdentityWallet[];
+  revokedSessionIds: readonly string[];
+}>;
+
+/** What `login` resolves to on an `IdentityService<true>`. */
+export type LoginResult = SessionOrSecondFactor<LoginFields>;
+
+/**
+ * What `completeAccountReset` and `completeRecovery` resolve to on an
+ * `IdentityService<true>`.
+ */
+export type ResetCompletionResult = SessionOrSecondFactor<ResetFields>;
 
 /**
  * The complete server-side identity surface.
@@ -62,7 +106,7 @@ import type { WalletVault } from "../vault.js";
  * `random-vault` mode. Methods and types keep their wallet names
  * (`listWallets`, `IdentityWallet`) either way.
  */
-export interface IdentityService {
+export interface IdentityService<SecondFactor extends boolean = false> {
   readonly config: ResolvedIdentityServiceConfig;
 
   /** Applies pending migrations. Safe to call concurrently and repeatedly. */
@@ -93,11 +137,61 @@ export interface IdentityService {
     context?: RequestContext,
   ): Promise<{ account: IdentityAccount; wallet: IdentityWallet; session: IssuedSession }>;
 
-  /** Verifies a login challenge signature and opens a session. */
+  /**
+   * Verifies a login challenge signature and opens a session. With the
+   * `secondFactor` option, when `required` answers true for the account, it
+   * opens none: it answers `{ account, secondFactor: "totp", ticket,
+   * expiresAt }` and the session waits for `completeSecondFactor`. A
+   * sign-in that needs the factor is refused (`rate-limited`, rule
+   * `login-account`) while the account has 25 wrong second-factor codes in
+   * its current hour.
+   */
   login(
     input: LoginInput,
     context?: RequestContext,
-  ): Promise<{ account: IdentityAccount; session: IssuedSession }>;
+  ): Promise<SecondFactor extends true ? LoginResult : SessionResult<LoginFields>>;
+
+  /**
+   * The second sign-in step (`secondFactor` option only; otherwise
+   * `invalid-request`). Reserves one of the ticket's five attempts, passes
+   * `code` to the host's `verify`, and on `"ok"` issues the session the
+   * ticket's step would have issued, in the statement that consumes the
+   * ticket, while the account is active and the ticket's key still enrolled.
+   * Audits `session.second-factor-ok { purpose, sessionId }` (and, for a
+   * login, `account.login`) or `session.second-factor-failed { purpose,
+   * reason, attempts, exhausted }`. Errors: `second-factor-invalid` (wrong
+   * code, `details.attemptsRemaining`), `second-factor-locked` (the
+   * verifier's `"locked"`), `second-factor-ticket-invalid` (unknown, used,
+   * expired or exhausted ticket, or the account or its key changed), and
+   * `rate-limited` (rule `login-account`): every code counts against the
+   * account's 25 an hour before `verify` runs and is given back on `"ok"` or
+   * `"locked"`, so a full bucket refuses every ticket of the account. The
+   * fifth wrong code kills the ticket.
+   */
+  completeSecondFactor(
+    input: SecondFactorCompletionInput,
+    context?: RequestContext,
+  ): Promise<{ account: IdentityAccount; session: IssuedSession; purpose: SecondFactorPurpose }>;
+
+  /**
+   * Server-only: permanently deletes the account and everything this service
+   * stores for it, in one statement: its enrolled keys, sessions, recovery
+   * keys and tokens, resets, second-factor tickets, the challenges and email
+   * verifications of its username, and its `login-account` rate-limit row.
+   * Its audit rows are kept, detached from the account (`account_id` NULL,
+   * `deleted_account_id` set), or pruned now when `auditRetentionDays` would
+   * prune them, and an `account.deleted` row records the deletion with the
+   * account id and counts only. An account with a live session is refused
+   * (`account-has-sessions`, `details.liveSessions`) unless
+   * `revokeLiveSessions` is true. A missing account resolves `{ deleted:
+   * false }`. Not routed. It never touches `<p>_wallet_setups`, whose rows
+   * are immutable public salts (see docs/SERVER_API.md).
+   */
+  deleteAccount(
+    accountId: string,
+    options?: AccountDeletionOptions,
+    context?: RequestContext,
+  ): Promise<AccountDeletion>;
 
   /** Resolves a bearer token, sliding `last_seen_at`. Throws when invalid. */
   authenticate(token: string, context?: RequestContext): Promise<AuthenticatedIdentity>;
@@ -265,17 +359,15 @@ export interface IdentityService {
    * completed, revokes every session of the account, and issues a new one.
    * `authorizerSignature` is by the recovery key, `subjectSignature` by the
    * new key. Counted under the `account-change` rate limit of the account.
+   * With the `secondFactor` option and an account that needs it, the same
+   * statement issues a second-factor ticket (bound to the new key) instead of
+   * the session.
    */
   completeRecovery(
     recoveryToken: string,
     input: RecoveryCompletionInput,
     context?: RequestContext,
-  ): Promise<{
-    account: IdentityAccount;
-    wallets: readonly IdentityWallet[];
-    session: IssuedSession;
-    revokedSessionIds: readonly string[];
-  }>;
+  ): Promise<SecondFactor extends true ? ResetCompletionResult : SessionResult<ResetFields>>;
 
   /** The caller's account's last 20 audit events: action, time and client label only. */
   listSecurityEvents(token: string, context?: RequestContext): Promise<readonly SecurityEvent[]>;
@@ -365,17 +457,14 @@ export interface IdentityService {
    * the reset completed, closes the account's other live resets, revokes
    * every session and issues a new one. Every failure an unauthenticated
    * caller can cause is one `invalid-signature`; a code that verified but
-   * names the current key is `key-unchanged`.
+   * names the current key is `key-unchanged`. With the `secondFactor` option
+   * and an account that needs it, the same statement issues a second-factor
+   * ticket (bound to the new key) instead of the session.
    */
   completeAccountReset(
     input: AccountResetCompletionInput,
     context?: RequestContext,
-  ): Promise<{
-    account: IdentityAccount;
-    wallets: readonly IdentityWallet[];
-    session: IssuedSession;
-    revokedSessionIds: readonly string[];
-  }>;
+  ): Promise<SecondFactor extends true ? ResetCompletionResult : SessionResult<ResetFields>>;
 
   /**
    * Starts a signed-in reset from the caller's session: it becomes
@@ -453,8 +542,9 @@ export interface IdentityService {
 
   /**
    * Deletes expired challenges, verifications, and sessions, recovery tokens
-   * and account resets a day after they expire and, with `auditRetentionDays`, this service's
-   * older `account.*` and `session.*` audit rows. A dead session or recovery row that another
+   * and account resets and second-factor tickets a day after they expire and, with
+   * `auditRetentionDays`, this service's older `account.*` and `session.*` audit rows,
+   * those `deleteAccount` kept included. A dead session or recovery row that another
    * statement holds locked is skipped, never waited on; the next run deletes
    * it.
    */
@@ -466,5 +556,6 @@ export interface IdentityService {
     recoveryTokens: number;
     accountResets: number;
     auditEvents: number;
+    secondFactorTickets: number;
   }>;
 }

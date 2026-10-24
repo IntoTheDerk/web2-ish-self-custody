@@ -10,14 +10,22 @@ import { utf8 } from "../../encoding.js";
 import type { IdentityService } from "../contract.js";
 import { createIdentityService } from "../service.js";
 import { pgDriver, type PgQueryable } from "../sql.js";
-import type { IdentityServiceConfig } from "../types.js";
+import type { IdentityServiceConfig, SecondFactorIdentityServiceConfig } from "../types.js";
 
 export type PgIdentityServiceOptions = Readonly<{
   pool: PgQueryable;
-  config: IdentityServiceConfig;
+  /** A `SecondFactorIdentityServiceConfig` makes an `IdentityService<true>`. */
+  config: IdentityServiceConfig | SecondFactorIdentityServiceConfig;
 }>;
 
-export function createPgIdentityService(options: PgIdentityServiceOptions): IdentityService {
+export function createPgIdentityService(
+  options: PgIdentityServiceOptions & Readonly<{ config: SecondFactorIdentityServiceConfig }>,
+): IdentityService<true>;
+export function createPgIdentityService(
+  options: PgIdentityServiceOptions & Readonly<{ config: IdentityServiceConfig }>,
+): IdentityService;
+export function createPgIdentityService(options: PgIdentityServiceOptions): IdentityService<boolean>;
+export function createPgIdentityService(options: PgIdentityServiceOptions): IdentityService<boolean> {
   return createIdentityService(pgDriver(options.pool), options.config);
 }
 

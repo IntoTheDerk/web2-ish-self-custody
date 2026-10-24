@@ -49,8 +49,11 @@ import {
   bare,
   columns,
   retryUniqueViolation,
+  secondFactorTicketInsert,
   type AccountChangeDependencies,
 } from "./accountChanges.js";
+import type { ResetCompletionResult } from "./contract.js";
+import { SECOND_FACTOR_TICKET_TTL_SECONDS, type PendingTicket } from "./secondFactor.js";
 import { verifyAccountChangeSignature } from "./accountChangeSignature.js";
 import { IdentityError } from "./errors.js";
 import {
@@ -85,10 +88,8 @@ import type {
   AccountResetSettingName,
   AccountResetSettings,
   AccountResetStatus,
-  IdentityAccount,
   IdentityWallet,
   IssuedAccountReset,
-  IssuedSession,
   IssuedSignedInReset,
   PendingSignedInReset,
   ReauthenticationInput,
@@ -130,12 +131,7 @@ export type AccountResetOperations = Readonly<{
   completeAccountReset(
     input: AccountResetCompletionInput,
     context?: RequestContext,
-  ): Promise<{
-    account: IdentityAccount;
-    wallets: readonly IdentityWallet[];
-    session: IssuedSession;
-    revokedSessionIds: readonly string[];
-  }>;
+  ): Promise<ResetCompletionResult>;
   startSignedInReset(token: string, context?: RequestContext): Promise<IssuedSignedInReset>;
   abortSignedInReset(token: string, context?: RequestContext): Promise<{ aborted: boolean }>;
   completeSignedInReset(
@@ -626,6 +622,37 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
         throw resetRefused();
       }
 
+      // With the `secondFactor` option: the account, and whether it needs the
+      // factor, are read first, so the statement below can insert a ticket
+      // bound to the new key in place of the session. The host's `required`
+      // runs before the code is checked, so it must answer from the account
+      // alone and change nothing, and it runs only for a caller who names a
+      // live email reset of this username: the real `resetId` reaches only
+      // the delivered email (an anonymous start answers a decoy), so this
+      // path's timing cannot tell anyone else whether the account exists or
+      // has a factor.
+      let pendingTicket: PendingTicket | null = null;
+      if (deps.config.secondFactor !== undefined) {
+        const owner = optionalRow(
+          await sql.query(
+            `SELECT a.id
+               FROM ${p}_accounts a
+               JOIN ${p}_account_resets r ON r.account_id = a.id
+              WHERE a.service_profile_id = $1::text
+                AND a.username_normalized = $2::text
+                AND r.id = $3::uuid
+                AND r.kind = 'email'
+                AND r.completed_at IS NULL
+                AND r.aborted_at IS NULL
+                AND r.expires_at > COALESCE($4::timestamptz, now())`,
+            [serviceProfileId, usernameNormalized, resetId, requestNow(context)],
+          ),
+        );
+        if (owner !== null && (await deps.secondFactor.required(textColumn(owner, "id"), "email-reset", context))) {
+          pendingTicket = await deps.secondFactor.prepareTicket(textColumn(owner, "id"), challenge.id, context, false);
+        }
+      }
+
       // The code decision, attempt count and successful completion share one
       // SQL statement. Its account lock orders them with new starts; no caller
       // can observe a fifth attempt before a valid completion is committed.
@@ -743,7 +770,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                    WHERE s.id = targets.id
                    RETURNING s.id
                 ),
-                new_session AS (
+                new_session AS (${pendingTicket === null ? `
                   INSERT INTO ${p}_sessions (
                     account_id, token_hash, issued_at, expires_at, last_seen_at,
                     ip_hash, user_agent_hash, client_label
@@ -753,7 +780,13 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                          clock.at, $11::text, $12::text, $14::text
                     FROM ok, clock
                    WHERE (SELECT count(*) FROM revoked) >= 0
-                  RETURNING ${SESSION_COLUMNS.join(", ")}
+                  RETURNING ${SESSION_COLUMNS.join(", ")}` : secondFactorTicketInsert(p, "email-reset", "$7", "$15", {
+                    hash: "$9",
+                    ttl: "$10",
+                    ip: "$11",
+                    userAgent: "$12",
+                    label: "$14",
+                  })}
                 ),
                 logged AS (
                   INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -762,7 +795,7 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
                            'method', 'email',
                            'revokedSessions', (SELECT count(*) FROM revoked),
                            'closedResets', (SELECT count(*) FROM closed_resets),
-                           'sessionId', new_session.id
+                           '${pendingTicket === null ? "sessionId" : "secondFactorTicketId"}', new_session.id
                          ),
                          (SELECT at FROM clock)
                     FROM ok, new_session
@@ -792,12 +825,13 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
             newKey.addressNormalized,
             newKey.publicKey,
             fingerprint(newKey.address),
-            hashSessionToken(sessionTokenValue),
-            config.sessionTtlSeconds,
+            pendingTicket === null ? hashSessionToken(sessionTokenValue) : pendingTicket.ticketHash,
+            pendingTicket === null ? config.sessionTtlSeconds : SECOND_FACTOR_TICKET_TTL_SECONDS,
             client.ipHash,
             client.userAgentHash,
             codeHash,
             client.clientLabel,
+            ...(pendingTicket === null ? [] : [pendingTicket.challengeId]),
           ],
         );
       } catch (error) {
@@ -836,6 +870,16 @@ export function accountResetOperations(deps: AccountChangeDependencies): Account
       await notify("account.email-reset", account.id, instantColumn(first, "occurred_at"), context, {
         revokedSessions: revokedSessionIds.length,
       });
+      if (pendingTicket !== null) {
+        return Object.freeze({
+          account,
+          wallets: Object.freeze([wallet]),
+          revokedSessionIds,
+          secondFactor: "totp" as const,
+          ticket: pendingTicket.ticket,
+          expiresAt: instantColumn(first, "session_expires_at"),
+        });
+      }
       return Object.freeze({
         account,
         wallets: Object.freeze([wallet]),

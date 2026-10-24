@@ -33,7 +33,13 @@ export type {
 
 export { identityServiceDefaults, resolveIdentityServiceConfig } from "./config.js";
 
-export type { IdentityService } from "./contract.js";
+export type {
+  IdentityService,
+  LoginResult,
+  ResetCompletionResult,
+  SessionOrSecondFactor,
+  SessionResult,
+} from "./contract.js";
 
 export {
   EmailDeliveryError,
@@ -99,6 +105,8 @@ export type {
 
 export { challengePurposes } from "./types.js";
 export type {
+  AccountDeletion,
+  AccountDeletionOptions,
   AccountResetCompletionInput,
   AccountResetDelivery,
   AccountResetSettingInput,
@@ -121,6 +129,7 @@ export type {
   IssuedAccountReset,
   IssuedEmailVerification,
   IssuedRecovery,
+  IssuedSecondFactorTicket,
   IssuedSession,
   IssuedSignedInReset,
   ListedSession,
@@ -136,6 +145,12 @@ export type {
   RegistrationInput,
   RequestContext,
   ResolvedIdentityServiceConfig,
+  SecondFactorCompletionInput,
+  SecondFactorContext,
+  SecondFactorIdentityServiceConfig,
+  SecondFactorOptions,
+  SecondFactorPurpose,
+  SecondFactorVerdict,
   SecurityEvent,
   SecurityEventAction,
   SecurityEventHook,
