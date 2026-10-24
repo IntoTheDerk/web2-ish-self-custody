@@ -5,7 +5,7 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased (planned v0.14.0-alpha.0)
+## v0.14.0-alpha.0 — 2026-10-23 (alpha pre-release)
 
 Two identity-service additions: permanent account deletion (`deleteAccount`,
 migration 13) and an optional second sign-in factor verified by the host
