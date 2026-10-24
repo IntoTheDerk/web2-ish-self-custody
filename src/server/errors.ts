@@ -1,5 +1,6 @@
 export type IdentityErrorCode =
   | "account-exists"
+  | "account-has-sessions"
   | "account-not-found"
   | "challenge-consumed"
   | "challenge-expired"
@@ -21,6 +22,9 @@ export type IdentityErrorCode =
   | "reset-pending"
   | "reset-setting-refused"
   | "reset-unavailable"
+  | "second-factor-invalid"
+  | "second-factor-locked"
+  | "second-factor-ticket-invalid"
   | "service-profile-missing"
   | "session-expired"
   | "session-not-found"
@@ -31,6 +35,9 @@ export type IdentityErrorCode =
 
 const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze({
   "account-exists": 409,
+  // `deleteAccount` without `revokeLiveSessions` on an account that still has
+  // a live session. Server-side only; nothing was deleted.
+  "account-has-sessions": 409,
   "account-not-found": 404,
   "challenge-consumed": 409,
   "challenge-expired": 410,
@@ -63,6 +70,16 @@ const statusByCode: Readonly<Record<IdentityErrorCode, number>> = Object.freeze(
   // completed, another session's) or not available yet; or a start whose
   // session would expire before the reset became available. Needs a session.
   "reset-unavailable": 409,
+  // The second factor's code was wrong; the ticket has attempts left
+  // (`details.attemptsRemaining`). Only a caller that passed the password
+  // proof holds a ticket, so none of these three reveals an account.
+  "second-factor-invalid": 401,
+  // The host's verifier refused the factor (its own lockout).
+  "second-factor-locked": 423,
+  // The ticket is unknown, used, expired or out of attempts, or the account
+  // changed (suspended, deleted, or its enrolled key replaced) since it was
+  // issued: sign in again.
+  "second-factor-ticket-invalid": 401,
   "service-profile-missing": 503,
   "session-expired": 401,
   "session-not-found": 401,

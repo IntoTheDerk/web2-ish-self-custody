@@ -5,6 +5,150 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased (planned v0.14.0-alpha.0)
+
+Two identity-service additions: permanent account deletion (`deleteAccount`,
+migration 13) and an optional second sign-in factor verified by the host
+(`secondFactor`, migration 12). Derivation, every profile, codec, transcript,
+account-change action and committed vector is unchanged, and no vector is
+added: neither addition defines anything a client computes. Without the
+`secondFactor` option every sign-in statement is the one v0.13.0-alpha.0 ran
+and answers as it did.
+
+### Breaking changes
+
+- **Apply migrations 12 and 13 before this version serves traffic.** Both are
+  additive (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, a trigger
+  created once), so v0.13.0-alpha.0 workers keep working on the migrated
+  schema and a rolling cutover is safe once `migrate()` has run. This
+  version's `pruneExpired` reads both, and `deleteAccount` and the second
+  factor write them.
+- **`IdentityService` gains two required methods**, `completeSecondFactor`
+  and `deleteAccount`, which breaks hand-written implementations and test
+  doubles. Services made by `createIdentityService` and the adapters have
+  them.
+- **`IdentityService` is generic: `IdentityService<SecondFactor extends
+  boolean = false>`.** `IdentityService` (the default) keeps every signature,
+  except that the results of `login`, `completeAccountReset` and
+  `completeRecovery` also declare `secondFactor?`, `ticket?` and
+  `expiresAt?` as absent (`SessionResult<T>`). On `IdentityService<true>`
+  those three resolve to a union with a ticket in place of `session`
+  (`LoginResult`, `ResetCompletionResult`). `createIdentityService`,
+  `createPgIdentityService` and `createNeonIdentityService` are overloaded:
+  a `SecondFactorIdentityServiceConfig` returns `IdentityService<true>`.
+  `createIdentityRouter` and `createSessionResponder` take
+  `IdentityService<boolean>`.
+- **`IdentityServiceConfig` gains `secondFactor?: null`**, so a config that
+  carries a factor must be typed `SecondFactorIdentityServiceConfig`.
+- **`pruneExpired` returns `secondFactorTickets` too**, and with
+  `auditRetentionDays` it also prunes the audit rows `deleteAccount` kept.
+- **`IdentityErrorCode` gains `account-has-sessions` (409),
+  `second-factor-invalid` (401), `second-factor-locked` (423) and
+  `second-factor-ticket-invalid` (401)**; an exhaustive switch over it needs
+  the four cases.
+- **Any account deletion now marks its detached audit rows.** Migration 13's
+  trigger fills `deleted_account_id` when the foreign key's `ON DELETE SET
+  NULL` detaches a row, including an operator's own `DELETE`. Such a row is
+  still pruned only when `deleteAccount` deleted its account.
+
+### Account deletion (migration 13 `account-deletion`)
+
+- `deleteAccount(accountId, { revokeLiveSessions? }?, context?)` resolves
+  `{ deleted, revokedSessions }`. Server-side only; no route mounts it. One
+  statement deletes the account, its enrolled keys, sessions, recovery keys
+  and tokens, resets, second-factor tickets, the challenges and email
+  verifications of its username, and its `login-account` rate-limit row.
+  Other rate-limit rows stay until `pruneExpired` removes them, within a day:
+  those keyed with an IP hash, and the three keyed by the account's email
+  address (`email-verification`, `email-verification-recipient`,
+  `account-reset-recipient`), kept so that deleting and re-registering cannot
+  reset a mail-flood cap.
+- The statement calls the new `<p>_delete_account` function (migration 13),
+  which locks the account and only then counts live sessions, in a fresh
+  snapshot: a session committed by a login that held the account lock when
+  the deletion started is counted (refusing the deletion, or in
+  `revokedSessions`), never cascaded away unseen.
+- Refused with `account-has-sessions` (`details.liveSessions`), deleting
+  nothing, while the account has a live session, unless `revokeLiveSessions`
+  is true. A missing account resolves `{ deleted: false, revokedSessions: 0 }`
+  (idempotent); a malformed id is `invalid-request`.
+- Lock order of the account changes: the account `FOR NO KEY UPDATE` (never
+  `FOR UPDATE` first), then enrolled keys, recovery keys, recovery tokens,
+  resets and tickets, then sessions in id order, as `revokeOtherSessions` and
+  `rotateSignInKey` lock them; the children are locked before the account
+  row is deleted.
+- Audit: rows that `auditRetentionDays` would prune are deleted now; the rest
+  are kept with `account_id` NULL and the new `deleted_account_id` and
+  `deleted_service_profile_id` columns set, and stay under the deleting
+  service's retention. An `account.deleted` row records the deletion with the
+  account id (in `deleted_account_id`) and counts only, no email or other
+  personal data.
+- Not deleted: `<p>_wallet_setups`, whose rows are immutable public salts
+  keyed by username (migration 5); deleting one could make a per-account
+  wallet underivable. It holds no account id.
+
+### Second sign-in factor (migration 12 `second-factor-tickets`)
+
+- `SecondFactorIdentityServiceConfig.secondFactor` = `{ required(accountId,
+  context), verify(accountId, ticketId, code) }`. After a password proof
+  (login, `completeAccountReset`, `completeRecovery`), when `required` does
+  not answer `false`, the step's statement inserts a second-factor ticket in
+  place of the session and the step answers `{ secondFactor: "totp", ticket,
+  expiresAt }`. The ticket is 32 random bytes, stored as a domain-separated
+  SHA-256 only, bound to the account, the challenge (one per challenge) and
+  the enrolled key the proof was for, valid 5 minutes and 5 attempts.
+- `completeSecondFactor({ ticket, code }, context?)`, routed as `POST
+  /sessions/second-factor` only on such a service, reserves an attempt,
+  calls `verify`, and on `"ok"` issues the session in the statement that
+  consumes the ticket (account active, key still enrolled), as a login
+  would. `"invalid"` counts the attempt; the fifth kills the ticket.
+  `"locked"` refuses.
+- New rate-limit rule `login-account`: 25 wrong second-factor codes per
+  account an hour, whatever the ticket, its purpose or the caller's address.
+  Every code is counted before `verify` runs and given back on `"ok"` or
+  `"locked"`; a full bucket refuses (`rate-limited`) every submission on every
+  outstanding ticket of the account, and a login or recovery that needs the
+  factor before it issues a ticket.
+- `completeAccountReset` consults `required` only for a caller who names a
+  live email reset of the username, so its timing reveals nothing about an
+  account to a caller without the emailed reset id.
+- `POST /sessions` answers `{ secondFactor, ticket, expiresAt }` with no
+  cookie for an account that needs the factor.
+- Audit `session.second-factor-ok { purpose, sessionId }` (plus
+  `account.login { secondFactor: true }` for a login) and
+  `session.second-factor-failed { purpose, reason, attempts, exhausted }`.
+  A gated reset or recovery audits `secondFactorTicketId` where it audited
+  `sessionId`.
+- The signed-in reset issues no session, so it is not gated; the next
+  sign-in with the new password is.
+- The SDK stores no factor data and sees no secret: the code goes only to
+  `verify`.
+
+### Public exports
+
+- Added (`web2-ish-self-custody/server`): types `AccountDeletion`,
+  `AccountDeletionOptions`, `IssuedSecondFactorTicket`, `LoginResult`,
+  `ResetCompletionResult`, `SecondFactorCompletionInput`,
+  `SecondFactorContext`, `SecondFactorIdentityServiceConfig`,
+  `SecondFactorOptions`, `SecondFactorPurpose`, `SecondFactorVerdict`,
+  `SessionOrSecondFactor`, `SessionResult`.
+- Changed: `IdentityService` (generic, two methods), `IdentityServiceConfig`
+  (`secondFactor?: null`), `IdentityErrorCode` (four codes),
+  `createIdentityService`, `createPgIdentityService`,
+  `createNeonIdentityService` (overloads), `createIdentityRouter`,
+  `createSessionResponder` (`IdentityService<boolean>`),
+  `NeonIdentityServiceOptions.config` and `PgIdentityServiceOptions.config`
+  (either config type), `ResolvedIdentityServiceConfig` (`secondFactor?`,
+  present only when configured), `resolveIdentityServiceConfig` (either
+  config type), `identityMigrations` (versions 12 and 13).
+
+### Tests
+
+- `test/server/secondFactor.integration.test.ts` and
+  `test/server/accountDeletion.integration.test.ts` (PostgreSQL) and
+  `test/server/secondFactor.test.ts`. The six suites that assert the applied
+  migration list now expect versions 1 to 13; no other existing test changed.
+
 ## v0.13.0-alpha.0 — 2026-10-22 (alpha pre-release)
 
 Two account-reset security fixes and a harder sign-in profile. The signed-in

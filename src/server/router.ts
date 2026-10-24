@@ -29,6 +29,7 @@ import {
   type LoginInput,
   type RegistrationInput,
   type RequestContext,
+  type ResolvedIdentityServiceConfig,
 } from "./types.js";
 import { parseWalletVault } from "../vault.js";
 
@@ -63,7 +64,8 @@ export type IdentityRouterOptions = Readonly<{
    * "Firefox on macOS", computed by the host from the request (typically from
    * an allowlist of browser and OS families). It is called only for the two
    * routes that issue a session, `POST /accounts` and `POST /sessions`, and is
-   * stored on that session. A result outside `^[A-Za-z0-9 .()-]{1,64}$`, or a
+   * stored on that session (with the second sign-in factor, on the ticket a
+   * pending login issues, and from it on the session the second step issues). A result outside `^[A-Za-z0-9 .()-]{1,64}$`, or a
    * hook that throws, stores no label and never fails the sign-in. Never
    * return the raw User-Agent.
    */
@@ -85,7 +87,7 @@ const safeFieldName = /^[A-Za-z0-9_]{1,40}$/u;
 const unsafeMethods: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 type RouterContext = Readonly<{
-  service: IdentityService;
+  service: IdentityService<boolean>;
   basePath: string;
   cookieName: string;
   cookieDomain: string | undefined;
@@ -152,13 +154,13 @@ export type SessionResponder = (
 
 /** The router's cookie settings, validated once. */
 type CookieSettings = Readonly<{
-  service: IdentityService;
+  service: IdentityService<boolean>;
   cookieName: string;
   cookieDomain: string | undefined;
   useCookies: boolean;
 }>;
 
-function cookieSettings(service: IdentityService, options: IdentityRouterOptions): CookieSettings {
+function cookieSettings(service: IdentityService<boolean>, options: IdentityRouterOptions): CookieSettings {
   const cookieName = options.cookieName ?? "__Host-w2sc_session";
   if (!cookieNamePattern.test(cookieName)) {
     throw new TypeError("cookieName must be a valid cookie token.");
@@ -186,7 +188,7 @@ function cookieSettings(service: IdentityService, options: IdentityRouterOptions
  * then byte for byte the router's.
  */
 export function createSessionResponder(
-  service: IdentityService,
+  service: IdentityService<boolean>,
   options: IdentityRouterOptions = {},
 ): SessionResponder {
   const settings = cookieSettings(service, options);
@@ -194,7 +196,7 @@ export function createSessionResponder(
 }
 
 export function createIdentityRouter(
-  service: IdentityService,
+  service: IdentityService<boolean>,
   options: IdentityRouterOptions = {},
 ): (request: Request) => Promise<Response> {
   const { cookieName } = cookieSettings(service, options);
@@ -226,7 +228,11 @@ export function createIdentityRouter(
     emailVerification: options.emailVerification ?? null,
     authorizeVaultRead: options.authorizeVaultRead,
     clientLabel: options.clientLabel ?? null,
-    routes: accountSecurityRoutes ? routesWithAccountSecurity : routes,
+    routes: withSecondFactorRoute(
+      accountSecurityRoutes ? routesWithAccountSecurity : routes,
+      // Read defensively: a hand-written service double may carry no config.
+      (service.config as ResolvedIdentityServiceConfig | undefined)?.secondFactor !== undefined,
+    ),
     sessionByIdRoute: accountSecurityRoutes ? sessionByIdRoute : null,
   });
 
@@ -678,7 +684,45 @@ async function handleLogin(ctx: RouterContext, request: Request): Promise<Respon
     signature: requireString(body, "signature"),
   };
   const result = await ctx.service.login(input, requestContext(ctx, request, true));
+  if (result.session === undefined) {
+    // The second factor is pending: no session, so no cookie. The ticket is
+    // the client's to send to `POST /sessions/second-factor`; the account
+    // stays undisclosed until the factor passes.
+    return jsonResponse(
+      { secondFactor: result.secondFactor, ticket: result.ticket, expiresAt: result.expiresAt },
+      200,
+    );
+  }
   return sessionResponse(ctx, { account: result.account }, result.session, 200);
+}
+
+/**
+ * `POST /sessions/second-factor { ticket, code }`, mounted only on a service
+ * with the `secondFactor` option. Answers as login does once the factor
+ * passes. The session's client columns are the ones stored with the ticket at
+ * login, so the label hook does not run here.
+ */
+async function handleSecondFactor(ctx: RouterContext, request: Request): Promise<Response> {
+  const body = await readJsonObject(request, ["ticket", "code"]);
+  const result = await ctx.service.completeSecondFactor(
+    { ticket: requireString(body, "ticket"), code: requireString(body, "code") },
+    requestContext(ctx, request),
+  );
+  return sessionResponse(ctx, { account: result.account }, result.session, 200);
+}
+
+/** Built once per router; the shared tables are never mutated. */
+function withSecondFactorRoute(
+  table: ReadonlyMap<string, ReadonlyMap<string, RouteHandler>>,
+  enabled: boolean,
+): ReadonlyMap<string, ReadonlyMap<string, RouteHandler>> {
+  if (!enabled) {
+    return table;
+  }
+  return new Map<string, ReadonlyMap<string, RouteHandler>>([
+    ...table,
+    ["/sessions/second-factor", new Map<string, RouteHandler>([["POST", handleSecondFactor]])],
+  ]);
 }
 
 async function handleCurrentSession(

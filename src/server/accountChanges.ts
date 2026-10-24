@@ -40,7 +40,13 @@ import {
   verifyAccountChangeSignature,
 } from "./accountChangeSignature.js";
 import { canonicalWalletIdentity, type CanonicalWalletIdentity } from "./challenge.js";
+import type { ResetCompletionResult } from "./contract.js";
 import { IdentityError } from "./errors.js";
+import {
+  SECOND_FACTOR_TICKET_TTL_SECONDS,
+  type PendingTicket,
+  type SecondFactorGate,
+} from "./secondFactor.js";
 import {
   mapAccount,
   mapSession,
@@ -72,7 +78,6 @@ import {
   type IdentityRecoveryKey,
   type IdentityWallet,
   type IssuedRecovery,
-  type IssuedSession,
   type RecoveryBeginInput,
   type RecoveryCompletionInput,
   type RecoveryKeyEnrollmentInput,
@@ -106,6 +111,8 @@ export type RateLimitName =
 
 export type AccountChangeDependencies = Readonly<{
   sql: SqlDriver;
+  /** The `secondFactor` option's gate; inert without the option. */
+  secondFactor: SecondFactorGate;
   config: ResolvedIdentityServiceConfig;
   /** The validated table prefix. */
   p: string;
@@ -172,12 +179,7 @@ export type AccountChangeOperations = Readonly<{
     recoveryToken: string,
     input: RecoveryCompletionInput,
     context?: RequestContext,
-  ): Promise<{
-    account: IdentityAccount;
-    wallets: readonly IdentityWallet[];
-    session: IssuedSession;
-    revokedSessionIds: readonly string[];
-  }>;
+  ): Promise<ResetCompletionResult>;
   listSecurityEvents(token: string, context?: RequestContext): Promise<readonly SecurityEvent[]>;
   revokeRecoveryKeys(accountId: string, context?: RequestContext): Promise<number>;
   /** Reports an event to the host hook after its commit (also used by `revokeOtherSessions`). */
@@ -230,6 +232,40 @@ export const ACCOUNT_COLUMNS = [
 ] as const;
 export const SESSION_COLUMNS = ["id", "account_id", "issued_at", "expires_at", "last_seen_at"] as const;
 const RECOVERY_KEY_COLUMNS = ["public_key", "status", "created_at", "used_at", "removed_at"] as const;
+
+/**
+ * The `new_session` CTE body of a reset or recovery completion when the
+ * second factor gates its session: a ticket row for `ok.account_id`, bound
+ * to the new key (`keyParam`) and the consumed challenge (`challengeParam`),
+ * returning the session columns' names so the statement around it is
+ * unchanged. It reuses the session insert's parameters in their positions:
+ * the digest, the lifetime and the three client columns.
+ */
+export function secondFactorTicketInsert(
+  p: string,
+  purpose: "email-reset" | "recovery",
+  keyParam: string,
+  challengeParam: string,
+  params: Readonly<{ hash: string; ttl: string; ip: string; userAgent: string; label: string }> = {
+    hash: "$10",
+    ttl: "$11",
+    ip: "$12",
+    userAgent: "$13",
+    label: "$14",
+  },
+): string {
+  return `
+                  INSERT INTO ${p}_second_factor_tickets (
+                    account_id, ticket_hash, challenge_id, public_key, purpose,
+                    ip_hash, user_agent_hash, client_label, created_at, expires_at
+                  )
+                  SELECT ok.account_id, ${params.hash}::text, ${challengeParam}::uuid, ${keyParam}::text, '${purpose}',
+                         ${params.ip}::text, ${params.userAgent}::text, ${params.label}::text, clock.at,
+                         date_trunc('milliseconds', clock.at + (interval '1 second' * ${params.ttl}::double precision))
+                    FROM ok, clock
+                   WHERE (SELECT count(*) FROM revoked) >= 0
+                  RETURNING id, account_id, created_at AS issued_at, expires_at, created_at AS last_seen_at`;
+}
 
 export function columns(alias: string, names: readonly string[], prefix: string): string {
   return names.map((name) => `${alias}.${name} AS ${prefix}${name}`).join(", ");
@@ -1390,6 +1426,16 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
         throw walletConflict();
       }
 
+      // With the `secondFactor` option and an account that needs it, the
+      // statement below inserts a ticket bound to the new key in place of the
+      // session (the same columns, in the same position of the lock order).
+      const pendingTicket: PendingTicket | null = (await deps.secondFactor.required(
+        recovery.accountId,
+        "recovery",
+        context,
+      ))
+        ? await deps.secondFactor.prepareTicket(recovery.accountId, challenge.id, context, true)
+        : null;
       const sessionTokenValue = generateSessionToken();
       const client = deps.sessionClientColumns(context);
       let rows: SqlRow[];
@@ -1479,7 +1525,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                    WHERE s.id = targets.id
                    RETURNING s.id
                 ),
-                new_session AS (
+                new_session AS (${pendingTicket === null ? `
                   INSERT INTO ${p}_sessions (
                     account_id, token_hash, issued_at, expires_at, last_seen_at,
                     ip_hash, user_agent_hash, client_label
@@ -1489,7 +1535,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          clock.at, $12::text, $13::text, $14::text
                     FROM ok, clock
                    WHERE (SELECT count(*) FROM revoked) >= 0
-                  RETURNING ${SESSION_COLUMNS.join(", ")}
+                  RETURNING ${SESSION_COLUMNS.join(", ")}` : secondFactorTicketInsert(p, "recovery", "$8", "$15")}
                 ),
                 logged AS (
                   INSERT INTO ${p}_audit_events (account_id, action, metadata, created_at)
@@ -1497,7 +1543,7 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                          jsonb_build_object(
                            'method', 'recovery-key',
                            'revokedSessions', (SELECT count(*) FROM revoked),
-                           'sessionId', new_session.id
+                           '${pendingTicket === null ? "sessionId" : "secondFactorTicketId"}', new_session.id
                          ),
                          (SELECT at FROM clock)
                     FROM ok, new_session
@@ -1525,11 +1571,12 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
             newKey.addressNormalized,
             newKey.publicKey,
             fingerprint(newKey.address),
-            hashSessionToken(sessionTokenValue),
-            config.sessionTtlSeconds,
+            pendingTicket === null ? hashSessionToken(sessionTokenValue) : pendingTicket.ticketHash,
+            pendingTicket === null ? config.sessionTtlSeconds : SECOND_FACTOR_TICKET_TTL_SECONDS,
             client.ipHash,
             client.userAgentHash,
             client.clientLabel,
+            ...(pendingTicket === null ? [] : [pendingTicket.challengeId]),
           ],
         );
       } catch (error) {
@@ -1558,6 +1605,16 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
       await notify("account.recover", account.id, instantColumn(first, "occurred_at"), context, {
         revokedSessions: revokedSessionIds.length,
       });
+      if (pendingTicket !== null) {
+        return Object.freeze({
+          account,
+          wallets: Object.freeze([wallet]),
+          revokedSessionIds,
+          secondFactor: "totp" as const,
+          ticket: pendingTicket.ticket,
+          expiresAt: instantColumn(first, "session_expires_at"),
+        });
+      }
       return Object.freeze({
         account,
         wallets: Object.freeze([wallet]),

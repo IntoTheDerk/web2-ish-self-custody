@@ -12,7 +12,8 @@ import { accountChangeOperations, type RateLimitName } from "./accountChanges.js
 import { accountResetOperations } from "./accountResets.js";
 import { assertStrictEd25519PublicKey } from "./accountChangeSignature.js";
 import { accountWalletOperations } from "./accountWallets.js";
-import type { IdentityService } from "./contract.js";
+import { secondFactorGate } from "./secondFactor.js";
+import type { IdentityService, LoginResult } from "./contract.js";
 import { IdentityError } from "./errors.js";
 import { runIdentityMigrations } from "./migrations.js";
 import {
@@ -61,6 +62,8 @@ import {
   type IdentityServiceConfig,
   type IdentityWallet,
   type IssuedEmailVerification,
+  type AccountDeletion,
+  type AccountDeletionOptions,
   type IssuedSession,
   type ListedSession,
   type LoginInput,
@@ -68,6 +71,7 @@ import {
   type RegistrationInput,
   type RequestContext,
   type ResolvedIdentityServiceConfig,
+  type SecondFactorIdentityServiceConfig,
 } from "./types.js";
 
 const tablePrefixPattern = /^[a-z][a-z0-9_]{0,31}$/u;
@@ -137,6 +141,15 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
     limit: 8,
     windowSeconds: 3_600,
   }),
+  // Codes submitted to the second factor of one account, whatever the ticket
+  // or the caller's address. Only used with the `secondFactor` option. Each
+  // submission reserves a unit before the host's `verify` runs and gives it
+  // back when the verdict is `ok` or `locked`, so only wrong codes (and
+  // verifier failures) stay counted. A full bucket refuses every submission
+  // on every outstanding ticket of the account, and a sign-in that needs the
+  // factor is refused a new ticket: a holder of the password gets at most 25
+  // wrong codes an hour.
+  loginAccount: Object.freeze({ id: "login-account", limit: 25, windowSeconds: 3_600 }),
 });
 
 function requireRule(name: string): RateLimitRule {
@@ -238,10 +251,28 @@ function resetPendingRevocation(): IdentityError {
   );
 }
 
+/**
+ * The identity service over one SQL driver. Given a
+ * `SecondFactorIdentityServiceConfig` it is an `IdentityService<true>`, whose
+ * sign-in steps may answer with a second-factor ticket; otherwise every
+ * sign-in step answers with a session, exactly as before the option existed.
+ */
+export function createIdentityService(
+  sql: SqlDriver,
+  config: SecondFactorIdentityServiceConfig,
+): IdentityService<true>;
 export function createIdentityService(
   sql: SqlDriver,
   config: IdentityServiceConfig,
-): IdentityService {
+): IdentityService;
+export function createIdentityService(
+  sql: SqlDriver,
+  config: IdentityServiceConfig | SecondFactorIdentityServiceConfig,
+): IdentityService<boolean>;
+export function createIdentityService(
+  sql: SqlDriver,
+  config: IdentityServiceConfig | SecondFactorIdentityServiceConfig,
+): IdentityService<boolean> {
   const resolved: ResolvedIdentityServiceConfig =
     resolveIdentityServiceConfig(config);
   const p = assertTablePrefix(resolved.tablePrefix);
@@ -278,12 +309,8 @@ export function createIdentityService(
    * The bucket is hashed so unregistered usernames probed by an attacker are
    * not persisted in the clear.
    */
-  const enforceRateLimit = async (
-    rule: RateLimitRule,
-    subject: readonly string[],
-    context: RequestContext | undefined,
-  ): Promise<void> => {
-    const bucket = bytesToHex(
+  const rateLimitBucket = (rule: RateLimitRule, subject: readonly string[]): string =>
+    bytesToHex(
       sha256(
         utf8(
           [RATE_LIMIT_BUCKET_DOMAIN, serviceProfileId, rule.id, ...subject].join(
@@ -292,6 +319,56 @@ export function createIdentityService(
         ),
       ),
     );
+
+  const rateLimited = (
+    rule: RateLimitRule,
+    windowStart: Date,
+    context: RequestContext | undefined,
+  ): IdentityError => {
+    const reference = context?.now ?? new Date();
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil(
+        (windowStart.getTime() + rule.windowSeconds * 1_000 - reference.getTime()) / 1_000,
+      ),
+    );
+    return new IdentityError("Too many requests; retry later.", "rate-limited", {
+      rule: rule.id,
+      retryAfterSeconds,
+    });
+  };
+
+  /**
+   * Reads a bucket without counting: refuses while its window holds `limit`
+   * or more. For a rule counted by something other than the call it guards
+   * (`login-account` counts second-factor codes and also guards sign-ins).
+   */
+  const checkRateLimit = async (
+    rule: RateLimitRule,
+    subject: readonly string[],
+    context: RequestContext | undefined,
+  ): Promise<void> => {
+    const row = optionalRow(
+      await sql.query(
+        `SELECT count, window_start
+           FROM ${p}_rate_limits
+          WHERE bucket = $1::text
+            AND window_start + (interval '1 second' * $2::double precision)
+                > COALESCE($3::timestamptz, now())`,
+        [rateLimitBucket(rule, subject), rule.windowSeconds, requestNow(context)],
+      ),
+    );
+    if (row !== null && integerColumn(row, "count") >= rule.limit) {
+      throw rateLimited(rule, instantColumn(row, "window_start"), context);
+    }
+  };
+
+  const enforceRateLimit = async (
+    rule: RateLimitRule,
+    subject: readonly string[],
+    context: RequestContext | undefined,
+  ): Promise<void> => {
+    const bucket = rateLimitBucket(rule, subject);
     const rows = await sql.query(
       `WITH clock AS (SELECT COALESCE($4::timestamptz, now()) AS at)
        INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
@@ -316,21 +393,7 @@ export function createIdentityService(
       () => new IdentityError("Rate limit bookkeeping failed.", "invalid-request"),
     );
     if (integerColumn(row, "count") > rule.limit) {
-      const windowStart = instantColumn(row, "window_start");
-      const reference = context?.now ?? new Date();
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil(
-          (windowStart.getTime() +
-            rule.windowSeconds * 1_000 -
-            reference.getTime()) /
-            1_000,
-        ),
-      );
-      throw new IdentityError("Too many requests; retry later.", "rate-limited", {
-        rule: rule.id,
-        retryAfterSeconds,
-      });
+      throw rateLimited(rule, instantColumn(row, "window_start"), context);
     }
   };
 
@@ -682,8 +745,63 @@ export function createIdentityService(
     );
   };
 
+  const loginAccountRule = requireRule("loginAccount");
+  const secondFactor = secondFactorGate({
+    sql,
+    config: resolved,
+    p,
+    sessionClientColumns,
+    checkAccountLimit: (accountId, context) => checkRateLimit(loginAccountRule, [accountId], context),
+    reserveAccountGuess: async (accountId, context) => {
+      // `enforceRateLimit`'s count, which also answers the window it counted
+      // in, exactly, so the release can find it again.
+      const row = requireSingleRow(
+        await sql.query(
+          `WITH clock AS (SELECT COALESCE($4::timestamptz, now()) AS at)
+           INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
+           SELECT $1::text, $2::text, 1, clock.at, clock.at FROM clock
+           ON CONFLICT (bucket) DO UPDATE
+             SET count = CASE
+                   WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
+                   THEN 1
+                   ELSE rl.count + 1
+                 END,
+                 window_start = CASE
+                   WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
+                   THEN excluded.window_start
+                   ELSE rl.window_start
+                 END,
+                 updated_at = excluded.updated_at
+           RETURNING count, window_start, to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS window_key`,
+          [
+            rateLimitBucket(loginAccountRule, [accountId]),
+            loginAccountRule.id,
+            loginAccountRule.windowSeconds,
+            requestNow(context),
+          ],
+        ),
+        () => new IdentityError("Rate limit bookkeeping failed.", "invalid-request"),
+      );
+      if (integerColumn(row, "count") > loginAccountRule.limit) {
+        throw rateLimited(loginAccountRule, instantColumn(row, "window_start"), context);
+      }
+      return textColumn(row, "window_key");
+    },
+    releaseAccountGuess: async (accountId, windowKey) => {
+      // Only in the window the unit was counted in: a window that rolled over
+      // since then never counted it.
+      await sql.query(
+        `UPDATE ${p}_rate_limits
+            SET count = count - 1
+          WHERE bucket = $1::text AND window_start = $2::timestamptz AND count > 0`,
+        [rateLimitBucket(loginAccountRule, [accountId]), windowKey],
+      );
+    },
+  });
+
   const recipientRule = requireRule("accountResetRecipient");
   const accountChangeDependencies = Object.freeze({
+    secondFactor,
     sql,
     config: resolved,
     p,
@@ -705,9 +823,68 @@ export function createIdentityService(
   const accountChanges = accountChangeOperations(accountChangeDependencies);
   const accountResets = accountResetOperations(accountChangeDependencies);
 
+  /**
+   * Permanently deletes one account and everything this service stores for
+   * it, in ONE statement. Lock order, that of the account changes: the
+   * account (FOR NO KEY UPDATE, never FOR UPDATE first; the row is deleted
+   * last), then its enrolled keys, recovery keys, recovery tokens, resets and
+   * second-factor tickets, then its sessions in id order, as revoke-others
+   * and `rotateSignInKey` lock them; then the deletes. The children are
+   * locked explicitly before the account row goes, so the cascade finds them
+   * already held and never takes a session lock after the account's.
+   */
+  const deleteAccount = async (
+    accountId: string,
+    options: AccountDeletionOptions | undefined,
+    context: RequestContext | undefined,
+  ): Promise<AccountDeletion> => {
+    if (typeof accountId !== "string" || !uuidPattern.test(accountId.trim().toLowerCase())) {
+      throw new IdentityError("accountId must be an account id (a UUID).", "invalid-request");
+    }
+    const id = accountId.trim().toLowerCase();
+    if (options !== undefined && (typeof options !== "object" || options === null)) {
+      throw new IdentityError("options must be an object.", "invalid-request");
+    }
+    const revokeLive = options?.revokeLiveSessions ?? false;
+    if (typeof revokeLive !== "boolean") {
+      throw new IdentityError("revokeLiveSessions must be a boolean.", "invalid-request");
+    }
+    // One statement: the function locks the account first and then reads the
+    // sessions in a fresh snapshot (migration 13), so a session committed
+    // while the deletion waited for the lock is counted, not cascaded away.
+    const rows = await sql.query(
+      `SELECT account_found AS found, live_sessions, account_deleted AS deleted,
+              revoked_sessions AS revoked, deletion_logged AS logged
+         FROM ${p}_delete_account($1::uuid, $2::text, $3::timestamptz, $4::boolean, $5::integer, $6::text)`,
+      [
+        id,
+        serviceProfileId,
+        requestNow(context),
+        revokeLive,
+        resolved.auditRetentionDays,
+        rateLimitBucket(loginAccountRule, [id]),
+      ],
+    );
+    const row = requireSingleRow(
+      rows,
+      () => new IdentityError("Account deletion did not report counts.", "invalid-request"),
+    );
+    if (integerColumn(row, "found") === 0) {
+      return Object.freeze({ deleted: false, revokedSessions: 0 });
+    }
+    if (integerColumn(row, "deleted") === 0) {
+      throw new IdentityError(
+        "The account still has live sessions; pass revokeLiveSessions to revoke them with the deletion.",
+        "account-has-sessions",
+        { liveSessions: integerColumn(row, "live_sessions") },
+      );
+    }
+    return Object.freeze({ deleted: true, revokedSessions: integerColumn(row, "revoked") });
+  };
+
   let cachedDerivationProfile: PublishedDerivationProfile | null = null;
 
-  const service: IdentityService = Object.freeze<IdentityService>({
+  const service: IdentityService<boolean> = Object.freeze<IdentityService<boolean>>({
     config: resolved,
 
     async migrate(): Promise<readonly number[]> {
@@ -1053,10 +1230,7 @@ export function createIdentityService(
       });
     },
 
-    async login(
-      input: LoginInput,
-      context?: RequestContext,
-    ): Promise<{ account: IdentityAccount; session: IssuedSession }> {
+    async login(input: LoginInput, context?: RequestContext): Promise<LoginResult> {
       const usernameNormalized = normalizeUsername(input.username);
       await enforceRateLimit(
         requireRule("login"),
@@ -1134,6 +1308,13 @@ export function createIdentityService(
       }
       if (verified === null) {
         throw invalidSignature;
+      }
+
+      // Only with the `secondFactor` option, and only after the signature
+      // verified: an account that needs the factor gets a ticket, no session.
+      if (await secondFactor.required(account.id, "login", context)) {
+        const ticket = await secondFactor.issueLoginTicket(account.id, challenge.id, verified, context);
+        return Object.freeze({ account, ...ticket });
       }
 
       const issued = await issueSession(
@@ -1544,6 +1725,14 @@ export function createIdentityService(
       return Object.freeze({ revokedSessionIds });
     },
 
+    async completeSecondFactor(input, context) {
+      return secondFactor.completeSecondFactor(input, context);
+    },
+
+    async deleteAccount(accountId, options, context) {
+      return deleteAccount(accountId, options, context);
+    },
+
     rotateSignInKey: accountChanges.rotateSignInKey,
     changeEmail: accountChanges.changeEmail,
     enrollRecoveryKey: accountChanges.enrollRecoveryKey,
@@ -1906,6 +2095,7 @@ export function createIdentityService(
       recoveryTokens: number;
       accountResets: number;
       auditEvents: number;
+      secondFactorTickets: number;
     }> {
       // Dead sessions are deleted only if no other statement holds their row
       // lock (SKIP LOCKED): maintenance never waits on a revocation, so it can
@@ -1981,9 +2171,35 @@ export function createIdentityService(
                  WHERE $4::integer IS NOT NULL
                    AND e.created_at <= (SELECT at FROM clock) - (interval '1 day' * $4::integer)
                    AND (e.action LIKE 'account.%' OR e.action LIKE 'session.%')
-                   AND e.account_id IN (
-                     SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                   AND (
+                     e.account_id IN (
+                       SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                     )
+                     -- The rows deleteAccount kept (migration 13), and those
+                     -- the cascade detached from an account it deleted.
+                     OR e.deleted_service_profile_id = $2::text
+                     OR e.deleted_account_id IN (
+                       SELECT d.deleted_account_id
+                         FROM ${p}_audit_events d
+                        WHERE d.action = 'account.deleted'
+                          AND d.deleted_service_profile_id = $2::text
+                     )
                    )
+                 RETURNING 1
+              ),
+              -- A second-factor ticket a day past its expiry, unless another
+              -- statement holds it locked.
+              expired_tickets AS (
+                DELETE FROM ${p}_second_factor_tickets
+                 WHERE id IN (
+                   SELECT t.id
+                     FROM ${p}_second_factor_tickets t
+                    WHERE t.expires_at <= (SELECT at FROM clock) - interval '1 day'
+                      AND t.account_id IN (
+                        SELECT id FROM ${p}_accounts WHERE service_profile_id = $2::text
+                      )
+                      FOR UPDATE OF t SKIP LOCKED
+                 )
                  RETURNING 1
               )
          SELECT (SELECT count(*) FROM expired_challenges)::int AS challenges,
@@ -1992,7 +2208,8 @@ export function createIdentityService(
                 (SELECT count(*) FROM stale_rate_limits)::int AS rate_limits,
                 (SELECT count(*) FROM expired_recoveries)::int AS recovery_tokens,
                 (SELECT count(*) FROM expired_resets)::int AS account_resets,
-                (SELECT count(*) FROM expired_audit)::int AS audit_events`,
+                (SELECT count(*) FROM expired_audit)::int AS audit_events,
+                (SELECT count(*) FROM expired_tickets)::int AS second_factor_tickets`,
         [
           requestNow(context),
           serviceProfileId,
@@ -2012,6 +2229,7 @@ export function createIdentityService(
         recoveryTokens: integerColumn(row, "recovery_tokens"),
         accountResets: integerColumn(row, "account_resets"),
         auditEvents: integerColumn(row, "audit_events"),
+        secondFactorTickets: integerColumn(row, "second_factor_tickets"),
       };
     },
   });
