@@ -3,6 +3,17 @@ import type { AccountWalletMode, AccountWalletSetup } from "../accountWallet.js"
 import type { WalletVault } from "../vault.js";
 
 export type ServiceWalletMode = AccountWalletMode | "service-deterministic";
+
+/**
+ * The shape of an emailed verification code. `symbols8` (the default) is 8
+ * symbols of a 32-symbol alphabet, about 40 bits, typed `ABCD-2345`.
+ * `digits6` is 6 decimal digits, about 20 bits, typed `123 456`: easier to
+ * type on a phone, and held unguessable online only by the attempt bound and
+ * the daily wrong-code budgets per username
+ * (`email-verification-account-failures`) and per recipient address
+ * (`email-verification-recipient-failures`), 20 each per 24 hours.
+ */
+export type EmailVerificationCodeFormat = "symbols8" | "digits6";
 export type StoredWalletVault = Readonly<{ vault: WalletVault; revision: number }>;
 export type ChallengePurpose = "registration" | "login" | "rotation";
 
@@ -38,6 +49,12 @@ export type IdentityServiceConfig = Readonly<{
   challengeTtlSeconds?: number;
   emailVerificationTtlSeconds?: number;
   emailVerificationMaxAttempts?: number;
+  /**
+   * `symbols8` (default) or `digits6`. Account reset codes are unaffected.
+   * Switching it leaves codes already issued in the other format
+   * unconfirmable: confirm normalizes a submission to the configured format.
+   */
+  emailVerificationCodeFormat?: EmailVerificationCodeFormat;
   /** Requires a verified email before `POST /accounts` succeeds. */
   requireVerifiedEmail?: boolean;
   /**
@@ -263,6 +280,11 @@ export type ResolvedIdentityServiceConfig = Readonly<{
   challengeTtlSeconds: number;
   emailVerificationTtlSeconds: number;
   emailVerificationMaxAttempts: number;
+  /**
+   * Present only when configured, so a config without it resolves as before;
+   * absent means `symbols8`.
+   */
+  emailVerificationCodeFormat?: EmailVerificationCodeFormat;
   requireVerifiedEmail: boolean;
   walletMode: ServiceWalletMode;
   storeSessionClientHashes: boolean;

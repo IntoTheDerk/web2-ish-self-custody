@@ -202,6 +202,24 @@ issued only once the host's `verify` accepts a code
 | A reset still happens before the factor | Account recovery by email and recovery-key completion replace the enrolled key and revoke every session before the factor is asked, and only the new session waits for it. Whoever reads the inbox (or holds the recovery key) without the factor can therefore lock the owner out of the old password, though not sign in; the owner recovers through the same channel. |
 | The ticket is a bearer secret | Between the two steps it stands for the password proof. It is returned in the response body, never set as a cookie; a client keeps it in memory only. |
 
+## Email verification codes
+
+An emailed verification code proves only that an address received mail: it
+stamps the address as verified, or lets a registration that requires a
+verified email proceed, and never replaces a key. It is 8 symbols (about 40
+bits) by default, or 6 digits (about 20 bits) with
+`emailVerificationCodeFormat: "digits6"`
+([server API](SERVER_API.md#post-email-verificationsconfirm)).
+
+| property | consequence |
+| --- | --- |
+| Uniform digits | `digits6` codes are drawn by rejection sampling: a random byte of 250 or more is discarded rather than folded, so each digit is exactly 1 in 10. |
+| Guessing is bounded per code | 5 attempts (`emailVerificationMaxAttempts`) within 15 minutes, counted in the statement that reads the row: at most 5 in 10^6 against one `digits6` code. |
+| Guessing is bounded per day | 20 wrong codes per 24 hours per username (`email-verification-account-failures`) and per recipient address (`email-verification-recipient-failures`), in both formats, across every verification and caller. Each comparison is counted before the digests are compared and a match gives it back, so parallel guesses cannot overshoot; a full bucket refuses every confirmation, the right code included, and every new start. A `digits6` guesser's chance of confirming an address it does not read is at most about 20 / 10^6 a day per username and per address. The address bucket is what holds when the username is the guesser's own choice, before registration. |
+| The budgets can be spent by anyone | Neither needs a credential, so spending one denies email verification to that username or address for a day. That adds little: anyone who can name an address can already spend its 8 starts an hour, and anyone who can name a username can supersede its open code. |
+| Not offline-resistant | Codes are stored as unkeyed, domain-separated SHA-256 digests bound to the verification id. A database read yields a `digits6` code at once and a `symbols8` code within minutes; neither replaces a key. Account reset codes, which do, stay 16 symbols (80 bits) in either format. |
+| Formats do not mix | Confirm normalizes to the configured format (`digits6` keeps only 0-9, `symbols8` uppercases and keeps A-Z and 0-9), so a format switch strands codes issued in the other format until they expire. |
+
 ## Account deletion
 
 `deleteAccount` is a server-side operator call; nothing routes it.
@@ -210,7 +228,7 @@ issued only once the host's `verify` accepts a code
 | --- | --- |
 | Complete and atomic | One statement deletes the account and every row the service keys to it or to its username, rate-limit counters aside (below), live sessions included only when the caller asks (`revokeLiveSessions`), so a refused or failed deletion changes nothing. The live-session check runs after the account lock in a fresh snapshot, so a session committed while the deletion waited for that lock is counted, never cascaded away unseen. |
 | Audit without personal data | Kept audit rows lose their account link but keep `deleted_account_id`; the `account.deleted` row holds counts only. `email.verification-start` rows keep an address's domain and are outside `auditRetentionDays`'s rule, as for every account. |
-| What stays | `<p>_wallet_setups` (per-account public salts, keyed by username and immutable) is never deleted: a wallet derived under it may hold funds outside the service. Rate-limit rows stay until `pruneExpired` removes them, within a day: those keyed with an IP hash, and those keyed by the account's email address (`email-verification`, with the username; `email-verification-recipient`; `account-reset-recipient`). The last three are unsalted SHA-256 digests that anyone who knows the address can recompute; they are kept because deleting the recipient caps would let a caller reset a mail-flood cap by deleting and re-registering. Backups and database history are the operator's to bound. |
+| What stays | `<p>_wallet_setups` (per-account public salts, keyed by username and immutable) is never deleted: a wallet derived under it may hold funds outside the service. Rate-limit rows stay until `pruneExpired` removes them, within a day of their last use: those keyed with an IP hash, those keyed by the account's email address (`email-verification`, with the username; `email-verification-recipient`; `account-reset-recipient`; `email-verification-recipient-failures`), and the username's daily wrong-code budget (`email-verification-account-failures`). Those keyed by the address or the username are unsalted SHA-256 digests that anyone who knows it can recompute; they are kept because deleting the recipient caps would let a caller reset a mail-flood cap by deleting and re-registering, and deleting a wrong-code budget would hand a guesser a fresh one. Backups and database history are the operator's to bound. |
 | A freed username | The username can be registered again as a new account, which inherits nothing. Under a per-account wallet mode the same password then derives the same wallet, because the salt row stays. |
 
 ## Server boundary

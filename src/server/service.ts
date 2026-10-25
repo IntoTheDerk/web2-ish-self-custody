@@ -49,6 +49,7 @@ import {
   generateVerificationCode,
   hashSessionToken,
   hashVerificationCode,
+  normalizeVerificationCode,
   randomNonceHex,
 } from "./tokens.js";
 import {
@@ -76,7 +77,6 @@ import {
 
 const tablePrefixPattern = /^[a-z][a-z0-9_]{0,31}$/u;
 const controlCharacters = /[\u0000-\u001f\u007f]/u;
-const nonAlphanumeric = /[^A-Z0-9]/gu;
 
 const MIN_USERNAME_LENGTH = 3;
 const MAX_USERNAME_LENGTH = 320;
@@ -119,6 +119,29 @@ const rateLimitRules: Readonly<Record<string, RateLimitRule>> = Object.freeze({
     id: "email-verification-ip",
     limit: 20,
     windowSeconds: 3_600,
+  }),
+  // Wrong email verification codes per normalized username, across all its
+  // verifications and callers, in either code format. Each confirmation of a
+  // live verification reserves a unit before comparing and gives it back on
+  // a match, so only wrong codes stay counted. A full bucket refuses every
+  // confirmation and every new start for the username until the window
+  // passes: with `digits6` a guesser gets at most 20 tries in 10^6 a day at
+  // one username.
+  emailVerificationAccountFailures: Object.freeze({
+    id: "email-verification-account-failures",
+    limit: 20,
+    windowSeconds: 86_400,
+  }),
+  // The same budget per recipient address, whatever the username. A
+  // verification may precede registration, so its username is the caller's
+  // to choose: without this bucket, rotating usernames at one address would
+  // buy 20 more guesses at that address per username, bounded only by the
+  // recipient's 8 starts an hour (960 guesses a day). It denies nothing new:
+  // whoever can name the address can already spend its 8 starts every hour.
+  emailVerificationRecipientFailures: Object.freeze({
+    id: "email-verification-recipient-failures",
+    limit: 20,
+    windowSeconds: 86_400,
   }),
   // Every signed account change of one account (rotation, email change,
   // recovery-key enrollment and removal, recovery completion), per caller.
@@ -302,6 +325,61 @@ export function createIdentityService(
       );
     }
     return normalized;
+  };
+
+  /**
+   * `enforceRateLimit`'s count, which also answers the window it counted in,
+   * exactly, so `releaseRateLimitUnit` can find it again. For a rule that
+   * counts only failures: reserve before the check, release on success.
+   */
+  const reserveRateLimitUnit = async (
+    rule: RateLimitRule,
+    subject: readonly string[],
+    context: RequestContext | undefined,
+  ): Promise<string> => {
+    const row = requireSingleRow(
+      await sql.query(
+        `WITH clock AS (SELECT COALESCE($4::timestamptz, now()) AS at)
+         INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
+         SELECT $1::text, $2::text, 1, clock.at, clock.at FROM clock
+         ON CONFLICT (bucket) DO UPDATE
+           SET count = CASE
+                 WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
+                 THEN 1
+                 ELSE rl.count + 1
+               END,
+               window_start = CASE
+                 WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
+                 THEN excluded.window_start
+                 ELSE rl.window_start
+               END,
+               updated_at = excluded.updated_at
+         RETURNING count, window_start, to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS window_key`,
+        [rateLimitBucket(rule, subject), rule.id, rule.windowSeconds, requestNow(context)],
+      ),
+      () => new IdentityError("Rate limit bookkeeping failed.", "invalid-request"),
+    );
+    if (integerColumn(row, "count") > rule.limit) {
+      throw rateLimited(rule, instantColumn(row, "window_start"), context);
+    }
+    return textColumn(row, "window_key");
+  };
+
+  /**
+   * Only in the window the unit was counted in: a window that rolled over
+   * since then never counted it.
+   */
+  const releaseRateLimitUnit = async (
+    rule: RateLimitRule,
+    subject: readonly string[],
+    windowKey: string,
+  ): Promise<void> => {
+    await sql.query(
+      `UPDATE ${p}_rate_limits
+          SET count = count - 1
+        WHERE bucket = $1::text AND window_start = $2::timestamptz AND count > 0`,
+      [rateLimitBucket(rule, subject), windowKey],
+    );
   };
 
   /**
@@ -746,57 +824,19 @@ export function createIdentityService(
   };
 
   const loginAccountRule = requireRule("loginAccount");
+  const accountFailuresRule = requireRule("emailVerificationAccountFailures");
+  const recipientFailuresRule = requireRule("emailVerificationRecipientFailures");
+  const codeFormat = resolved.emailVerificationCodeFormat ?? "symbols8";
   const secondFactor = secondFactorGate({
     sql,
     config: resolved,
     p,
     sessionClientColumns,
     checkAccountLimit: (accountId, context) => checkRateLimit(loginAccountRule, [accountId], context),
-    reserveAccountGuess: async (accountId, context) => {
-      // `enforceRateLimit`'s count, which also answers the window it counted
-      // in, exactly, so the release can find it again.
-      const row = requireSingleRow(
-        await sql.query(
-          `WITH clock AS (SELECT COALESCE($4::timestamptz, now()) AS at)
-           INSERT INTO ${p}_rate_limits AS rl (bucket, rule_id, count, window_start, updated_at)
-           SELECT $1::text, $2::text, 1, clock.at, clock.at FROM clock
-           ON CONFLICT (bucket) DO UPDATE
-             SET count = CASE
-                   WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
-                   THEN 1
-                   ELSE rl.count + 1
-                 END,
-                 window_start = CASE
-                   WHEN rl.window_start + (interval '1 second' * $3::double precision) <= excluded.updated_at
-                   THEN excluded.window_start
-                   ELSE rl.window_start
-                 END,
-                 updated_at = excluded.updated_at
-           RETURNING count, window_start, to_char(window_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS window_key`,
-          [
-            rateLimitBucket(loginAccountRule, [accountId]),
-            loginAccountRule.id,
-            loginAccountRule.windowSeconds,
-            requestNow(context),
-          ],
-        ),
-        () => new IdentityError("Rate limit bookkeeping failed.", "invalid-request"),
-      );
-      if (integerColumn(row, "count") > loginAccountRule.limit) {
-        throw rateLimited(loginAccountRule, instantColumn(row, "window_start"), context);
-      }
-      return textColumn(row, "window_key");
-    },
-    releaseAccountGuess: async (accountId, windowKey) => {
-      // Only in the window the unit was counted in: a window that rolled over
-      // since then never counted it.
-      await sql.query(
-        `UPDATE ${p}_rate_limits
-            SET count = count - 1
-          WHERE bucket = $1::text AND window_start = $2::timestamptz AND count > 0`,
-        [rateLimitBucket(loginAccountRule, [accountId]), windowKey],
-      );
-    },
+    reserveAccountGuess: (accountId, context) =>
+      reserveRateLimitUnit(loginAccountRule, [accountId], context),
+    releaseAccountGuess: (accountId, windowKey) =>
+      releaseRateLimitUnit(loginAccountRule, [accountId], windowKey),
   });
 
   const recipientRule = requireRule("accountResetRecipient");
@@ -1893,6 +1933,11 @@ export function createIdentityService(
     ): Promise<IssuedEmailVerification> {
       const usernameNormalized = normalizeUsername(input.username);
       const email = normalizeEmail(input.email);
+      // Read, not counted: wrong codes fill these buckets, starts never do. A
+      // username or an address that has spent its daily budget gets no new
+      // code to guess.
+      await checkRateLimit(accountFailuresRule, [usernameNormalized], context);
+      await checkRateLimit(recipientFailuresRule, [email], context);
       await enforceRateLimit(
         requireRule("emailVerification"),
         [usernameNormalized, email],
@@ -1909,7 +1954,7 @@ export function createIdentityService(
       // The id is minted client-side so the code hash can bind to it before
       // the row exists.
       const verificationId = globalThis.crypto.randomUUID();
-      const code = generateVerificationCode();
+      const code = generateVerificationCode(codeFormat);
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($7::timestamptz, now()) AS at),
               superseded AS (
@@ -1977,10 +2022,7 @@ export function createIdentityService(
       context?: RequestContext,
     ): Promise<{ email: string; usernameNormalized: string; verifiedAt: Date }> {
       const id = assertUuid(verificationId, "email-verification-failed");
-      const submitted =
-        typeof code === "string"
-          ? code.toUpperCase().replace(nonAlphanumeric, "")
-          : "";
+      const submitted = normalizeVerificationCode(code, codeFormat);
       const nowParam = requestNow(context);
 
       // The attempt counter increments in the same statement that reads the
@@ -2018,6 +2060,21 @@ export function createIdentityService(
         );
       }
 
+      // Counted against the username's daily budget before the comparison
+      // and given back on a match, so parallel wrong guesses cannot all pass
+      // a read of the bucket. Past the budget even the right code is refused.
+      const accountSubject = [textColumn(attempt, "username_normalized")];
+      const recipientSubject = [textColumn(attempt, "email")];
+      const accountWindow = await reserveRateLimitUnit(accountFailuresRule, accountSubject, context);
+      // A full address budget refuses before any comparison, so the
+      // username's unit is given back: only a wrong code stays counted.
+      let recipientWindow: string;
+      try {
+        recipientWindow = await reserveRateLimitUnit(recipientFailuresRule, recipientSubject, context);
+      } catch (error) {
+        await releaseRateLimitUnit(accountFailuresRule, accountSubject, accountWindow);
+        throw error;
+      }
       const expected = textColumn(attempt, "code_hash");
       const provided = hashVerificationCode(serviceProfileId, id, submitted);
       if (!constantTimeEqualHex(expected, provided)) {
@@ -2026,6 +2083,8 @@ export function createIdentityService(
           "email-verification-failed",
         );
       }
+      await releaseRateLimitUnit(accountFailuresRule, accountSubject, accountWindow);
+      await releaseRateLimitUnit(recipientFailuresRule, recipientSubject, recipientWindow);
 
       const rows = await sql.query(
         `WITH clock AS (SELECT COALESCE($3::timestamptz, now()) AS at),

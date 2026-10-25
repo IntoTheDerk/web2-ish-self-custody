@@ -336,3 +336,27 @@ describe("resolveIdentityServiceConfig account security options", () => {
     expect(resolveIdentityServiceConfig(unset)).toEqual(unset);
   });
 });
+
+describe("emailVerificationCodeFormat", () => {
+  it("is absent from a config that does not set it, and kept when set", () => {
+    expect("emailVerificationCodeFormat" in resolveIdentityServiceConfig(minimal)).toBe(false);
+    expect("emailVerificationCodeFormat" in identityServiceDefaults).toBe(false);
+    for (const format of ["symbols8", "digits6"] as const) {
+      const resolved = resolveIdentityServiceConfig(withOverride({ emailVerificationCodeFormat: format }));
+      expect(resolved.emailVerificationCodeFormat).toBe(format);
+      expect(resolveIdentityServiceConfig(resolved)).toEqual(resolved);
+    }
+  });
+
+  it("refuses anything but the two formats", () => {
+    for (const bad of ["digits8", "DIGITS6", "", 6, null, true]) {
+      expectIdentityError(
+        () =>
+          resolveIdentityServiceConfig(
+            withOverride({ emailVerificationCodeFormat: bad as unknown as "digits6" }),
+          ),
+        "invalid-service-profile",
+      );
+    }
+  });
+});

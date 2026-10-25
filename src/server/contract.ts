@@ -526,14 +526,25 @@ export interface IdentityService<SecondFactor extends boolean = false> {
   listWallets(accountId: string): Promise<readonly IdentityWallet[]>;
 
   /**
-   * Mints a verification code. Delivery belongs to the host application; a
-   * custody SDK has no business owning an email transport.
+   * Mints a verification code in the configured `emailVerificationCodeFormat`
+   * (8 symbols, or 6 digits with `digits6`). Delivery belongs to the host
+   * application; a custody SDK has no business owning an email transport.
+   * Refused (`rate-limited`) while the username or the address has spent its
+   * daily wrong-code budget (`email-verification-account-failures`,
+   * `email-verification-recipient-failures`: 20 each per 24 hours).
    */
   startEmailVerification(
     input: EmailVerificationRequest,
     context?: RequestContext,
   ): Promise<IssuedEmailVerification>;
 
+  /**
+   * Normalizes the code to the configured format (`symbols8`: uppercase,
+   * keep A-Z and 0-9; `digits6`: keep 0-9, so `123 456` and `123-456` both
+   * match). Every comparison counts against the username's and the
+   * address's daily wrong-code budgets and a match gives the units back;
+   * past either budget even the right code is refused (`rate-limited`).
+   */
   confirmEmailVerification(
     verificationId: string,
     code: string,

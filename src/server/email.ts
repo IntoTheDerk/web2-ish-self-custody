@@ -71,9 +71,12 @@ export type EmailDeliveryFailure = Readonly<{
 }>;
 
 export type VerificationEmailInput = Readonly<{
-  /** The raw code, e.g. `ABCD2345`. */
+  /** The raw code, e.g. `ABCD2345`, or `123456` with `digits6`. */
   code: string;
-  /** The same code split for reading, e.g. `ABCD-2345`; either form is accepted on confirm. */
+  /**
+   * The same code split for reading, e.g. `ABCD-2345`, or `123 456` with
+   * `digits6`; either form is accepted on confirm.
+   */
   formattedCode: string;
   email: string;
   expiresAt: Date;
@@ -172,9 +175,17 @@ export function parseMailbox(value: string, field = "mailbox"): { name: string |
   return { name: name === "" ? null : name, email };
 }
 
-/** `ABCD2345` → `ABCD-2345`; codes of other lengths are returned unchanged. */
+const sixDigits = /^[0-9]{6}$/u;
+
+/**
+ * `ABCD2345` → `ABCD-2345` (`symbols8`); `123456` → `123 456` (`digits6`).
+ * Any other code is returned unchanged.
+ */
 export function formatVerificationCode(code: string): string {
-  return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+  if (code.length === 8) {
+    return `${code.slice(0, 4)}-${code.slice(4)}`;
+  }
+  return sixDigits.test(code) ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 }
 
 type ResolvedTheme = Readonly<{
