@@ -5,7 +5,7 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased (planned v0.15.0-alpha.0)
+## v0.15.0-alpha.0 — 2026-10-25 (alpha pre-release)
 
 Optional 6-digit email verification codes and a daily wrong-code budget for
 email verification. Derivation, every profile, codec, transcript,
