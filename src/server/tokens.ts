@@ -1,6 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { utf8 } from "../encoding.js";
+import type { EmailVerificationCodeFormat } from "./types.js";
 
 /**
  * Server-side secret generation and hashing.
@@ -12,9 +13,10 @@ import { utf8 } from "../encoding.js";
  * secret's size. A 256-bit token's digest yields nothing replayable. A
  * reset code replaces the enrolled key, so it is 80 bits, beyond an offline
  * search of its digest within its 15-minute life. An email verification
- * code is 40 bits: its digest can be searched offline, but it proves only
- * that an address received mail and replaces no key, and its attempt bound
- * is what holds online.
+ * code is 40 bits (`symbols8`) or about 20 bits (`digits6`): either digest
+ * can be searched offline, but a code proves only that an address received
+ * mail and replaces no key, and its attempt bound and the per-username and
+ * per-address daily wrong-code budgets are what hold online.
  */
 
 const BASE64URL_ALPHABET =
@@ -23,9 +25,13 @@ const BASE64URL_ALPHABET =
 /** Omits O/0 and I/1 so a code read aloud or off a screen is unambiguous. */
 const VERIFICATION_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+/** The `digits6` alphabet. 10 does not divide 256, so rejection matters here. */
+const DIGIT_ALPHABET = "0123456789";
+
 const SESSION_TOKEN_BYTES = 32;
 const NONCE_BYTES = 32;
 const VERIFICATION_CODE_LENGTH = 8;
+const DIGIT_VERIFICATION_CODE_LENGTH = 6;
 /** 16 symbols of 5 bits: 80 bits, typed in four groups of four. */
 const ACCOUNT_RESET_CODE_LENGTH = 16;
 
@@ -77,12 +83,15 @@ export function hashSessionToken(token: string): string {
 }
 
 /**
- * Rejection sampling, not modulo folding: with a 32-symbol alphabet the two
- * happen to agree, but the rejection bound keeps the code uniform if the
- * alphabet ever changes to a length that does not divide 256.
+ * Rejection sampling, not modulo folding: a byte at or above the largest
+ * multiple of the alphabet's length below 256 is discarded, so every symbol
+ * is drawn with probability exactly 1 / alphabet length. With the 32-symbol
+ * alphabet nothing is ever rejected, so its codes draw the same bytes as
+ * before; with the 10 digits, bytes 250 to 255 are rejected (6 in 256), where
+ * folding them would make 0 to 5 more likely than 6 to 9.
  */
-function generateCode(length: number): string {
-  const alphabetLength = VERIFICATION_ALPHABET.length;
+function generateCode(length: number, alphabet: string = VERIFICATION_ALPHABET): string {
+  const alphabetLength = alphabet.length;
   const ceiling = 256 - (256 % alphabetLength);
   let code = "";
   while (code.length < length) {
@@ -90,7 +99,7 @@ function generateCode(length: number): string {
       if (byte >= ceiling) {
         continue;
       }
-      code += VERIFICATION_ALPHABET.charAt(byte % alphabetLength);
+      code += alphabet.charAt(byte % alphabetLength);
       if (code.length === length) {
         break;
       }
@@ -99,9 +108,40 @@ function generateCode(length: number): string {
   return code;
 }
 
-/** An email verification code: 8 symbols (40 bits). */
-export function generateVerificationCode(): string {
+/**
+ * An email verification code: 8 symbols (40 bits) by default, or with
+ * `digits6` 6 uniformly drawn decimal digits (log2(10^6), about 19.9 bits).
+ */
+export function generateVerificationCode(
+  format: EmailVerificationCodeFormat = "symbols8",
+): string {
+  if (format === "digits6") {
+    return generateCode(DIGIT_VERIFICATION_CODE_LENGTH, DIGIT_ALPHABET);
+  }
+  if (format !== "symbols8") {
+    throw new TypeError("Unknown email verification code format.");
+  }
   return generateCode(VERIFICATION_CODE_LENGTH);
+}
+
+/**
+ * Reduces a submitted verification code to the format's alphabet, which is
+ * what `hashVerificationCode` requires. `symbols8` uppercases and drops
+ * everything but A-Z and 0-9, as confirm always has (`abcd-2345` →
+ * `ABCD2345`); `digits6` drops everything but 0-9 (`123 456`, `123-456` →
+ * `123456`). A value that is not a string reduces to the empty string, which
+ * matches no code.
+ */
+export function normalizeVerificationCode(
+  code: unknown,
+  format: EmailVerificationCodeFormat = "symbols8",
+): string {
+  if (typeof code !== "string") {
+    return "";
+  }
+  return format === "digits6"
+    ? code.replace(/[^0-9]/gu, "")
+    : code.toUpperCase().replace(/[^A-Z0-9]/gu, "");
 }
 
 /**
@@ -122,8 +162,10 @@ export function generateAccountResetCode(): string {
  * the digest, a code issued for one verification would validate against any
  * other verification that happened to draw the same code.
  *
- * Callers must pass a code already reduced to the verification alphabet, which
- * keeps the newline-joined preimage unambiguous.
+ * Callers must pass a code already reduced to its format's alphabet
+ * (`normalizeVerificationCode`), which keeps the newline-joined preimage
+ * unambiguous. Both formats share this domain: the verification id in the
+ * preimage already keeps one row's digest from matching another's.
  */
 export function hashVerificationCode(
   serviceProfileId: string,

@@ -5,6 +5,68 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased (planned v0.15.0-alpha.0)
+
+Optional 6-digit email verification codes and a daily wrong-code budget for
+email verification. Derivation, every profile, codec, transcript,
+account-change action and committed vector is unchanged, and no vector is
+added: a verification code is minted and checked by the service only, and no
+client computes anything from it. No migration: the budgets are rows of the
+existing `<p>_rate_limits` table. Without `emailVerificationCodeFormat` every
+code, digest, email and resolved config is what v0.14.0-alpha.0 produced; the
+budget below is the only behaviour change a default deployment sees.
+
+### Breaking changes
+
+None to a type, a statement's schema or a default code. Two additive
+behaviour changes can still surprise a caller:
+
+- **Email verification now has a daily wrong-code budget, in both formats.**
+  `confirmEmailVerification` counts every comparison against two new rules,
+  `email-verification-account-failures` (per normalized username) and
+  `email-verification-recipient-failures` (per recipient address), 20 each
+  per 24 hours, and gives the unit back on a match. Past either,
+  `confirmEmailVerification` (even with the right code) and
+  `startEmailVerification` are refused with `rate-limited` (429,
+  `details.rule` naming the rule, `retryAfterSeconds` up to a day). A test
+  suite or a host that submits more than 20 wrong codes a day for one
+  username or address now sees `429` where it saw
+  `email-verification-failed`.
+- **`formatVerificationCode` formats a 6-digit code as `123 456`.** It used
+  to return any code that was not 8 characters unchanged; an 8-character code
+  is still `ABCD-2345`, and every other shape is still unchanged.
+
+### Added
+
+- **`emailVerificationCodeFormat?: "symbols8" | "digits6"`** on
+  `IdentityServiceConfig` (and so `SecondFactorIdentityServiceConfig`),
+  default `symbols8`. `digits6` mints 6 decimal digits drawn by rejection
+  sampling (bytes 250-255 discarded, so no digit is favoured), stored under
+  the same digest domain, bound to the verification id. Any other value is
+  refused with `invalid-service-profile`.
+  `ResolvedIdentityServiceConfig.emailVerificationCodeFormat?` is present
+  only when the option was set, so a config without it resolves exactly as
+  before; `identityServiceDefaults` is unchanged.
+- **New export: the type `EmailVerificationCodeFormat`** from
+  `web2-ish-self-custody/server`.
+- **Confirm normalizes to the configured format.** `digits6` keeps only
+  `0-9`, so `123 456`, `123-456` and `123456` all match; `symbols8` keeps
+  uppercasing and keeping `A-Z0-9` as before. A deployment that switches
+  formats strands the codes already issued in the other format until they
+  expire (15 minutes by default).
+- **The built-in email shows a `digits6` code as `123 456`**
+  (`VerificationEmailInput.formattedCode`); its text, including "This code
+  expires in N minutes.", is unchanged, and so is every `symbols8` message
+  byte for byte.
+- **Guessing bound for `digits6`:** at most 5 guesses in 10^6 against one
+  code and at most 20 wrong codes a day per username and per address, about
+  2 × 10^-5 a day per target. The address budget is what holds before
+  registration, when the username is the guesser's choice: per username
+  alone, rotating usernames at one address would have allowed 960 guesses a
+  day. See [SECURITY_MODEL.md](docs/SECURITY_MODEL.md#email-verification-codes).
+- `deleteAccount` keeps both budget rows, as it keeps the recipient caps;
+  `pruneExpired` removes them a day after their last use.
+
 ## v0.14.0-alpha.0 — 2026-10-23 (alpha pre-release)
 
 Two identity-service additions: permanent account deletion (`deleteAccount`,

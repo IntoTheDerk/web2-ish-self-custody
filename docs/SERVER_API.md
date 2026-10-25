@@ -662,8 +662,9 @@ answers only after the provider accepted it. Without that option the route
 still mints and stores a code that nobody receives, which only suits a host
 that calls `service.startEmailVerification(...)` and delivers the code itself.
 
-Errors: `invalid-username`, `invalid-email` (400); `rate-limited` (429);
-`email-delivery-failed` (502) when the provider refused or could not be
+Errors: `invalid-username`, `invalid-email` (400); `rate-limited` (429,
+including while the username or the address has spent its daily wrong-code
+budget); `email-delivery-failed` (502) when the provider refused or could not be
 reached. The stored code is left to expire, and a retry mints a fresh one.
 
 ### Email delivery
@@ -714,8 +715,9 @@ email-verification/<verificationId>`, so a retried send is one message.
   `codeBackgroundColor`, `codeTextColor`) and three font stacks
   (`headingFontFamily`, `bodyFontFamily`, `codeFontFamily`) are optional; or
 - set `render(input) → { subject, text, html }` to replace the template
-  entirely. `input` carries `code`, `formattedCode` (`ABCD-2345`; confirm
-  accepts either form), `email`, `expiresAt`, and `expiresInMinutes`.
+  entirely. `input` carries `code`, `formattedCode` (`ABCD-2345`, or `123 456`
+  with `digits6`; confirm accepts either form), `email`, `expiresAt`, and
+  `expiresInMinutes`.
   `renderVerificationEmail(input, theme)` and `escapeHtml` are exported for a
   render that only wraps the built-in one.
 
@@ -754,15 +756,30 @@ Public.
 }
 ```
 
-Codes are 8 characters from a 32-symbol alphabet that omits `O`/`0` and `I`/`1`,
-so a code read aloud or off a screen is unambiguous. They are stored only as a
-SHA-256 digest bound to the domain string, the service profile, and the
+By default (`emailVerificationCodeFormat: "symbols8"`) codes are 8 characters
+from a 32-symbol alphabet that omits `O`/`0` and `I`/`1`, so a code read aloud
+or off a screen is unambiguous; confirm uppercases the submission and drops
+everything but `A-Z` and `0-9`, so `k7m2-qrtx` matches. With `"digits6"` codes
+are 6 decimal digits (`{ "code": "042917" }`), drawn uniformly by rejection
+sampling, shown as `042 917`; confirm drops everything but `0-9`, so `042 917`
+and `042-917` match. A deployment that switches formats strands the codes
+already issued in the other one: confirm normalizes to the configured format,
+and those codes then fail until they expire. Either way codes are stored only
+as a SHA-256 digest bound to the domain string, the service profile, and the
 verification id — so a code minted for one verification cannot validate against
 another that happened to draw the same characters — and compared in constant
 time.
 
+Every comparison counts against two daily wrong-code budgets, the username's
+and the recipient address's (20 each per 24 hours, see [Rate
+limits](#rate-limits)), and a match gives both units back. Past either budget
+every confirmation for it, the right code included, is refused, and so is a new
+start.
+
 Errors: `email-verification-failed` (400), also returned once the attempt budget
-is spent; `email-verification-expired` (410); `rate-limited` (429).
+is spent; `email-verification-expired` (410); `rate-limited` (429, also rules
+`email-verification-account-failures` and
+`email-verification-recipient-failures`).
 
 ### Not exposed over HTTP
 
@@ -1067,13 +1084,16 @@ const result = await service.deleteAccount(accountId, { revokeLiveSessions: true
   recovery tokens, account resets and second-factor tickets, the challenges and
   email verifications stored under its username, and its `login-account`
   rate-limit row. Other rate-limit rows stay until `pruneExpired` removes them,
-  a day after their last use: those keyed with a caller's IP hash, and three
+  a day after their last use: those keyed with a caller's IP hash, three
   keyed by the account's email address alone or with its username
   (`email-verification`, `email-verification-recipient`,
-  `account-reset-recipient`). Those three are unsalted SHA-256 digests, so
-  whoever knows the address can tell for that day that it was counted.
-  Deleting the recipient caps would let a caller reset a mail-flood cap by
-  deleting and re-registering, so they are kept.
+  `account-reset-recipient`), and the two daily wrong-code budgets, keyed by
+  the username (`email-verification-account-failures`) and by the address
+  (`email-verification-recipient-failures`). These are unsalted SHA-256
+  digests, so whoever knows the address or the username can tell for that day
+  that it was counted. Deleting the recipient caps would let a caller reset a
+  mail-flood cap by deleting and re-registering, and deleting a wrong-code
+  budget would hand a guesser a fresh one, so they are kept.
 - **Live sessions.** An account with a live session (neither revoked nor
   expired) is refused with `account-has-sessions` (409,
   `details.liveSessions`) and nothing is deleted, unless `revokeLiveSessions:
@@ -1903,6 +1923,7 @@ type IdentityServiceConfig = {
   challengeTtlSeconds?: number;
   emailVerificationTtlSeconds?: number;
   emailVerificationMaxAttempts?: number;
+  emailVerificationCodeFormat?: "symbols8" | "digits6";
   requireVerifiedEmail?: boolean;
   storeSessionClientHashes?: boolean;
   walletMode?: "service-deterministic" | "per-account-deterministic" | "random-vault";
@@ -1952,6 +1973,7 @@ which throws `invalid-service-profile` rather than silently clamping:
 | `challengeTtlSeconds` | 300 |
 | `emailVerificationTtlSeconds` | 900 |
 | `emailVerificationMaxAttempts` | 5 |
+| `emailVerificationCodeFormat` | `symbols8` (8 symbols, `ABCD-2345`); `digits6` is 6 digits (`123 456`); anything else is refused. Absent from the resolved config unless set. Account reset codes are unaffected ([`POST /email-verifications/confirm`](#post-email-verificationsconfirm)) |
 | `requireVerifiedEmail` | `false` |
 | `storeSessionClientHashes` | `true`; `false` writes `NULL` to a new session's `ip_hash` and `user_agent_hash` ([`<p>_sessions`](#p_sessions)); a value that is not a boolean is refused |
 | `accountSecurity` | `{ signInKeyRotation: false, recoveryKeys: false, emailReset: false, signedInReset: false }`; each a strict boolean, an unknown key refused ([account changes](#account-changes-and-recovery-keys-opt-in), [account resets](#account-resets-opt-in)) |
@@ -2184,6 +2206,33 @@ lifetime. Its digest could be searched offline from a database read, which
 yields only the confirmation of an address. An account reset code replaces the
 enrolled key, so it is 16 symbols (80 bits) instead
 ([account recovery by email](#account-recovery-by-email)).
+
+Wrong codes are also bounded per day, in both formats, by two rules counted
+only by confirmation: `email-verification-account-failures`, 20 per 24 hours
+per normalized username, and `email-verification-recipient-failures`, 20 per
+24 hours per recipient address, each across every verification and caller.
+Each comparison reserves a unit in both before the digests are compared and a
+match gives them back, so only wrong codes stay counted and a burst of parallel
+guesses cannot overshoot. A full bucket refuses every confirmation and every
+new start for its username or address (`rate-limited`) until its window
+passes; the starts only read the buckets. The address bucket exists because a
+verification may precede registration, so its username is the caller's to
+choose: per username alone, rotating usernames at one address would allow 8
+starts an hour × 5 attempts, 960 guesses a day.
+
+With `emailVerificationCodeFormat: "digits6"` a code is 6 digits, about 20
+bits, and these budgets are what keep it unguessable online: at most 5 guesses
+in 10^6 against one code (5 × 10^-6), and at most 20 wrong guesses a day per
+username and per address, so a guesser's chance of confirming an address it
+does not read is at most about 20 / 10^6 = 2 × 10^-5 a day per target. The
+budgets need no credential to spend, so whoever spends one also denies email
+verification to that username or address for the day. That adds little:
+whoever can name an address could already deny it by spending its 8 starts
+every hour, and whoever can name a username by superseding its open code with
+a new start. A database read yields any
+`digits6` code from its digest at once (10^6 SHA-256 evaluations), as it
+yields a `symbols8` code within minutes: either confirms only that an address
+received mail, and never replaces a key.
 
 ### Challenge replay protection
 
