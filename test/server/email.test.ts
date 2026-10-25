@@ -303,6 +303,52 @@ describe("deliverEmailVerification", () => {
   });
 });
 
+describe("digits6 codes in email", () => {
+  it("formats six digits as two groups of three and leaves other shapes alone", () => {
+    expect(formatVerificationCode("123456")).toBe("123 456");
+    expect(formatVerificationCode("000999")).toBe("000 999");
+    expect(formatVerificationCode("ABCD2345")).toBe("ABCD-2345");
+    expect(formatVerificationCode("ABC234")).toBe("ABC234");
+    expect(formatVerificationCode("12345")).toBe("12345");
+  });
+
+  it("renders the grouped code and the expiry note in both bodies", () => {
+    const content = renderVerificationEmail(
+      {
+        code: "123456",
+        formattedCode: formatVerificationCode("123456"),
+        email: "ada@example.org",
+        expiresAt: issued.expiresAt,
+        expiresInMinutes: 15,
+      },
+      { productName: "Knight Armor" },
+    );
+    expect(content.text).toContain("    123 456\n");
+    expect(content.text).toContain("This code expires in 15 minutes.");
+    expect(content.html).toContain(">123 456</div>");
+    expect(content.html).toContain("This code expires in 15 minutes.");
+  });
+
+  it("hands a custom render both forms and sends it", async () => {
+    const { sender, sent } = recordingSender();
+    const seen: string[] = [];
+    await deliverEmailVerification(
+      {
+        sender,
+        from: "ops@example.org",
+        render: (value) => {
+          seen.push(value.code, value.formattedCode);
+          return { subject: "Code", text: value.formattedCode, html: `<b>${value.code}</b>` };
+        },
+      },
+      { ...issued, code: "042917" },
+      now,
+    );
+    expect(seen).toEqual(["042917", "042 917"]);
+    expect(sent[0]?.text).toBe("042 917");
+  });
+});
+
 describe("router email delivery", () => {
   function stubService(): IdentityService {
     return {

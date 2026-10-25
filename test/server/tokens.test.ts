@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildChallengeMessage } from "../../src/server/challenge.js";
 import {
   constantTimeEqualHex,
@@ -10,6 +10,7 @@ import {
   hashAccountResetCode,
   hashSessionToken,
   hashVerificationCode,
+  normalizeVerificationCode,
   randomNonceHex,
 } from "../../src/server/tokens.js";
 
@@ -249,5 +250,81 @@ describe("constantTimeEqualHex", () => {
     expect(constantTimeEqualHex(value, `${value}00`)).toBe(false);
     expect(constantTimeEqualHex("", value)).toBe(false);
     expect(constantTimeEqualHex(value, "")).toBe(false);
+  });
+});
+
+describe("digits6 verification codes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("draws six decimal digits, and the default stays eight symbols", () => {
+    for (let index = 0; index < 256; index += 1) {
+      expect(generateVerificationCode("digits6")).toMatch(/^[0-9]{6}$/u);
+      expect(generateVerificationCode()).toMatch(/^[A-HJ-NP-Z2-9]{8}$/u);
+      expect(generateVerificationCode("symbols8")).toMatch(/^[A-HJ-NP-Z2-9]{8}$/u);
+    }
+  });
+
+  it("refuses an unknown format rather than issuing a default", () => {
+    expect(() => generateVerificationCode("digits8" as "digits6")).toThrow(TypeError);
+  });
+
+  it("rejects bytes 250 to 255 instead of folding them onto 0 to 5", () => {
+    // Every byte that folds (250..255) is offered first, then the six bytes
+    // whose residues are 9, 8, 7, 6, 5, 4.
+    const script = [250, 251, 252, 253, 254, 255, 249, 248, 247, 246, 245, 244];
+    let offset = 0;
+    vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+      const bytes = array as unknown as Uint8Array;
+      for (let index = 0; index < bytes.length; index += 1) {
+        bytes[index] = script[offset % script.length]!;
+        offset += 1;
+      }
+      return array;
+    });
+    expect(generateVerificationCode("digits6")).toBe("987654");
+    expect(offset).toBe(12);
+  });
+
+  it("maps each accepted byte to its residue mod 10", () => {
+    const script = [0, 9, 10, 99, 240, 249];
+    vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+      (array as unknown as Uint8Array).set(script);
+      return array;
+    });
+    expect(generateVerificationCode("digits6")).toBe("090909");
+  });
+
+  it("draws each digit about equally often", () => {
+    // 60,000 digits: each count's standard deviation is about 73, so a 6%
+    // band (360) only fails a uniform generator by chance about once in 10^6.
+    const counts = new Array<number>(10).fill(0);
+    for (let index = 0; index < 10_000; index += 1) {
+      for (const digit of generateVerificationCode("digits6")) {
+        counts[Number(digit)]! += 1;
+      }
+    }
+    for (const count of counts) {
+      expect(Math.abs(count - 6_000)).toBeLessThan(360);
+    }
+  });
+
+  it("normalizes a submission to the format's alphabet", () => {
+    expect(normalizeVerificationCode("123 456", "digits6")).toBe("123456");
+    expect(normalizeVerificationCode("123-456", "digits6")).toBe("123456");
+    expect(normalizeVerificationCode(" 1 2 3\t4 5 6 ", "digits6")).toBe("123456");
+    expect(normalizeVerificationCode("12a456", "digits6")).toBe("12456");
+    expect(normalizeVerificationCode("abcd-2345", "symbols8")).toBe("ABCD2345");
+    expect(normalizeVerificationCode("abcd-2345")).toBe("ABCD2345");
+    expect(normalizeVerificationCode(123456, "digits6")).toBe("");
+    expect(normalizeVerificationCode(undefined)).toBe("");
+  });
+
+  it("hashes under the same domain, bound to the verification id", () => {
+    const verificationId = "c7e1a9d0-0000-4000-8000-000000000000";
+    expect(hashVerificationCode("svc", verificationId, "123456")).toBe(
+      sha256Hex([verificationCodeDomain, "svc", verificationId, "123456"].join("\n")),
+    );
   });
 });

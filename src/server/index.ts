@@ -118,6 +118,7 @@ export type {
   AuthenticatedRecovery,
   ChallengePurpose,
   EmailChangeInput,
+  EmailVerificationCodeFormat,
   EmailVerificationRequest,
   EnrolledKeyInput,
   IdentityAccount,

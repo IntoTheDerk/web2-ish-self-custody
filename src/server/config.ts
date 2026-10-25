@@ -3,6 +3,7 @@ import type { DerivationProfile } from "../profile.js";
 import { signInEd25519Codec } from "../signIn.js";
 import { IdentityError } from "./errors.js";
 import type {
+  EmailVerificationCodeFormat,
   IdentityServiceConfig,
   ResolvedIdentityServiceConfig,
   SecondFactorIdentityServiceConfig,
@@ -194,6 +195,25 @@ function resolveSecondFactor(value: unknown): SecondFactorOptions | null {
   });
 }
 
+const emailVerificationCodeFormats: readonly string[] = Object.freeze(["symbols8", "digits6"]);
+
+/**
+ * `undefined` is unset (`symbols8`). Anything but the two names is refused, so
+ * a typo cannot leave a deployment issuing a format it did not choose.
+ */
+function resolveEmailVerificationCodeFormat(value: unknown): EmailVerificationCodeFormat | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !emailVerificationCodeFormats.includes(value)) {
+    throw new IdentityError(
+      `emailVerificationCodeFormat must be ${emailVerificationCodeFormats.join(" or ")}.`,
+      "invalid-service-profile",
+    );
+  }
+  return value as EmailVerificationCodeFormat;
+}
+
 function resolveAuditRetentionDays(value: unknown): number | null {
   if (value === undefined || value === null) {
     return null;
@@ -225,6 +245,9 @@ export function resolveIdentityServiceConfig(
     );
   }
   const secondFactor = resolveSecondFactor(config.secondFactor);
+  const emailVerificationCodeFormat = resolveEmailVerificationCodeFormat(
+    config.emailVerificationCodeFormat,
+  );
   return Object.freeze({
     walletMode,
     serviceProfileId: config.serviceProfileId,
@@ -252,6 +275,7 @@ export function resolveIdentityServiceConfig(
       "emailVerificationMaxAttempts",
       100,
     ),
+    ...(emailVerificationCodeFormat === undefined ? {} : { emailVerificationCodeFormat }),
     requireVerifiedEmail: config.requireVerifiedEmail ?? defaults.requireVerifiedEmail,
     storeSessionClientHashes: optionalBoolean(
       config.storeSessionClientHashes,
