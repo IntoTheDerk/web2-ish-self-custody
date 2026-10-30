@@ -5,6 +5,28 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased (planned v0.16.0-alpha.0)
+
+Server-keyed salt (additive). An oblivious pseudorandom function between the
+client and the identity service, RFC 9497 base mode on ristretto255-SHA512,
+whose output is mixed into the 32-byte external salt. With it, a leaked
+database or a published address or sign-in public key is no longer a password
+oracle: each guess needs the service's per-account key, which costs a
+rate-limited request. The service never sees the password or the OPRF output,
+and cannot compute a key without the password.
+
+- `startOprfSalt(username, password)` (core): blinds the password and, given
+  the service's answer and the public salt, returns the salt to pass to an
+  `external-32` profile.
+- `createOprfServer({ masterKey, serviceProfileId })` (`/server`): derives a
+  per-account key from one host-held master key, so there is no per-account
+  table and an unknown username answers like a known one.
+- No profile, id, transcript, codec or migration changes. A deployment that
+  does not call these derives exactly what v0.15.0-alpha.0 does. A deployment
+  that does derives different keys for the same credentials, which is a key
+  change for its accounts. New vector `vectors/oprf-salt-v1.json`.
+- See docs/PROTOCOL.md "Part 5" and docs/SECURITY_MODEL.md "Server-keyed salt".
+
 ## v0.15.0-alpha.0 — 2026-10-25 (alpha pre-release)
 
 Optional 6-digit email verification codes and a daily wrong-code budget for
