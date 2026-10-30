@@ -25,6 +25,13 @@ export {
   MINIMUM_PASSWORD_CHARACTERS,
   normalizeUsername,
 } from "./normalization.js";
+export {
+  OPRF_ELEMENT_BYTES,
+  OPRF_INPUT_DOMAIN,
+  OPRF_SALT_DOMAIN,
+  startOprfSalt,
+} from "./oprf.js";
+export type { OprfSaltRequest } from "./oprf.js";
 export { defineDerivationProfile } from "./profile.js";
 export type { DerivationProfile, KeyDerivation, ProfileDomains, SaltPolicy } from "./profile.js";
 export { ED25519_SEED_BYTES, deriveIdentityFromSeed } from "./seed.js";
