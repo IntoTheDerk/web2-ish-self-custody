@@ -93,6 +93,24 @@ Every derivation, vault creation, and vault password change requires a password 
 
 The strength policy therefore belongs to the application at the moment a password is chosen: when an account is created and when a password is set or changed. There it should estimate strength, refuse common and breached passwords, and encourage password-manager-generated or long passphrase credentials. It should not re-apply that policy on sign-in, because the wallet already exists and a policy that tightens later would lock its owner out of it.
 
+## Server-keyed salt
+
+The public key or address is a password oracle (above). The server-keyed salt
+(`startOprfSalt`, `createOprfServer`; [protocol](PROTOCOL.md#part-5--the-server-keyed-salt))
+removes that oracle from everyone who lacks the service's OPRF key, without the
+service learning the password or being able to compute a key.
+
+| property | consequence |
+| --- | --- |
+| A guess needs the service | The salt depends on an OPRF output that only the service's per-account key can produce. A holder of a database dump, or of a published address and the username, cannot test guesses offline; each guess is a request to the service, which the host rate-limits per account and per client. |
+| The service learns nothing | It sees a blinded group element, uniformly random to it, and never the password, the OPRF output, the salt or any key. It cannot compute a sign-in key or a wallet without the password. |
+| Not custody | The master key plus a password guess is what an operator could always attempt against a public identity; the service gains no ability to compute a key without the password. |
+| The master key is the new secret | Someone with the master key *and* a database dump or an address is back to offline guessing at scrypt cost. Keep it outside the database, with its own access, and back it up: losing it makes every key and wallet derived under it unreachable. There is no per-account table and no rotation path in this version. |
+| An unknown username answers the same | The per-account key is derived from the username, so the service answers any username with an evaluation. Availability limits (rate limits) must not differ by whether the account exists. |
+| The service can degrade it | A service that answers with a fixed element, or the same key for everyone, removes the protection for its users but learns nothing more than a service without the layer. A client pins the exchange's shape (32-byte elements, the domain strings) but not the key; a verifiable OPRF would add a pinned public key and is left to a later version. |
+| A password change moves the salt | As with any input of the run, a different password gives a different salt and so different keys; the salt is requested again on every entry. |
+| Availability | Every derivation needs one request to the service first. If the service is unreachable, no key can be derived. |
+
 ## Assumptions
 
 - Passwords are generated and retained by a password manager or comparably strong process, and the application enforces a strength policy when a password is chosen; the SDK's 10-character floor alone does not provide one.

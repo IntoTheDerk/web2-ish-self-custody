@@ -31,6 +31,14 @@ export type {
   WalletIdentityInput,
 } from "./challenge.js";
 
+export {
+  OPRF_KEY_INFO,
+  OPRF_MASTER_KEY_BYTES,
+  OPRF_USER_KEY_DOMAIN,
+  createOprfServer,
+} from "./oprf.js";
+export type { OprfServer, OprfServerConfig } from "./oprf.js";
+
 export { identityServiceDefaults, resolveIdentityServiceConfig } from "./config.js";
 
 export type {

@@ -1,0 +1,13 @@
+{
+  "description": "Server-keyed salt known answer (RFC 9497 ristretto255-SHA512 base mode). Fixed wire surface: any change is a new domain string.",
+  "serviceProfileId": "oprf-vector-service",
+  "masterKeyHex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "publicSaltHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "username": "vector.user",
+  "passwordUtf8": "correct horse battery staple 2026",
+  "blindRandomHex": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "blindedHex": "78f9b93233463ceb121a2da2b7b38c11d6bdc2aaed559fedfede3e40a26ddc20",
+  "evaluatedHex": "c8e753454aa4a33bb2826641b999f3eb66b98ce00b13177106eba340cf66cd02",
+  "saltHex": "fe1bb45f1d92019df67250a95f04a7e721c20d4d54a456790ea5561eb1ae5561",
+  "signInPublicKey": "S_545774e7ba27a6ac73daf19fc147d6c3ee45f62709ca8b3ce12b83b3c7e46d1b"
+}

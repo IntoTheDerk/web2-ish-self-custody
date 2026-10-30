@@ -1315,3 +1315,49 @@ once.
 
 `npm run verify:vectors:python` runs it after the external-salt verifier, and
 `npm run verify:ci`'s "python vectors" gate runs both.
+
+
+# Part 5 — the server-keyed salt
+
+An optional layer over any `external-32` profile. It changes only the 32-byte
+`salt` the profile is given; no profile, id, transcript or codec changes.
+
+**Primitives.** RFC 9497, base mode (`oprf`), ciphersuite
+`ristretto255-SHA512`, as implemented by `@noble/curves` 2.0.1
+(`ristretto255_oprf.oprf`).
+
+**Server key.** One host-held master key `M` (at least 32 random bytes) and
+the service profile id `P` give each account its key. The account need not
+exist.
+
+```
+seed_u = HMAC-SHA256(key = M,
+                     data = utf8("web2-ish-self-custody oprf user key v1")
+                            ‖ 0x00 ‖ utf8(P) ‖ 0x00 ‖ utf8(username_normalized))
+sk_u   = DeriveKeyPair(seed_u, info = utf8("web2-ish-self-custody oprf key info v1"))   (RFC 9497 §3.2.1)
+```
+
+**Client.**
+
+```
+input    = utf8("web2-ish-self-custody oprf input v1\n" ‖ username_normalized ‖ "\n") ‖ password
+blind, blinded = Blind(input)                         32-byte blinded element, sent to the service
+evaluated = BlindEvaluate(sk_u, blinded)              the service's 32-byte answer
+output   = Finalize(input, blind, evaluated)          64 bytes (RFC 9497 §3.3.1)
+salt     = HMAC-SHA256(key = output,
+                       data = utf8("web2-ish-self-custody oprf salt v1") ‖ 0x00 ‖ public_salt)
+```
+
+`salt` replaces the public salt as the profile's external salt. The password
+is the raw bytes, exactly as for the profile itself. Every string above is
+fixed wire surface; any change is a new domain string.
+
+**Known answer.** `vectors/oprf-salt-v1.json` fixes `M`, `P`, the username,
+the password, the public salt and the blinding randomness (48 bytes) and gives
+the blinded element, the answer, the salt and the sign-in public key that
+`signInEd25519ExternalSaltV2` derives under it. The blind there is the test
+hook of `startOprfSalt`; production uses the platform CSPRNG.
+
+**Transport.** The SDK router does not mount a route. A host exposes
+`createOprfServer(...).evaluate(username, blinded)` itself, where it can rate
+limit per account and per client (docs/SECURITY_MODEL.md#server-keyed-salt).
