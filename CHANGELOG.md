@@ -5,7 +5,7 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
-## Unreleased (planned v0.16.0-alpha.0)
+## v0.16.0-alpha.0 — 2026-10-30 (alpha pre-release)
 
 Server-keyed salt (additive). An oblivious pseudorandom function between the
 client and the identity service, RFC 9497 base mode on ristretto255-SHA512,
