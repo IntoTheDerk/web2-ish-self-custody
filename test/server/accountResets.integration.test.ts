@@ -232,6 +232,14 @@ async function startEmail(name: string, via: IdentityService = service, context:
   return via.startAccountReset({ username: name }, context);
 }
 
+async function boundAt(accountId: string): Promise<Date> {
+  const rows = await first.query(
+    `SELECT sign_in_key_bound_at FROM ${prefix}_account_wallets WHERE account_id = $1::uuid AND is_primary`,
+    [accountId],
+  );
+  return new Date(rows.rows[0]?.["sign_in_key_bound_at"] as string | Date);
+}
+
 async function completeEmail(
   name: string,
   resetId: string,
@@ -413,7 +421,7 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   }, 60_000);
 
   afterAll(async () => {
@@ -1167,9 +1175,11 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       const issued = await startEmail(account.name);
       expect(issued.delivery).toBeNull();
       const next = newKey();
+      const boundBefore = await boundAt(account.accountId);
       const done = await completeEmail(account.name, earlier.delivery!.resetId, earlier.delivery!.code.toLowerCase(), next, {
         context: ctx({ clientLabel: "Firefox on macOS" }),
       });
+      expect((await boundAt(account.accountId)).getTime()).toBeGreaterThan(boundBefore.getTime());
       expect(done.wallets.map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
       expect([...done.revokedSessionIds].sort()).toEqual([account.session.session.id, other.session.id].sort());
       expect(await authenticates(account.session.token)).toBe(false);
@@ -1454,7 +1464,11 @@ describe.skipIf(!url)("account resets on PostgreSQL", () => {
       );
 
       const next = newKey();
+      const boundBefore = await boundAt(account.accountId);
+      expect(await boundAt(account.accountId)).toEqual(boundBefore);
       const done = await completeSignedIn(account.name, account.session.token, started.reset.id, next, { context: ctx({ now: after }) });
+      // Stamped with the statement's clock, the same one the reset completes on.
+      expect((await boundAt(account.accountId)).getTime()).toBe(after.getTime());
       expect(done.wallets.map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
       expect(done.revokedSessionIds).toEqual([other.session.id]);
       expect(await authenticates(account.session.token)).toBe(true);
