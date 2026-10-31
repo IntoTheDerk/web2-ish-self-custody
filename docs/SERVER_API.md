@@ -1707,7 +1707,21 @@ forcing emails to be unique or present.
 `id uuid` (PK), `account_id` (FK, `ON DELETE CASCADE`), `service_profile_id`
 (FK), `profile_id`, `codec_id`, `curve`, `application_id`, `network_id`,
 `address`, `address_normalized`, `public_key`, `fingerprint`, `is_primary`,
-`created_at`.
+`created_at`, `sign_in_key_bound_at`.
+
+`sign_in_key_bound_at timestamptz NOT NULL DEFAULT now()` (migration 14) is when
+the row's `address`, `public_key` and `fingerprint` were last written. Sign-up
+sets it to the row's `created_at`; sign-in key rotation, recovery-key recovery,
+the email reset and the signed-in reset set it, in the same single statement
+that rewrites those columns, to that statement's clock (`RequestContext.now`
+when given). Nothing else writes it, so a login, an email change or a
+recovery-key enrollment leaves it alone. `created_at` never moves on rotation,
+so only this column says when the current key was bound; a host can derive
+per-key state from it (for example which server-keyed-salt key version the
+account uses). Migration 14 adds the column nullable, backfills existing rows
+from `created_at` where it is NULL, then sets the default and `NOT NULL`; each
+statement is idempotent and a re-run moves no value. The service reads it
+nowhere and does not return it on `IdentityWallet`.
 
 `codec_id` records which address encoding produced the stored address. It is
 written on every registration from `profile.codec.id` and surfaced on the

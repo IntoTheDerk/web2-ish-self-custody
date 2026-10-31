@@ -1181,11 +1181,12 @@ export function createIdentityService(
                   INSERT INTO ${p}_account_wallets (
                     account_id, service_profile_id, profile_id, codec_id, curve,
                     application_id, network_id, address, address_normalized,
-                    public_key, fingerprint, is_primary, created_at, vault
+                    public_key, fingerprint, is_primary, created_at, vault,
+                    sign_in_key_bound_at
                   )
                   SELECT new_account.id, $2::text, $7::text, $8::text, $9::text,
                          $10::text, $11::text, $12::text, $13::text, $14::text,
-                         $15::text, true, clock.at, $22::jsonb
+                         $15::text, true, clock.at, $22::jsonb, clock.at
                   FROM new_account, clock
                   RETURNING id, account_id, service_profile_id, profile_id, codec_id,
                             curve, application_id, network_id, address,
