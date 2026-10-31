@@ -878,6 +878,28 @@ export function identityMigrations(
          $del$`,
       ]),
     }),
+    Object.freeze({
+      version: 14,
+      name: "sign-in-key-bound-at",
+      statements: Object.freeze([
+        // When the account's primary key row last had its address, public key
+        // or fingerprint written: set at sign-up and again by every statement
+        // that rewrites them (sign-in key rotation, recovery, email reset,
+        // signed-in reset). `created_at` never moves on rotation, so it cannot
+        // say which key an account is on. A host derives per-key-epoch state
+        // (such as a server-keyed-salt key version) from it. Nothing else
+        // touches it. Added nullable first so an existing row is backfilled
+        // from `created_at` (the key it holds was bound then), and only a row
+        // still NULL is backfilled, so a re-run never moves a value the
+        // service has since set. Four idempotent statements, each safe to
+        // repeat after a partial run.
+        `ALTER TABLE ${p}_account_wallets ADD COLUMN IF NOT EXISTS sign_in_key_bound_at timestamptz`,
+        `UPDATE ${p}_account_wallets SET sign_in_key_bound_at = created_at
+          WHERE sign_in_key_bound_at IS NULL`,
+        `ALTER TABLE ${p}_account_wallets ALTER COLUMN sign_in_key_bound_at SET DEFAULT now()`,
+        `ALTER TABLE ${p}_account_wallets ALTER COLUMN sign_in_key_bound_at SET NOT NULL`,
+      ]),
+    }),
   ]);
 }
 

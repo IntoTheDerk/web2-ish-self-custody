@@ -247,7 +247,7 @@ describe.skipIf(!url)("the second sign-in factor on PostgreSQL", () => {
     await first.connect();
     gated = createIdentityService(pgDriver(first), gatedConfig);
     plain = createIdentityService(recordingDriver(pgDriver(first)), base);
-    expect(await gated.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(await gated.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   }, 60_000);
 
   afterAll(async () => {

@@ -710,7 +710,8 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      SET address = $5::text,
                          address_normalized = $6::text,
                          public_key = $7::text,
-                         fingerprint = $8::text
+                         fingerprint = $8::text,
+                        sign_in_key_bound_at = (SELECT at FROM clock)
                     FROM acct
                    WHERE w.account_id = acct.id
                      AND w.service_profile_id = $3::text
@@ -1490,7 +1491,8 @@ export function accountChangeOperations(deps: AccountChangeDependencies): Accoun
                      SET address = $6::text,
                          address_normalized = $7::text,
                          public_key = $8::text,
-                         fingerprint = $9::text
+                         fingerprint = $9::text,
+                        sign_in_key_bound_at = (SELECT at FROM clock)
                     FROM ok
                    WHERE w.id = ok.wallet_id
                    RETURNING ${bare("w", WALLET_COLUMNS)}

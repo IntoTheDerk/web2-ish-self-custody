@@ -196,7 +196,7 @@ describe.skipIf(!url)("account deletion on PostgreSQL", () => {
     first = new PgClient({ connectionString: url! });
     await first.connect();
     service = createIdentityService(pgDriver(first), config());
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   }, 60_000);
 
   afterAll(async () => {

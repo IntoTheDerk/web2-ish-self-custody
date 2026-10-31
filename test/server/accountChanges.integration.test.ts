@@ -316,6 +316,14 @@ async function liveTokens(accountId: string): Promise<number> {
   );
 }
 
+async function boundAt(accountId: string): Promise<Date> {
+  const rows = await first.query(
+    `SELECT sign_in_key_bound_at FROM ${prefix}_account_wallets WHERE account_id = $1::uuid AND is_primary`,
+    [accountId],
+  );
+  return new Date(rows.rows[0]?.["sign_in_key_bound_at"] as string | Date);
+}
+
 async function suspend(accountId: string): Promise<void> {
   await first.query(`UPDATE ${prefix}_accounts SET status = 'suspended' WHERE id = $1::uuid`, [accountId]);
 }
@@ -335,7 +343,7 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
     service = createIdentityService(pgDriver(first), config(prefix));
     otherService = createIdentityService(pgDriver(second), config(prefix));
     secondPid = Number((await second.query("SELECT pg_backend_pid() AS pid")).rows[0]?.["pid"]);
-    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(await service.migrate()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   }, 60_000);
 
   afterAll(async () => {
@@ -502,8 +510,10 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
       const bystander = await register(username("bystander"));
       const [before] = await service.listWallets(accountId);
       const next = newKey();
+      const boundBefore = await boundAt(accountId);
 
       const result = await rotate(name, s0.token, key, next, service, ctx({ clientLabel: "Firefox on macOS" }));
+      expect((await boundAt(accountId)).getTime()).toBeGreaterThan(boundBefore.getTime());
       expect(result.wallets).toHaveLength(1);
       expect(result.wallets[0]).toMatchObject({
         id: before!.id,
@@ -720,6 +730,74 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
         [accountId, extra.identifier],
       );
       await expectCode(() => rotate(name, session.token, key, newKey()), "wallet-conflict");
+    });
+  });
+
+  describe("sign_in_key_bound_at (migration 14)", () => {
+    it("is set at sign-up and moves only when the primary key row is rewritten", async () => {
+      const name = username("bound");
+      const { key, accountId, session } = await register(name);
+      const created = await first.query(
+        `SELECT created_at, sign_in_key_bound_at FROM ${prefix}_account_wallets WHERE account_id = $1::uuid`,
+        [accountId],
+      );
+      expect(created.rows).toHaveLength(1);
+      expect(new Date(created.rows[0]?.["sign_in_key_bound_at"] as string).getTime()).toBe(
+        new Date(created.rows[0]?.["created_at"] as string).getTime(),
+      );
+      const bound = (await boundAt(accountId)).getTime();
+
+      // Unrelated writes leave it alone: a login, a recovery key, an email
+      // change, an operator recovery-key revocation and a wallet read.
+      const second = await login(name, key);
+      const recovery = newKey();
+      await enroll(name, session.token, key, recovery);
+      await changeEmail(name, session.token, key, "bound.change@example.org");
+      await service.revokeRecoveryKeys(accountId);
+      await service.listWallets(accountId);
+      expect(await authenticates(second.token)).toBe(true);
+      expect((await boundAt(accountId)).getTime()).toBe(bound);
+
+      // A rotation moves it, and a second one moves it again.
+      const next = newKey();
+      await rotate(name, session.token, key, next);
+      const afterFirst = (await boundAt(accountId)).getTime();
+      expect(afterFirst).toBeGreaterThan(bound);
+      await rotate(name, session.token, next, newKey());
+      expect((await boundAt(accountId)).getTime()).toBeGreaterThan(afterFirst);
+    });
+
+    it("is NOT NULL with a default, and the migration is idempotent on a populated table", async () => {
+      const name = username("bound-migrate");
+      const { accountId } = await register(name);
+      const meta = await first.query(
+        `SELECT is_nullable, column_default FROM information_schema.columns
+          WHERE table_name = $1 AND column_name = 'sign_in_key_bound_at'`,
+        [`${prefix}_account_wallets`],
+      );
+      expect(meta.rows).toEqual([{ is_nullable: "NO", column_default: "now()" }]);
+
+      // Put the table back in its pre-14 shape with a populated row whose
+      // creation is long ago, then run the migration: the row is backfilled
+      // from created_at, not from the time the migration ran.
+      const longAgo = "2024-03-04T05:06:07.000Z";
+      await first.query(`UPDATE ${prefix}_account_wallets SET created_at = $2::timestamptz WHERE account_id = $1::uuid`, [accountId, longAgo]);
+      await first.query(`ALTER TABLE ${prefix}_account_wallets DROP COLUMN sign_in_key_bound_at`);
+      await first.query(`DELETE FROM ${prefix}_schema_migrations WHERE version = 14`);
+      expect(await service.migrate()).toEqual([14]);
+      expect((await boundAt(accountId)).toISOString()).toBe(longAgo);
+
+      // Re-running every statement, alone or twice, moves nothing.
+      const moved = "2025-01-02T03:04:05.000Z";
+      await first.query(`UPDATE ${prefix}_account_wallets SET sign_in_key_bound_at = $2::timestamptz WHERE account_id = $1::uuid`, [accountId, moved]);
+      const migration = identityMigrations(service.config).find((candidate) => candidate.version === 14)!;
+      for (let run = 0; run < 2; run += 1) {
+        for (const statement of migration.statements) {
+          await applyMigrationStatement(pgDriver(first), statement);
+        }
+      }
+      expect((await boundAt(accountId)).toISOString()).toBe(moved);
+      expect(await service.migrate()).toEqual([]);
     });
   });
 
@@ -949,7 +1027,9 @@ describe.skipIf(!url)("account changes and recovery keys on PostgreSQL", () => {
       expect(await liveTokens(accountId)).toBe(1);
 
       const next = newKey();
+      const boundBefore = await boundAt(accountId);
       const recovered = await complete(name, secondBegin.recoveryToken, recovery, next, service, ctx({ clientLabel: "Safari on iOS" }));
+      expect((await boundAt(accountId)).getTime()).toBeGreaterThan(boundBefore.getTime());
       expect(recovered.account.id).toBe(accountId);
       expect(recovered.wallets.map((wallet) => wallet.publicKey)).toEqual([next.identifier]);
       // Every earlier session is revoked; the new one works.

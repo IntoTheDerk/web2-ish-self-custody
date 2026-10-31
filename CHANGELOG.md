@@ -5,6 +5,24 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## Unreleased (planned v0.17.0-alpha.0)
+
+Sign-in key binding time (additive). New column
+`<prefix>_account_wallets.sign_in_key_bound_at timestamptz NOT NULL DEFAULT
+now()` (migration 14): when the account's primary key row last had its
+address, public key or fingerprint written. `created_at` never moves on
+rotation, so it cannot say which key an account is on.
+
+- Set at sign-up (equal to the row's `created_at`) and set to the statement's
+  clock by every statement that rewrites the row's key: sign-in key rotation,
+  recovery, email reset and signed-in reset. The same single statement each
+  time, no extra statement. Nothing else writes it.
+- Migration 14 is idempotent: existing rows are backfilled from `created_at`
+  (only where still NULL), then the default and `NOT NULL` are set. A re-run
+  moves no value.
+- Read it from SQL; it is not added to `IdentityWallet`. No profile, id,
+  transcript or codec changes. See docs/SERVER_API.md `<p>_account_wallets`.
+
 ## v0.16.0-alpha.0 — 2026-10-30 (alpha pre-release)
 
 Server-keyed salt (additive). An oblivious pseudorandom function between the
