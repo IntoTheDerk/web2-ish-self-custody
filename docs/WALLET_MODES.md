@@ -210,6 +210,63 @@ platform login or password reset cannot decrypt it. Rewrapping requires a
 recovery code to create the replacement recovery wrapper; a user who lost their
 code but knows the password can generate a new code with `generateRecoveryCode`.
 
+## Mutable login names and a stable wallet
+
+For an account whose email, public username and password may change, prefer a
+persistent vault over deriving its wallet anew at every sign-in:
+
+- Keep one permanent platform account UUID. Treat email addresses and public
+  usernames as verified lookup aliases for that account, not key material.
+- Generate a random wallet once for a new account. The vault generates its own
+  random password-wrapper salt; two accounts choosing the same password do not
+  share a wallet or an encryption key. A UUID identifies the account but does
+  not replace random salt bytes.
+- Keep the SDK's `usernameNormalized` / setup `normalizedUsername` immutable.
+  It is an enrollment identifier, not a mutable display name. A host may choose
+  an opaque identifier at enrollment and maintain its login aliases separately.
+  A legacy identifier that happens to look like an email must remain unchanged
+  when the contact email changes. The SDK's separate `email` field is not a
+  derivation input.
+- Keep a vault's `normalizedUsername` header unchanged too: it is authenticated
+  encryption metadata. Editing that JSON field invalidates the envelope. An
+  application must bind the historical header, profile, context and wallet key
+  to the permanent account, rather than compare it to today's login alias.
+- Change passwords by rewrapping and persisting the same vault with a revision
+  check. Change aliases through a separately authorized account operation with
+  fresh proof and email verification. Update aliases, invalidate stale grants
+  and sessions, and record the change atomically in the host application.
+
+On another device, resolve the alias to the same account, authorize a vault read
+as described above, decrypt locally and prove possession of the enrolled key.
+Never publish vaults by email/username, trust a caller-supplied account UUID, or
+fall back to creating a wallet when decryption fails. Email verification grants
+access to ciphertext only; it is not permission to replace a wallet or bypass its
+unlocking secret. Hosts needing password-only fresh-device authentication can
+instead enroll a separate sign-in key and keep the wallet encrypted behind that
+session; see [the sign-in pattern](INTEGRATION.md#a-sign-in-key-separate-from-the-wallet).
+
+### Existing deterministic accounts
+
+`createWalletVaultFromCredentials` seals the existing derived signing seed and
+preserves its address. Before accepting a migration, locally open that envelope,
+check its address and public key against the enrolled wallet, and submit fresh
+proof for that same account. Commit the envelope and explicit access-mode change
+atomically; keep the old flow usable if the commit fails. Subsequent sign-in must
+open the saved vault instead of deriving again from the new alias or password.
+This is an application migration, not a configuration switch on a populated SDK
+identity-service namespace. `createRandomAccountWallet` creates a new key and
+must not be used to migrate an existing wallet.
+
+Keep the participant UUID, wallet identity, credentials and ballot ownership
+unchanged during this migration. Back up the encrypted vault as well as the
+recovery code; a kit containing only a code is insufficient for offline recovery.
+
+Migration does **not** revoke the original deterministic credentials. They can
+still reconstruct the original key, just as an old vault copy can still be opened
+by its old password. If those credentials or the key are compromised, preserving
+the same wallet cannot revoke the attacker's key; perform an explicit key and
+asset/authorization migration instead. Changing a login alias is not key revocation.
+
 ## Security and deployment boundaries
 
 Both modes require strong passwords. A known deterministic public key permits
