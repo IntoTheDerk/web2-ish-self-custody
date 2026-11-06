@@ -7,6 +7,9 @@ and the commit history.
 
 ## v0.17.1-alpha.0 — unpublished patch candidate
 
+- Refresh Vitest to 4.1.12 and its locked development dependencies to resolve
+  current tooling advisories; production dependencies remain unchanged.
+
 - Allow the optional `kalvora.js` peer at exactly `0.0.1-alpha.3`, retaining
   alpha.1 and alpha.2 compatibility. Pin development verification to reviewed
   commit `f0be43698ec097db6e9005cb33a6b8e388818019`.

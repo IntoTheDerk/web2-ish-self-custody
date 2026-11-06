@@ -88,6 +88,6 @@
     "kalvora.js": "git+https://github.com/IntoTheDerk/kalvora.js.git#f0be43698ec097db6e9005cb33a6b8e388818019",
     "pg": "8.22.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.12"
   }
 }
