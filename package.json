@@ -1,6 +1,6 @@
 {
   "name": "web2-ish-self-custody",
-  "version": "0.17.0-alpha.0",
+  "version": "0.17.1-alpha.0",
   "description": "Generic deterministic Ed25519 wallet derivation and a portable identity service, with pluggable per-chain address codecs.",
   "repository": {
     "type": "git",
@@ -76,7 +76,7 @@
     "bs58": "6.0.0"
   },
   "peerDependencies": {
-    "kalvora.js": "0.0.1-alpha.1 || 0.0.1-alpha.2"
+    "kalvora.js": "0.0.1-alpha.1 || 0.0.1-alpha.2 || 0.0.1-alpha.3"
   },
   "peerDependenciesMeta": {
     "kalvora.js": {
@@ -85,9 +85,9 @@
   },
   "devDependencies": {
     "@types/pg": "8.21.0",
-    "kalvora.js": "0.0.1-alpha.2",
+    "kalvora.js": "git+https://github.com/IntoTheDerk/kalvora.js.git#f0be43698ec097db6e9005cb33a6b8e388818019",
     "pg": "8.22.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.12"
   }
 }

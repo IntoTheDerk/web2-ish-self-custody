@@ -5,6 +5,22 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## v0.17.1-alpha.0 — unpublished patch candidate
+
+- Refresh Vitest to 4.1.12 and its locked development dependencies to resolve
+  current tooling advisories; production dependencies remain unchanged.
+
+- Allow the optional `kalvora.js` peer at exactly `0.0.1-alpha.3`, retaining
+  alpha.1 and alpha.2 compatibility. Pin development verification to reviewed
+  commit `f0be43698ec097db6e9005cb33a6b8e388818019`.
+- Verify unchanged Kalvora wallet identities, addresses, signatures, SLIP-0010
+  path and bounded signer lifetime against the existing tests and independent
+  Python vectors. This is compatibility metadata, not a wallet migration:
+  no profile IDs, transcripts, codecs, derivation, vectors or migrations change.
+- The alpha.3 transaction protocol requires its own trusted chain configuration;
+  accepting its wallet peer does not establish network readiness or authorize
+  live broadcasts. Neither candidate is published by this change.
+
 ## v0.17.0-alpha.0 — 2026-10-31 (alpha pre-release)
 
 Sign-in key binding time (additive). New column

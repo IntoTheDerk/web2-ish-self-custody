@@ -25,13 +25,15 @@ transaction code — so the browser custody path stays offline.
 
 kalvora.js is an **optional peer dependency**. An application that imports
 `web2-ish-self-custody/chains/kalvora` installs it alongside this package, at
-the exact version in this package's `peerDependencies`:
+one of the exact versions in this package's `peerDependencies`: alpha.1,
+alpha.2, or alpha.3. The development compatibility tests pin the reviewed
+alpha.3 source below; it is not an npm release:
 
 ```json
 {
   "dependencies": {
     "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>",
-    "kalvora.js": "0.0.1-alpha.1"
+    "kalvora.js": "git+https://github.com/IntoTheDerk/kalvora.js.git#f0be43698ec097db6e9005cb33a6b8e388818019"
   }
 }
 ```
