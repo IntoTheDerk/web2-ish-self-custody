@@ -10,7 +10,7 @@ deterministic keys or random keys protected by an encrypted vault.
 
 > **Security warning:** anyone who knows a public identity and its public salt can test password guesses offline. Deterministic password-derived custody is not equivalent to a randomly generated wallet seed. Use only high-entropy, password-manager-generated credentials and complete an independent security review before funded use.
 
-> **Alpha pre-release (`0.10.0-alpha.x`).** The bundled Kalvora chain is provided by the kalvora.js SDK; supported versions are exactly `0.0.1-alpha.1` and `0.0.1-alpha.2`, with development tests pinned to `0.0.1-alpha.2`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
+> **Unpublished patch candidate (`0.17.1-alpha.0`).** The bundled Kalvora chain is provided by the kalvora.js SDK; supported versions are exactly `0.0.1-alpha.1`, `0.0.1-alpha.2`, and `0.0.1-alpha.3`. Development tests pin the reviewed alpha.3 Git commit `f0be43698ec097db6e9005cb33a6b8e388818019`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
 
 ## Contents
 
@@ -186,14 +186,16 @@ package builds itself through its `prepare` script during the Git install.
 Node 22 or later is required.
 
 To use the Kalvora chain, also install
-[kalvora.js](https://github.com/IntoTheDerk/kalvora.js), pinned to either supported
-version: `0.0.1-alpha.1` or `0.0.1-alpha.2`. Development tests use `0.0.1-alpha.2`:
+[kalvora.js](https://github.com/IntoTheDerk/kalvora.js), pinned to a supported
+version: `0.0.1-alpha.1`, `0.0.1-alpha.2`, or `0.0.1-alpha.3`. Development
+tests use the exact reviewed alpha.3 Git commit below; alpha.3 is not published
+to npm. This compatibility allowance preserves the existing wallet derivation:
 
 ```json
 {
   "dependencies": {
     "web2-ish-self-custody": "git+https://github.com/IntoTheDerk/web2-ish-self-custody.git#<reviewed-commit-sha>",
-    "kalvora.js": "0.0.1-alpha.2"
+    "kalvora.js": "git+https://github.com/IntoTheDerk/kalvora.js.git#f0be43698ec097db6e9005cb33a6b8e388818019"
   }
 }
 ```
