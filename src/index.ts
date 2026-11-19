@@ -16,7 +16,11 @@ export type { AccountChangeAction, AccountChangeMessageInput } from "./accountCh
 export { assertCodecRoundTrip, defineIdentityCodec } from "./codec.js";
 export type { IdentityCodec } from "./codec.js";
 export { derivePublicIdentity, withDerivedWallet } from "./derive.js";
-export { createRandomAccountWallet, withAccountWallet } from "./accountWallet.js";
+export {
+  createRandomAccountWallet,
+  createRandomAccountWalletWithRecoveryCodes,
+  withAccountWallet,
+} from "./accountWallet.js";
 export type { AccountWalletMode, AccountWalletSetup } from "./accountWallet.js";
 export { DerivationError } from "./errors.js";
 export type { DerivationErrorCode } from "./errors.js";
@@ -50,14 +54,34 @@ export type {
   DerivedWallet,
 } from "./types.js";
 export {
+  DEFAULT_RECOVERY_CODE_COUNT,
+  MAX_RECOVERY_CODES,
   WALLET_VAULT_FORMAT,
+  WALLET_VAULT_FORMAT_V2,
   createWalletVault,
   createWalletVaultFromCredentials,
+  createWalletVaultWithRecoveryCodes,
   generateRecoveryCode,
+  generateRecoveryCodes,
   normalizeRecoveryCode,
   openWalletVaultWithPassword,
   openWalletVaultWithRecoveryCode,
   parseWalletVault,
+  parseWalletVaultV1,
+  parseWalletVaultV2,
+  recoveryCodeHint,
+  recoveryCodeHints,
+  removeWalletVaultRecoveryCode,
+  replaceWalletVaultRecoveryCodes,
   rewrapWalletVaultPassword,
+  rewrapWalletVaultPasswordV2,
+  upgradeWalletVaultRecoveryCodes,
 } from "./vault.js";
-export type { CreateWalletVaultOptions, SealedBox, WalletVault } from "./vault.js";
+export type {
+  AnyWalletVault,
+  CreateWalletVaultOptions,
+  RecoverySlot,
+  SealedBox,
+  WalletVault,
+  WalletVaultV2,
+} from "./vault.js";

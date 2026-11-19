@@ -5,7 +5,12 @@ import { normalizeUsername } from "./normalization.js";
 import type { DerivationProfile } from "./profile.js";
 import { signInEd25519Codec } from "./signIn.js";
 import type { DerivedWallet } from "./types.js";
-import { createWalletVault, type WalletVault } from "./vault.js";
+import {
+  createWalletVault,
+  createWalletVaultWithRecoveryCodes,
+  type WalletVault,
+  type WalletVaultV2,
+} from "./vault.js";
 
 export type AccountWalletMode = "per-account-deterministic" | "random-vault";
 
@@ -70,6 +75,33 @@ export async function createRandomAccountWallet(
   profile: DerivationProfile,
   password: Uint8Array,
 ): Promise<{ vault: WalletVault; recoveryCode: string }> {
+  return withRandomAccountSeed(setup, profile, (seed) =>
+    createWalletVault({
+      profile, password, seed, username: setup.normalizedUsername,
+      context: { applicationId: setup.applicationId, networkId: setup.networkId },
+    }));
+}
+
+/** As `createRandomAccountWallet`, sealing a v2 vault with a set of recovery codes. */
+export async function createRandomAccountWalletWithRecoveryCodes(
+  setup: AccountWalletSetup,
+  profile: DerivationProfile,
+  password: Uint8Array,
+  recoveryCodeCount?: number,
+): Promise<{ vault: WalletVaultV2; recoveryCodes: string[] }> {
+  return withRandomAccountSeed(setup, profile, (seed) =>
+    createWalletVaultWithRecoveryCodes({
+      profile, password, seed, username: setup.normalizedUsername,
+      context: { applicationId: setup.applicationId, networkId: setup.networkId },
+      ...(recoveryCodeCount === undefined ? {} : { recoveryCodeCount }),
+    }));
+}
+
+async function withRandomAccountSeed<T>(
+  setup: AccountWalletSetup,
+  profile: DerivationProfile,
+  seal: (seed: Uint8Array) => Promise<T>,
+): Promise<T> {
   checkSetup(setup, profile);
   if (setup.mode !== "random-vault") {
     throw new DerivationError("This account uses deterministic derivation.", "invalid-profile");
@@ -82,10 +114,7 @@ export async function createRandomAccountWallet(
   }
   const seed = globalThis.crypto.getRandomValues(new Uint8Array(32));
   try {
-    return await createWalletVault({
-      profile, password, seed, username: setup.normalizedUsername,
-      context: { applicationId: setup.applicationId, networkId: setup.networkId },
-    });
+    return await seal(seed);
   } finally {
     seed.fill(0);
   }

@@ -1,6 +1,6 @@
 import type { DerivationProfile } from "../profile.js";
 import type { AccountWalletMode, AccountWalletSetup } from "../accountWallet.js";
-import type { WalletVault } from "../vault.js";
+import type { AnyWalletVault } from "../vault.js";
 
 export type ServiceWalletMode = AccountWalletMode | "service-deterministic";
 
@@ -14,7 +14,7 @@ export type ServiceWalletMode = AccountWalletMode | "service-deterministic";
  * (`email-verification-recipient-failures`), 20 each per 24 hours.
  */
 export type EmailVerificationCodeFormat = "symbols8" | "digits6";
-export type StoredWalletVault = Readonly<{ vault: WalletVault; revision: number }>;
+export type StoredWalletVault = Readonly<{ vault: AnyWalletVault; revision: number }>;
 export type ChallengePurpose = "registration" | "login" | "rotation";
 
 export const challengePurposes: readonly ChallengePurpose[] = Object.freeze([
@@ -414,7 +414,7 @@ export type RegistrationInput = Readonly<{
   challengeId: string;
   signature: string;
   /** Required only in random-vault mode. Never send the plaintext seed or secrets. */
-  vault?: WalletVault;
+  vault?: AnyWalletVault;
 }>;
 
 export type LoginInput = Readonly<{
