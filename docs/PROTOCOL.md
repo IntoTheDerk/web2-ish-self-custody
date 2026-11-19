@@ -444,6 +444,12 @@ cases in a new vector file; it never changes an existing case or edits a
 released vector file. Account resets added five actions and four principal
 forms this way, in `vectors/account-change-resets-v1.json`.
 
+The wallet vault envelope is versioned by its `format` string and `version`
+number. `web2-ish-self-custody-wallet-vault-v1` is unchanged by v2 and stays
+readable. A change to a member, an AAD layout, a key-derivation `info` string or
+a slot rule is a new format string, never an edit; see
+[wallet vault envelope v2](#wallet-vault-envelope-v2).
+
 Adding a profile or a chain is not a migration. Moving an existing user onto a
 different one is, and it needs an enrollment step.
 
@@ -679,7 +685,9 @@ salt input. The UUID is metadata, not an additional derivation input. Existing
 profile IDs, domain strings, and vectors retain their original meanings.
 
 `random-vault` mode generates a fresh 32-byte Ed25519 seed with secure randomness
-and seals it using the existing wallet-vault-v1 envelope. The profile supplies
+and seals it in a wallet vault: the v1 envelope from
+`createRandomAccountWallet`, or [v2](#wallet-vault-envelope-v2) with a set of
+recovery codes from `createRandomAccountWalletWithRecoveryCodes`. The profile supplies
 the codec and wrapper KDF parameters. Its deterministic entropy transcript and
 optional key-derivation step are not applied to this random seed.
 
@@ -709,6 +717,56 @@ therefore refused in that mode: `createRandomAccountWallet` throws
 
 See [WALLET_MODES.md](WALLET_MODES.md) for storage, multi-device access, vault
 password changes, and the platform's authorization responsibilities.
+
+## Wallet vault envelope v2
+
+Fixed wire surface since v0.18.0. v1 has one recovery wrapper; v2 has a set of
+recovery slots over the same data key. Both stay readable.
+
+```json
+{
+  "format": "web2-ish-self-custody-wallet-vault-v2",
+  "version": 2,
+  "profileId": "…", "codecId": "…", "applicationId": "…", "networkId": "…",
+  "normalizedUsername": "…", "address": "…", "publicKey": "…",
+  "seed":     { "ivHex": "…", "ciphertextHex": "…" },
+  "password": { "kdf": { "N": 65536, "r": 8, "p": 1, "dkLen": 32 }, "saltHex": "…", "ivHex": "…", "ciphertextHex": "…" },
+  "recovery": [
+    { "hint": "ABCD", "saltHex": "…", "ivHex": "…", "ciphertextHex": "…" }
+  ]
+}
+```
+
+- `recovery` holds 1 to 10 slots. `hint` is exactly the first four characters
+  of the slot's normalized recovery code, in the code alphabet
+  `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, and is unique within a vault.
+- Every box is AES-256-GCM with a 12-byte IV. `seed` is the 32-byte seed under a
+  random 32-byte data key. `password` and each slot are that data key under a
+  wrapping key.
+- Header AAD is the UTF-8 encoding of ten lines joined by `\n`: the domain
+  `web2-ish-self-custody wallet vault aad v2`, then `format`, `version`,
+  `profileId`, `codecId`, `applicationId`, `networkId`, `normalizedUsername`,
+  `address`, `publicKey`. `seed` and `password` use it as is.
+- A slot's AAD is the header AAD followed by `\nrecovery slot\n` and the slot's
+  `hint`, so a slot authenticates the vault it belongs to and the name it
+  answers to.
+- The password wrapping key is unchanged from v1: scrypt of the password at
+  `kdf` with the 32-byte `saltHex`, then HKDF-SHA-256 with that salt and
+  `info = "web2-ish-self-custody wallet vault password key v1"`.
+- A slot's wrapping key is HKDF-SHA-256 over the 32 code bytes with the slot's
+  32-byte `saltHex` and
+  `info = "web2-ish-self-custody wallet vault recovery key v2"`. There is no
+  stretching, so a code is always generated at 256 bits and never chosen.
+- A recovery code is matched to the slot whose `hint` equals its own. No
+  matching slot, a wrong code and a tampered slot fail identically
+  (`vault-authentication-failed`).
+- The data key is kept when the password wrapper is replaced, when slots are
+  replaced and when a slot is removed. `upgradeWalletVaultRecoveryCodes` is the
+  one operation that draws a new data key and re-seals every member.
+
+There is no vault vector: every box draws a random IV and salt, and the package
+has no seam for fixing that randomness. The behavior is pinned by
+`test/vault-recovery-codes.test.ts`.
 
 ## Independent vector verification
 

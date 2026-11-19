@@ -10,7 +10,7 @@ deterministic keys or random keys protected by an encrypted vault.
 
 > **Security warning:** anyone who knows a public identity and its public salt can test password guesses offline. Deterministic password-derived custody is not equivalent to a randomly generated wallet seed. Use only high-entropy, password-manager-generated credentials and complete an independent security review before funded use.
 
-> **Unpublished patch candidate (`0.17.1-alpha.0`).** The bundled Kalvora chain is provided by the kalvora.js SDK; supported versions are exactly `0.0.1-alpha.1`, `0.0.1-alpha.2`, and `0.0.1-alpha.3`. Development tests pin the reviewed alpha.3 Git commit `f0be43698ec097db6e9005cb33a6b8e388818019`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
+> **Unpublished candidate (`0.18.0-alpha.0`).** The bundled Kalvora chain is provided by the kalvora.js SDK; supported versions are exactly `0.0.1-alpha.1`, `0.0.1-alpha.2`, and `0.0.1-alpha.3`. Development tests pin the reviewed alpha.3 Git commit `f0be43698ec097db6e9005cb33a6b8e388818019`. The Kalvora chain surface (its exports, profile, and vectors) may change between alpha releases. The package has not received an independent cryptographic audit; complete an independent security review before funded use.
 
 ## Contents
 
@@ -435,6 +435,76 @@ Limits worth stating plainly:
 - Client helpers return vaults without persisting or transmitting them. The
   optional identity service stores encrypted vaults in `random-vault` mode;
   the host supplies access authorization, backups, and recovery-code delivery.
+
+### Several recovery codes (vault v2)
+
+A v1 vault has one recovery code, and every re-seal rebuilds its wrapper, so a
+user who changes the password without the code gets a new one. The v2 envelope
+(since v0.18.0) holds a set of codes, 5 by default and 10 at most. Each code
+wraps the same data key in its own slot, and v2 keeps that data key across
+changes: a new password leaves every code working, and the set can be replaced
+with any one code.
+
+```ts
+import {
+  createWalletVaultWithRecoveryCodes,
+  openWalletVaultWithRecoveryCode,
+  recoveryCodeHints,
+  removeWalletVaultRecoveryCode,
+  replaceWalletVaultRecoveryCodes,
+  rewrapWalletVaultPasswordV2,
+  upgradeWalletVaultRecoveryCodes,
+} from "web2-ish-self-custody";
+
+// A new wallet: show all the codes once, to be kept in separate places.
+const { vault, recoveryCodes } = await createWalletVaultWithRecoveryCodes({
+  profile, context, username, password: vaultPassword, seed,
+});
+
+// Any one code opens the wallet, as often as needed.
+await openWalletVaultWithRecoveryCode(vault, recoveryCodes[2], codec, useWallet);
+
+// A new password touches no code.
+const rotated = await rewrapWalletVaultPasswordV2(vault, { recoveryCode: recoveryCodes[0] }, newVaultPassword);
+
+// Retire one code by its public hint (its first four characters), or replace the set.
+const fewer = removeWalletVaultRecoveryCode(vault, recoveryCodeHints(vault)[1]);
+const fresh = await replaceWalletVaultRecoveryCodes(vault, { password: vaultPassword });
+
+// Move an existing v1 vault onto a code set. Its single code stops working.
+const upgraded = await upgradeWalletVaultRecoveryCodes(storedV1Vault, { password: vaultPassword }, vaultPassword);
+```
+
+| export | purpose |
+| --- | --- |
+| `createWalletVaultWithRecoveryCodes({ profile, context, username, password, seed, recoveryCodeCount? })` | seals a seed into a v2 vault and returns its codes |
+| `createRandomAccountWalletWithRecoveryCodes(setup, profile, password, recoveryCodeCount?)` | the `random-vault` account wallet, sealed as v2 |
+| `upgradeWalletVaultRecoveryCodes(vault, unlock, password, recoveryCodeCount?)` | re-seals a v1 or v2 vault from scratch as v2 with a fresh set; `password` is what the result opens with |
+| `replaceWalletVaultRecoveryCodes(vault, unlock, recoveryCodeCount?)` | replaces every code of a v2 vault; the password is neither needed nor changed |
+| `removeWalletVaultRecoveryCode(vault, hint)` | drops one slot; refuses to remove the last |
+| `rewrapWalletVaultPasswordV2(vault, unlock, newPassword)` | new password, same codes |
+| `generateRecoveryCodes(count?)` / `recoveryCodeHint(code)` / `recoveryCodeHints(vault)` | a set with distinct hints, a code's hint, a vault's hints |
+| `parseWalletVault(value)` / `parseWalletVaultV1` / `parseWalletVaultV2` | strict validation of either format, or of one |
+
+`openWalletVaultWithPassword`, `openWalletVaultWithRecoveryCode` and
+`parseWalletVault` accept both formats. The v1 functions are unchanged and
+refuse a v2 vault.
+
+What the set is and is not:
+
+- The codes are spare keys, not one-time codes. Using one does not spend it, and
+  each is a full key to the wallet, so more codes are more copies to protect.
+- Removing or replacing a code changes the envelope it is applied to. Anyone who
+  kept an older copy of the vault can still open that copy with the old code. A
+  host must stop serving old copies, and a compromised key still needs a
+  separate key migration.
+- Each slot's `hint`, the first four characters of its code, is stored in the
+  clear so a person can tell their codes apart. It discloses 20 of the code's
+  256 bits.
+- Losing the password and every code loses the wallet.
+
+The exact envelope is in
+[docs/PROTOCOL.md](docs/PROTOCOL.md#wallet-vault-envelope-v2).
 
 See [Encrypted-vault integrations](docs/INTEGRATION.md#encrypted-vault-integrations).
 

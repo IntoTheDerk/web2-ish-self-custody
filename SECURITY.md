@@ -152,6 +152,12 @@ These are intentional properties, not bugs:
   consuming application owns the strength policy when a password is chosen
 - forgotten credentials are not recoverable by this package, except through the
   recovery code of a wallet vault created before they were forgotten
+- the recovery codes of a v2 vault are spare keys, not one-time codes: using one
+  does not spend it, and each one alone opens the wallet
+- removing or replacing a recovery code changes only the envelope it is applied
+  to; an older copy of the vault that someone kept still opens with the old code
+- a v2 recovery slot stores its code's first four characters as a public hint,
+  which discloses 20 of the code's 256 bits
 - credential, profile, or codec changes derive a different wallet or a different
   address for the same key
 - JavaScript strings cannot be reliably zeroized

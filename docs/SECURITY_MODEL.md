@@ -126,7 +126,8 @@ service learning the password or being able to compute a key.
 The loss and change rows are about a wallet: the key a chain wallet profile derives, or a wallet derived from an application secret. For a sign-in key, the key of the [sign-in profile](#sign-in-profile), the same events lose or change the key that signs in to the service, which a rotation (while the old password is known) or a recovery key, an emailed reset code or a signed-in reset (afterwards) replaces at the service, if the deployment enables them; neither recovers the old key or anything derived from it. A sign-in key holds no funds.
 
 - Forgotten password or username: permanent wallet loss, unless the wallet was enrolled in a wallet vault beforehand and its recovery code is still held.
-- Lost vault password and lost recovery code: permanent wallet loss.
+- Lost vault password and lost recovery code: permanent wallet loss. For a v2 vault, that means the password and every code in its set.
+- Retired or replaced recovery code: it stops opening the current envelope only. A copy of the vault from before the change still opens with it.
 - Password or username change during deterministic derivation: different wallet identity; no automatic account update.
 - Profile/context change: different wallet identity.
 - External salt loss, rotation, or substitution: different wallet identity.

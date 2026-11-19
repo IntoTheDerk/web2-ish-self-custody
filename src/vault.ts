@@ -40,6 +40,19 @@ const AAD_DOMAIN = "web2-ish-self-custody wallet vault aad v1";
 const RECOVERY_INFO = "web2-ish-self-custody wallet vault recovery key v1";
 const PASSWORD_INFO = "web2-ish-self-custody wallet vault password key v1";
 
+/**
+ * The v2 envelope: the same seed and password wrapper, and a set of recovery
+ * codes instead of one. Each code wraps the same data key in its own slot, and
+ * v2 keeps that data key across changes, so a new password leaves every code
+ * working and codes can be replaced without the password. v1 is unchanged.
+ */
+export const WALLET_VAULT_FORMAT_V2 = "web2-ish-self-custody-wallet-vault-v2";
+export const MAX_RECOVERY_CODES = 10;
+export const DEFAULT_RECOVERY_CODE_COUNT = 5;
+const AAD_DOMAIN_V2 = "web2-ish-self-custody wallet vault aad v2";
+const RECOVERY_SLOT_AAD = "recovery slot";
+const RECOVERY_INFO_V2 = "web2-ish-self-custody wallet vault recovery key v2";
+
 const SEED_BYTES = 32;
 const DATA_KEY_BYTES = 32;
 const SALT_BYTES = 32;
@@ -77,6 +90,23 @@ export type WalletVault = Readonly<{
   /** The data key, under a key derived from the recovery code. */
   recovery: Readonly<{ saltHex: string }> & SealedBox;
 }>;
+
+/**
+ * One recovery code's wrapper of the data key. `hint` is the code's first
+ * group, public so a person can tell their codes apart and retire one.
+ */
+export type RecoverySlot = Readonly<{ hint: string; saltHex: string }> & SealedBox;
+
+export type WalletVaultV2 = Readonly<
+  Omit<WalletVault, "format" | "version" | "recovery"> & {
+    format: typeof WALLET_VAULT_FORMAT_V2;
+    version: 2;
+    /** The data key, once per recovery code: 1 to MAX_RECOVERY_CODES slots. */
+    recovery: readonly RecoverySlot[];
+  }
+>;
+
+export type AnyWalletVault = WalletVault | WalletVaultV2;
 
 function randomBytes(length: number): Uint8Array {
   const bytes = new Uint8Array(length);
@@ -131,6 +161,42 @@ export function normalizeRecoveryCode(code: string): string {
   return normalized;
 }
 
+/** The public first group of a code: what a v2 slot is labelled with. */
+export function recoveryCodeHint(code: string): string {
+  const normalized = normalizeRecoveryCode(code);
+  if (normalized.length < RECOVERY_GROUP) {
+    throw new DerivationError("The recovery code is too short.", "invalid-recovery-code");
+  }
+  return normalized.slice(0, RECOVERY_GROUP);
+}
+
+function assertRecoveryCodeCount(count: number): number {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_RECOVERY_CODES) {
+    throw new DerivationError(
+      `A vault holds between 1 and ${MAX_RECOVERY_CODES} recovery codes.`,
+      "invalid-recovery-code",
+    );
+  }
+  return count;
+}
+
+/** A set of codes for one v2 vault. Hints are distinct, so each code names one slot. */
+export function generateRecoveryCodes(count: number = DEFAULT_RECOVERY_CODE_COUNT): string[] {
+  assertRecoveryCodeCount(count);
+  const codes = new Map<string, string>();
+  while (codes.size < count) {
+    const code = generateRecoveryCode();
+    const hint = recoveryCodeHint(code);
+    if (!codes.has(hint)) codes.set(hint, code);
+  }
+  return [...codes.values()];
+}
+
+/** The hints of a vault's recovery codes. A v1 vault has one unlabelled code, so none. */
+export function recoveryCodeHints(vault: AnyWalletVault): string[] {
+  return vault.version === 2 ? vault.recovery.map((slot) => slot.hint) : [];
+}
+
 function recoveryCodeBytes(code: string): Uint8Array {
   const normalized = normalizeRecoveryCode(code);
   const bytes: number[] = [];
@@ -154,10 +220,10 @@ function recoveryCodeBytes(code: string): Uint8Array {
  * the address, the profile, or the codec and every open fails, rather than
  * silently yielding a wallet that is not the one the envelope claims.
  */
-function additionalData(header: Omit<WalletVault, "seed" | "password" | "recovery">): Uint8Array {
+function additionalData(header: AnyVaultHeader): Uint8Array {
   return new TextEncoder().encode(
     [
-      AAD_DOMAIN,
+      header.version === 2 ? AAD_DOMAIN_V2 : AAD_DOMAIN,
       header.format,
       String(header.version),
       header.profileId,
@@ -169,6 +235,16 @@ function additionalData(header: Omit<WalletVault, "seed" | "password" | "recover
       header.publicKey,
     ].join("\n"),
   );
+}
+
+/** A slot's own AAD: the header plus its hint, so a slot cannot be relabelled or moved. */
+function slotAdditionalData(header: VaultHeaderV2, hint: string): Uint8Array {
+  const base = additionalData(header);
+  const suffix = new TextEncoder().encode(`\n${RECOVERY_SLOT_AAD}\n${hint}`);
+  const aad = new Uint8Array(base.byteLength + suffix.byteLength);
+  aad.set(base);
+  aad.set(suffix, base.byteLength);
+  return aad;
 }
 
 async function aesKey(raw: Uint8Array, usage: KeyUsage): Promise<CryptoKey> {
@@ -216,7 +292,11 @@ async function open(
   }
 }
 
-async function recoveryKey(code: string, salt: Uint8Array): Promise<Uint8Array> {
+async function recoveryKey(
+  code: string,
+  salt: Uint8Array,
+  info: string = RECOVERY_INFO,
+): Promise<Uint8Array> {
   const ikm = recoveryCodeBytes(code);
   try {
     const material = await globalThis.crypto.subtle.importKey(
@@ -232,7 +312,7 @@ async function recoveryKey(code: string, salt: Uint8Array): Promise<Uint8Array> 
           name: "HKDF",
           hash: "SHA-256",
           salt: salt as BufferSource,
-          info: new TextEncoder().encode(RECOVERY_INFO) as BufferSource,
+          info: new TextEncoder().encode(info) as BufferSource,
         },
         material,
         DATA_KEY_BYTES * 8,
@@ -282,6 +362,8 @@ async function passwordKey(
 }
 
 type VaultHeader = Omit<WalletVault, "seed" | "password" | "recovery">;
+type VaultHeaderV2 = Omit<WalletVaultV2, "seed" | "password" | "recovery">;
+type AnyVaultHeader = VaultHeader | VaultHeaderV2;
 
 /**
  * Seals a seed into a vault from an already-decided header.
@@ -327,6 +409,74 @@ async function sealVault(params: {
   }
 }
 
+async function sealPassword(
+  dataKey: Uint8Array,
+  password: Uint8Array,
+  kdf: WalletVault["password"]["kdf"],
+  aad: Uint8Array,
+): Promise<WalletVault["password"]> {
+  const salt = randomBytes(SALT_BYTES);
+  const key = await passwordKey(password, salt, kdf);
+  try {
+    return Object.freeze({
+      kdf: Object.freeze({ ...kdf }),
+      saltHex: bytesToHex(salt),
+      ...(await seal(key, dataKey, aad)),
+    });
+  } finally {
+    key.fill(0);
+  }
+}
+
+/** One slot per code, each under its own salt, all wrapping the same data key. */
+async function sealRecoverySlots(
+  dataKey: Uint8Array,
+  header: VaultHeaderV2,
+  recoveryCodes: readonly string[],
+): Promise<readonly RecoverySlot[]> {
+  const slots: RecoverySlot[] = [];
+  for (const code of recoveryCodes) {
+    const hint = recoveryCodeHint(code);
+    const salt = randomBytes(SALT_BYTES);
+    const key = await recoveryKey(code, salt, RECOVERY_INFO_V2);
+    try {
+      slots.push(
+        Object.freeze({
+          hint,
+          saltHex: bytesToHex(salt),
+          ...(await seal(key, dataKey, slotAdditionalData(header, hint))),
+        }),
+      );
+    } finally {
+      key.fill(0);
+    }
+  }
+  return Object.freeze(slots);
+}
+
+async function sealVaultV2(params: {
+  header: VaultHeaderV2;
+  kdf: WalletVault["password"]["kdf"];
+  seed: Uint8Array;
+  password: Uint8Array;
+  recoveryCodeCount: number;
+}): Promise<{ vault: WalletVaultV2; recoveryCodes: string[] }> {
+  const recoveryCodes = generateRecoveryCodes(params.recoveryCodeCount);
+  const aad = additionalData(params.header);
+  const dataKey = randomBytes(DATA_KEY_BYTES);
+  try {
+    const vault: WalletVaultV2 = Object.freeze({
+      ...params.header,
+      seed: await seal(dataKey, params.seed, aad),
+      password: await sealPassword(dataKey, params.password, params.kdf, aad),
+      recovery: await sealRecoverySlots(dataKey, params.header, recoveryCodes),
+    });
+    return { vault, recoveryCodes };
+  } finally {
+    dataKey.fill(0);
+  }
+}
+
 function scopedWallet(seed: Uint8Array, identity: DerivedIdentity): {
   wallet: DerivedWallet;
   close: () => void;
@@ -367,9 +517,11 @@ export type CreateWalletVaultOptions = Readonly<{
   recoveryCode?: string;
 }>;
 
-export async function createWalletVault(
-  options: CreateWalletVaultOptions,
-): Promise<{ vault: WalletVault; recoveryCode: string }> {
+/** The validation and identity fields both formats share; the caller owns and zeroes `seed`. */
+function newVaultIdentity(options: Omit<CreateWalletVaultOptions, "recoveryCode">): {
+  seed: Uint8Array;
+  identity: Omit<VaultHeader, "format" | "version">;
+} {
   if (!(options.seed instanceof Uint8Array) || options.seed.byteLength !== SEED_BYTES) {
     throw new DerivationError("A wallet seed must contain exactly 32 bytes.", "invalid-seed");
   }
@@ -377,31 +529,67 @@ export async function createWalletVault(
   const normalizedUsername = normalizeUsername(options.username);
   const applicationId = options.context.applicationId.trim().toLowerCase();
   const networkId = options.context.networkId.trim().toLowerCase();
-  const recoveryCode = options.recoveryCode ?? generateRecoveryCode();
 
   const seed = Uint8Array.from(options.seed);
   try {
     const publicKeyBytes = ed25519.getPublicKey(seed);
-    const header: VaultHeader = {
-      format: WALLET_VAULT_FORMAT,
-      version: 1,
-      profileId: options.profile.id,
-      codecId: options.profile.codec.id,
-      applicationId,
-      networkId,
-      normalizedUsername,
-      address: options.profile.codec.encodeAddress(publicKeyBytes),
-      publicKey: options.profile.codec.encodePublicKey(publicKeyBytes),
+    return {
+      seed,
+      identity: {
+        profileId: options.profile.id,
+        codecId: options.profile.codec.id,
+        applicationId,
+        networkId,
+        normalizedUsername,
+        address: options.profile.codec.encodeAddress(publicKeyBytes),
+        publicKey: options.profile.codec.encodePublicKey(publicKeyBytes),
+      },
     };
+  } catch (error) {
+    seed.fill(0);
+    throw error;
+  }
+}
 
+export async function createWalletVault(
+  options: CreateWalletVaultOptions,
+): Promise<{ vault: WalletVault; recoveryCode: string }> {
+  const { seed, identity } = newVaultIdentity(options);
+  try {
+    const recoveryCode = options.recoveryCode ?? generateRecoveryCode();
     const vault = await sealVault({
-      header,
+      header: { format: WALLET_VAULT_FORMAT, version: 1, ...identity },
       kdf: options.profile.kdf,
       seed,
       password: options.password,
       recoveryCode,
     });
     return { vault, recoveryCode };
+  } finally {
+    seed.fill(0);
+  }
+}
+
+/**
+ * Seals a seed into a v2 vault with a set of recovery codes.
+ *
+ * Every code opens the wallet and none is spent by use: they are spare keys to
+ * keep in separate places, not one-time codes. Show them once.
+ */
+export async function createWalletVaultWithRecoveryCodes(
+  options: Omit<CreateWalletVaultOptions, "recoveryCode"> &
+    Readonly<{ recoveryCodeCount?: number }>,
+): Promise<{ vault: WalletVaultV2; recoveryCodes: string[] }> {
+  const count = assertRecoveryCodeCount(options.recoveryCodeCount ?? DEFAULT_RECOVERY_CODE_COUNT);
+  const { seed, identity } = newVaultIdentity(options);
+  try {
+    return await sealVaultV2({
+      header: { format: WALLET_VAULT_FORMAT_V2, version: 2, ...identity },
+      kdf: options.profile.kdf,
+      seed,
+      password: options.password,
+      recoveryCodeCount: count,
+    });
   } finally {
     seed.fill(0);
   }
@@ -434,10 +622,9 @@ export async function createWalletVaultFromCredentials(
   }
 }
 
-async function openDataKey(
-  vault: WalletVault,
-  unlock: { password: Uint8Array } | { recoveryCode: string },
-): Promise<Uint8Array> {
+type VaultUnlock = { password: Uint8Array } | { recoveryCode: string };
+
+async function openDataKey(vault: AnyWalletVault, unlock: VaultUnlock): Promise<Uint8Array> {
   const aad = additionalData(vault);
   if ("password" in unlock) {
     const key = await passwordKey(unlock.password, hexToBytes(vault.password.saltHex), vault.password.kdf);
@@ -445,6 +632,27 @@ async function openDataKey(
       return await open(key, vault.password, aad, "The vault password is incorrect.");
     } finally {
       key.fill(0);
+    }
+  }
+  if (vault.version === 2) {
+    const { seed: _seed, password: _password, recovery, ...header } = vault;
+    const hint = recoveryCodeHint(unlock.recoveryCode);
+    const slot = recovery.find((candidate) => candidate.hint === hint);
+    if (slot === undefined) {
+      // Hints are public in the envelope, so answering "no such slot" early
+      // tells a holder of the vault nothing; the error still matches a wrong code.
+      throw new DerivationError("The recovery code is incorrect.", "vault-authentication-failed");
+    }
+    const slotKey = await recoveryKey(unlock.recoveryCode, hexToBytes(slot.saltHex), RECOVERY_INFO_V2);
+    try {
+      return await open(
+        slotKey,
+        slot,
+        slotAdditionalData(header, hint),
+        "The recovery code is incorrect.",
+      );
+    } finally {
+      slotKey.fill(0);
     }
   }
   const key = await recoveryKey(unlock.recoveryCode, hexToBytes(vault.recovery.saltHex));
@@ -456,8 +664,8 @@ async function openDataKey(
 }
 
 async function withVaultSeed<T>(
-  vault: WalletVault,
-  unlock: { password: Uint8Array } | { recoveryCode: string },
+  vault: AnyWalletVault,
+  unlock: VaultUnlock,
   codec: IdentityCodec,
   useWallet: (wallet: DerivedWallet) => T,
 ): Promise<T> {
@@ -517,7 +725,7 @@ async function withVaultSeed<T>(
 }
 
 export function openWalletVaultWithPassword<T>(
-  vault: WalletVault,
+  vault: AnyWalletVault,
   password: Uint8Array,
   codec: IdentityCodec,
   useWallet: (wallet: DerivedWallet) => T,
@@ -526,7 +734,7 @@ export function openWalletVaultWithPassword<T>(
 }
 
 export function openWalletVaultWithRecoveryCode<T>(
-  vault: WalletVault,
+  vault: AnyWalletVault,
   recoveryCode: string,
   codec: IdentityCodec,
   useWallet: (wallet: DerivedWallet) => T,
@@ -549,7 +757,7 @@ export async function rewrapWalletVaultPassword(
   newPassword: Uint8Array,
   recoveryCode: string,
 ): Promise<WalletVault> {
-  const parsed = parseWalletVault(vault);
+  const parsed = parseWalletVaultV1(vault);
   assertWalletPassword(newPassword);
   let dataKey: Uint8Array | undefined;
   let seed: Uint8Array | undefined;
@@ -570,6 +778,119 @@ export async function rewrapWalletVaultPassword(
   } finally {
     dataKey?.fill(0);
     seed?.fill(0);
+  }
+}
+
+/**
+ * Moves a vault onto a fresh set of recovery codes, sealed from scratch as v2.
+ *
+ * This is the path from v1 to v2, and the path for someone who forgot the
+ * password but holds a code: `unlock` opens the vault, `password` is what the
+ * result opens with. The seed and address are unchanged; the data key is new,
+ * so no earlier code opens the returned vault.
+ */
+export async function upgradeWalletVaultRecoveryCodes(
+  vault: AnyWalletVault,
+  unlock: VaultUnlock,
+  password: Uint8Array,
+  recoveryCodeCount: number = DEFAULT_RECOVERY_CODE_COUNT,
+): Promise<{ vault: WalletVaultV2; recoveryCodes: string[] }> {
+  const parsed = parseWalletVault(vault);
+  assertWalletPassword(password);
+  const count = assertRecoveryCodeCount(recoveryCodeCount);
+  let dataKey: Uint8Array | undefined;
+  let seed: Uint8Array | undefined;
+  try {
+    dataKey = await openDataKey(parsed, unlock);
+    seed = await open(dataKey, parsed.seed, additionalData(parsed), "The vault is unreadable.");
+    const {
+      seed: _seed,
+      password: _password,
+      recovery: _recovery,
+      format: _format,
+      version: _version,
+      ...identity
+    } = parsed;
+    return await sealVaultV2({
+      header: { format: WALLET_VAULT_FORMAT_V2, version: 2, ...identity },
+      kdf: parsed.password.kdf,
+      seed,
+      password,
+      recoveryCodeCount: count,
+    });
+  } finally {
+    dataKey?.fill(0);
+    seed?.fill(0);
+  }
+}
+
+/**
+ * Replaces every recovery code of a v2 vault with a fresh set.
+ *
+ * The data key, the sealed seed and the password wrapper are kept, so the
+ * password is neither needed nor changed: any current code is enough.
+ */
+export async function replaceWalletVaultRecoveryCodes(
+  vault: WalletVaultV2,
+  unlock: VaultUnlock,
+  recoveryCodeCount: number = DEFAULT_RECOVERY_CODE_COUNT,
+): Promise<{ vault: WalletVaultV2; recoveryCodes: string[] }> {
+  const parsed = parseWalletVaultV2(vault);
+  const recoveryCodes = generateRecoveryCodes(recoveryCodeCount);
+  let dataKey: Uint8Array | undefined;
+  try {
+    dataKey = await openDataKey(parsed, unlock);
+    const { seed: _seed, password: _password, recovery: _recovery, ...header } = parsed;
+    const recovery = await sealRecoverySlots(dataKey, header, recoveryCodes);
+    return { vault: Object.freeze({ ...parsed, recovery }), recoveryCodes };
+  } finally {
+    dataKey?.fill(0);
+  }
+}
+
+/**
+ * Retires one recovery code by its hint. No secret is involved: the slot is
+ * dropped from this envelope. A copy of the vault kept from before still opens
+ * with the retired code, so a platform must also stop serving the old copy.
+ */
+export function removeWalletVaultRecoveryCode(vault: WalletVaultV2, hint: string): WalletVaultV2 {
+  const parsed = parseWalletVaultV2(vault);
+  const recovery = parsed.recovery.filter((slot) => slot.hint !== hint);
+  if (recovery.length === parsed.recovery.length) {
+    throw new DerivationError("This vault has no recovery code with that hint.", "invalid-recovery-code");
+  }
+  if (recovery.length === 0) {
+    throw new DerivationError(
+      "A vault must keep at least one recovery code. Replace the set instead.",
+      "invalid-recovery-code",
+    );
+  }
+  return Object.freeze({ ...parsed, recovery: Object.freeze(recovery) });
+}
+
+/**
+ * Re-wraps a v2 vault's data key under a new password. The data key, the
+ * sealed seed and every recovery slot are kept, so all codes keep working.
+ */
+export async function rewrapWalletVaultPasswordV2(
+  vault: WalletVaultV2,
+  unlock: VaultUnlock,
+  newPassword: Uint8Array,
+): Promise<WalletVaultV2> {
+  const parsed = parseWalletVaultV2(vault);
+  assertWalletPassword(newPassword);
+  let dataKey: Uint8Array | undefined;
+  try {
+    dataKey = await openDataKey(parsed, unlock);
+    const password = await sealPassword(
+      dataKey,
+      newPassword,
+      parsed.password.kdf,
+      additionalData(parsed),
+    );
+    return Object.freeze({ ...parsed, password });
+  } finally {
+    dataKey?.fill(0);
   }
 }
 
@@ -604,25 +925,25 @@ function requireText(value: unknown, field: string): string {
   return value;
 }
 
-/** Strict parse, so a vault from storage is validated before any key work. */
-export function parseWalletVault(value: unknown): WalletVault {
+function requireRecord(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DerivationError(`Vault field "${field}" is malformed.`, "invalid-vault");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireVaultObject(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null) {
     throw new DerivationError("A wallet vault must be an object.", "invalid-vault");
   }
-  const vault = value as Record<string, unknown>;
-  if (vault["format"] !== WALLET_VAULT_FORMAT || vault["version"] !== 1) {
-    throw new DerivationError("Unsupported wallet vault format.", "invalid-vault");
-  }
-  const password = vault["password"];
-  const recovery = vault["recovery"];
-  if (typeof password !== "object" || password === null) {
-    throw new DerivationError('Vault field "password" is malformed.', "invalid-vault");
-  }
-  if (typeof recovery !== "object" || recovery === null) {
-    throw new DerivationError('Vault field "recovery" is malformed.', "invalid-vault");
-  }
-  const passwordRecord = password as Record<string, unknown>;
-  const recoveryRecord = recovery as Record<string, unknown>;
+  return value as Record<string, unknown>;
+}
+
+/** The members both formats share, read after the format-specific checks. */
+function parseSharedMembers(
+  vault: Record<string, unknown>,
+  passwordRecord: Record<string, unknown>,
+): Omit<WalletVault, "format" | "version" | "recovery"> {
   const kdf = passwordRecord["kdf"] as Record<string, unknown> | undefined;
   if (
     typeof kdf !== "object" ||
@@ -635,9 +956,7 @@ export function parseWalletVault(value: unknown): WalletVault {
     throw new DerivationError('Vault field "password.kdf" is malformed.', "invalid-vault");
   }
 
-  return Object.freeze({
-    format: WALLET_VAULT_FORMAT,
-    version: 1,
+  return {
     profileId: requireText(vault["profileId"], "profileId"),
     codecId: requireText(vault["codecId"], "codecId"),
     applicationId: requireText(vault["applicationId"], "applicationId"),
@@ -656,9 +975,67 @@ export function parseWalletVault(value: unknown): WalletVault {
       saltHex: requireHex(passwordRecord["saltHex"], SALT_BYTES, "password.saltHex"),
       ...requireBox(passwordRecord, "password"),
     }),
+  };
+}
+
+/** Strict parse of the v1 envelope: one recovery wrapper. */
+export function parseWalletVaultV1(value: unknown): WalletVault {
+  const vault = requireVaultObject(value);
+  if (vault["format"] !== WALLET_VAULT_FORMAT || vault["version"] !== 1) {
+    throw new DerivationError("Unsupported wallet vault format.", "invalid-vault");
+  }
+  const passwordRecord = requireRecord(vault["password"], "password");
+  const recoveryRecord = requireRecord(vault["recovery"], "recovery");
+  return Object.freeze({
+    format: WALLET_VAULT_FORMAT,
+    version: 1,
+    ...parseSharedMembers(vault, passwordRecord),
     recovery: Object.freeze({
       saltHex: requireHex(recoveryRecord["saltHex"], SALT_BYTES, "recovery.saltHex"),
       ...requireBox(recoveryRecord, "recovery"),
     }),
   });
+}
+
+const RECOVERY_HINT = new RegExp(`^[${RECOVERY_ALPHABET}]{${RECOVERY_GROUP}}$`, "u");
+
+/** Strict parse of the v2 envelope: 1 to MAX_RECOVERY_CODES slots with distinct hints. */
+export function parseWalletVaultV2(value: unknown): WalletVaultV2 {
+  const vault = requireVaultObject(value);
+  if (vault["format"] !== WALLET_VAULT_FORMAT_V2 || vault["version"] !== 2) {
+    throw new DerivationError("Unsupported wallet vault format.", "invalid-vault");
+  }
+  const passwordRecord = requireRecord(vault["password"], "password");
+  const slots = vault["recovery"];
+  if (!Array.isArray(slots) || slots.length < 1 || slots.length > MAX_RECOVERY_CODES) {
+    throw new DerivationError('Vault field "recovery" is malformed.', "invalid-vault");
+  }
+  const hints = new Set<string>();
+  const recovery = slots.map((value: unknown, index): RecoverySlot => {
+    const field = `recovery[${index}]`;
+    const slot = requireRecord(value, field);
+    const hint = slot["hint"];
+    if (typeof hint !== "string" || !RECOVERY_HINT.test(hint) || hints.has(hint)) {
+      throw new DerivationError(`Vault field "${field}.hint" is malformed.`, "invalid-vault");
+    }
+    hints.add(hint);
+    return Object.freeze({
+      hint,
+      saltHex: requireHex(slot["saltHex"], SALT_BYTES, `${field}.saltHex`),
+      ...requireBox(slot, field),
+    });
+  });
+  return Object.freeze({
+    format: WALLET_VAULT_FORMAT_V2,
+    version: 2,
+    ...parseSharedMembers(vault, passwordRecord),
+    recovery: Object.freeze(recovery),
+  });
+}
+
+/** Strict parse, so a vault from storage is validated before any key work. */
+export function parseWalletVault(value: unknown): AnyWalletVault {
+  return requireVaultObject(value)["version"] === 2
+    ? parseWalletVaultV2(value)
+    : parseWalletVaultV1(value);
 }

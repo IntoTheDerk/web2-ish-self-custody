@@ -142,7 +142,9 @@ Since v0.5.0 the package ships a wallet vault: the seed encrypted under a random
 data key, with that data key wrapped once under the vault password and once
 under a generated 256-bit recovery code. The format, the cryptography, and the
 limits are described in the
-[README](../README.md#wallet-vault-and-recovery-code). Two situations use it
+[README](../README.md#wallet-vault-and-recovery-code). Since v0.18.0 a vault
+can instead hold a set of recovery codes
+([v2](../README.md#several-recovery-codes-vault-v2)). Two situations use it
 differently.
 
 **Your application already generates a random seed.** Do not replace it with a

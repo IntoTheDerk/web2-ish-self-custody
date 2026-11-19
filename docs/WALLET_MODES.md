@@ -210,6 +210,22 @@ platform login or password reset cannot decrypt it. Rewrapping requires a
 recovery code to create the replacement recovery wrapper; a user who lost their
 code but knows the password can generate a new code with `generateRecoveryCode`.
 
+### A set of recovery codes
+
+`createRandomAccountWalletWithRecoveryCodes` seals the same random wallet in a
+v2 vault and returns a set of codes (5 by default, 10 at most) instead of one.
+Any code opens the wallet. With v2, `rewrapWalletVaultPasswordV2` changes the
+password and leaves every code working, `replaceWalletVaultRecoveryCodes`
+issues a fresh set from the password or any one code, and
+`removeWalletVaultRecoveryCode` retires a single code by its hint.
+`upgradeWalletVaultRecoveryCodes` moves a stored v1 vault onto a set. Each of
+these returns a new envelope to verify locally and upload with
+`PUT /identity/wallet-vault` exactly as above; the service accepts both formats.
+
+The codes are spare keys, not one-time codes, and an old copy of the vault
+still opens with a code retired later. See the
+[README](../README.md#several-recovery-codes-vault-v2).
+
 ## Mutable login names and a stable wallet
 
 For an account whose email, public username and password may change, prefer a

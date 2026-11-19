@@ -1,5 +1,5 @@
 import type { AccountWalletSetup } from "../accountWallet.js";
-import { parseWalletVault, type WalletVault } from "../vault.js";
+import { parseWalletVault, type AnyWalletVault } from "../vault.js";
 import type { WalletIdentityInput } from "./challenge.js";
 import { IdentityError } from "./errors.js";
 import { integerColumn, optionalRow, requireSingleRow, textColumn, type SqlDriver } from "./sql.js";
@@ -42,9 +42,9 @@ export function accountWalletOperations(sql: SqlDriver, config: ResolvedIdentity
     });
   };
 
-  const validateVault = (value: unknown, username: string, wallet: WalletIdentityInput): WalletVault => {
+  const validateVault = (value: unknown, username: string, wallet: WalletIdentityInput): AnyWalletVault => {
     requireVaultMode();
-    let vault: WalletVault;
+    let vault: AnyWalletVault;
     try { vault = parseWalletVault(value); } catch {
       throw new IdentityError("Invalid wallet vault.", "invalid-request");
     }
@@ -53,7 +53,7 @@ export function accountWalletOperations(sql: SqlDriver, config: ResolvedIdentity
         vault.normalizedUsername !== username || vault.address !== wallet.address || vault.publicKey !== wallet.publicKey ||
         vault.password.kdf.N !== config.profile.kdf.N || vault.password.kdf.r !== config.profile.kdf.r ||
         vault.password.kdf.p !== config.profile.kdf.p || vault.password.kdf.dkLen !== config.profile.kdf.dkLen ||
-        [vault.seed, vault.password, vault.recovery].some((box) => box.ciphertextHex.length !== 96)) {
+        [vault.seed, vault.password, ...(vault.version === 2 ? vault.recovery : [vault.recovery])].some((box) => box.ciphertextHex.length !== 96)) {
       throw new IdentityError("Vault does not match the enrolled identity and profile.", "wallet-mismatch");
     }
     return vault;
@@ -70,7 +70,7 @@ export function accountWalletOperations(sql: SqlDriver, config: ResolvedIdentity
     return Object.freeze({ vault: parseWalletVault(row["vault"]), revision: integerColumn(row, "vault_revision") });
   };
 
-  const updateVault = async (token: string, value: WalletVault, revision: number, now: string | null): Promise<StoredWalletVault> => {
+  const updateVault = async (token: string, value: AnyWalletVault, revision: number, now: string | null): Promise<StoredWalletVault> => {
     requireVaultMode();
     await checkPolicy();
     if (!Number.isSafeInteger(revision) || revision < 1 || revision >= 2_147_483_647) {
