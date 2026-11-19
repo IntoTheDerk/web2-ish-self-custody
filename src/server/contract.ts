@@ -40,7 +40,7 @@ import type {
   StoredWalletVault,
   VerifiedReauthentication,
 } from "./types.js";
-import type { WalletVault } from "../vault.js";
+import type { AnyWalletVault } from "../vault.js";
 
 /**
  * A session, or, with the `secondFactor` option and an account that needs it,
@@ -119,7 +119,7 @@ export interface IdentityService<SecondFactor extends boolean = false> {
   getWalletVault(accountId: string, context?: RequestContext): Promise<StoredWalletVault>;
 
   /** Authenticated compare-and-swap: prevents overwriting a newer password change. */
-  updateWalletVault(token: string, vault: WalletVault, expectedRevision: number, context?: RequestContext): Promise<StoredWalletVault>;
+  updateWalletVault(token: string, vault: AnyWalletVault, expectedRevision: number, context?: RequestContext): Promise<StoredWalletVault>;
 
   /**
    * Issues a single-use challenge. Returns a challenge for unknown usernames

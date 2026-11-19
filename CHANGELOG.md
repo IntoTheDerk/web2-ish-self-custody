@@ -5,6 +5,49 @@ published to npm, and consumers pin a reviewed commit SHA (see the
 [README](README.md#install)). Entries are drawn from the annotated tag messages
 and the commit history.
 
+## v0.18.0-alpha.0 — unpublished candidate
+
+Several recovery codes per wallet vault (additive). A new v2 envelope,
+`web2-ish-self-custody-wallet-vault-v2`, holds 1 to 10 recovery slots over the
+same data key instead of v1's single recovery wrapper. v1 is unchanged: what
+its functions produce and accept is the same, and no existing vector moves.
+
+- New: `createWalletVaultWithRecoveryCodes`,
+  `createRandomAccountWalletWithRecoveryCodes`,
+  `upgradeWalletVaultRecoveryCodes`, `replaceWalletVaultRecoveryCodes`,
+  `removeWalletVaultRecoveryCode`, `rewrapWalletVaultPasswordV2`,
+  `generateRecoveryCodes`, `recoveryCodeHint`, `recoveryCodeHints`,
+  `parseWalletVaultV1`, `parseWalletVaultV2`, `WALLET_VAULT_FORMAT_V2`,
+  `MAX_RECOVERY_CODES`, `DEFAULT_RECOVERY_CODE_COUNT`, and the types
+  `WalletVaultV2`, `AnyWalletVault`, `RecoverySlot`.
+- `openWalletVaultWithPassword`, `openWalletVaultWithRecoveryCode` and
+  `parseWalletVault` accept both formats. `parseWalletVault` now returns
+  `AnyWalletVault`; a caller that needs v1 only uses `parseWalletVaultV1`.
+- v2 keeps its data key across changes, so a password change leaves every code
+  working and the set can be replaced with any one code. Each slot stores its
+  code's first four characters as a public hint and authenticates it.
+- The identity service stores and serves either format in `random-vault` mode.
+  No migration: the vault column is JSON.
+- The codes are spare keys, not one-time codes, and an older copy of a vault
+  still opens with a code retired later. See SECURITY.md and
+  docs/PROTOCOL.md#wallet-vault-envelope-v2.
+
+## v0.17.1-alpha.0 — unpublished patch candidate
+
+- Refresh Vitest to 4.1.12 and its locked development dependencies to resolve
+  current tooling advisories; production dependencies remain unchanged.
+
+- Allow the optional `kalvora.js` peer at exactly `0.0.1-alpha.3`, retaining
+  alpha.1 and alpha.2 compatibility. Pin development verification to reviewed
+  commit `f0be43698ec097db6e9005cb33a6b8e388818019`.
+- Verify unchanged Kalvora wallet identities, addresses, signatures, SLIP-0010
+  path and bounded signer lifetime against the existing tests and independent
+  Python vectors. This is compatibility metadata, not a wallet migration:
+  no profile IDs, transcripts, codecs, derivation, vectors or migrations change.
+- The alpha.3 transaction protocol requires its own trusted chain configuration;
+  accepting its wallet peer does not establish network readiness or authorize
+  live broadcasts. Neither candidate is published by this change.
+
 ## v0.17.0-alpha.0 — 2026-10-31 (alpha pre-release)
 
 Sign-in key binding time (additive). New column
